@@ -1,0 +1,103 @@
+"""Case Type API router.
+
+Handles deployment, listing, and removal of case type definitions.
+
+Copyright (c) 2024-2025 HELIX Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from case_service.api.schemas.cases import (
+    CaseTypeCreate,
+    CaseTypeListResponse,
+    CaseTypeResponse,
+)
+from case_service.db import repository as repo
+from case_service.db.session import get_session
+
+router = APIRouter(prefix="/case-types", tags=["case-types"])
+
+
+@router.post("", response_model=CaseTypeResponse, status_code=201)
+async def deploy_case_type(
+    body: CaseTypeCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Deploy (register) a new case type definition."""
+    existing = await repo.get_case_type_by_name(
+        session, body.name, body.version
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Case type '{body.name}' v{body.version} already exists",
+        )
+
+    ct = await repo.create_case_type(
+        session,
+        data={
+            "name": body.name,
+            "version": body.version,
+            "lifecycle_process_id": body.lifecycle_process_id,
+            "data_model_id": body.data_model_id,
+            "security_profile_id": body.security_profile_id,
+            "default_priority": body.default_priority,
+            "definition_json": body.definition_json,
+            "icon": body.icon,
+            "color": body.color,
+            "description": body.description,
+            "tags": body.tags,
+        },
+    )
+
+    # TODO: deploy the lifecycle BPMN process to the engine via
+    # POST {engine_api_url}/api/v1/processes/deploy
+
+    return ct
+
+
+@router.get("", response_model=CaseTypeListResponse)
+async def list_case_types(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    items, total = await repo.list_case_types(
+        session,
+        offset=(page - 1) * page_size,
+        limit=page_size,
+    )
+    return CaseTypeListResponse(
+        items=items, total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/{case_type_id}", response_model=CaseTypeResponse)
+async def get_case_type(
+    case_type_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    ct = await repo.get_case_type(session, case_type_id)
+    if ct is None:
+        raise HTTPException(
+            status_code=404, detail="Case type not found"
+        )
+    return ct
+
+
+@router.delete("/{case_type_id}", status_code=204)
+async def delete_case_type(
+    case_type_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    """Undeploy a case type.  Does not delete existing case instances."""
+    deleted = await repo.delete_case_type(session, case_type_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail="Case type not found"
+        )

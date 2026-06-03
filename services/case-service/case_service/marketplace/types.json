@@ -1,0 +1,66 @@
+{
+  "schema_version": "1",
+  "description": "Authoritative package type registry for the Velaris Marketplace. Part of the Velaris platform — versioned with each release. To add a new type, update this file and ship in the next release.",
+  "updated_at": "2026-06-01",
+  "categories": [
+    {
+      "label": "Integration",
+      "types": [
+        { "id": "connector",        "label": "Connector",         "color": "#3b82f6", "description": "Integration with an external API or third-party service" },
+        { "id": "integration_pack", "label": "Integration Pack",  "color": "#2563eb", "description": "Collection of related connectors shipped as one package" },
+        { "id": "webhook_handler",  "label": "Webhook Handler",   "color": "#1d4ed8", "description": "Inbound webhook receiver that routes events to cases" }
+      ]
+    },
+    {
+      "label": "Case & Workflow",
+      "types": [
+        { "id": "case_template",    "label": "Case Template",     "color": "#22c55e", "description": "Pre-built case type with stages, steps, forms, and SLA config" },
+        { "id": "workflow",         "label": "Workflow",          "color": "#16a34a", "description": "BPMN 2.0 process definition for HxFusion" },
+        { "id": "escalation_tree",  "label": "Escalation Tree",   "color": "#15803d", "description": "Pre-configured SLA escalation policy tree" },
+        { "id": "automation_rule",  "label": "Automation Rule",   "color": "#166534", "description": "Business rule set (routing, conditions, decision tables)" }
+      ]
+    },
+    {
+      "label": "Forms & Documents",
+      "types": [
+        { "id": "form_template",       "label": "Form Template",       "color": "#f59e0b", "description": "Reusable form definition with fields, validation, and logic" },
+        { "id": "document_template",   "label": "Document Template",   "color": "#d97706", "description": "PDF/Word document template for case output generation" },
+        { "id": "notification_template","label": "Notification Template","color": "#b45309", "description": "Email, SMS, or push notification template" }
+      ]
+    },
+    {
+      "label": "Analytics & Reporting",
+      "types": [
+        { "id": "report_template",  "label": "Report Template",   "color": "#8b5cf6", "description": "Pre-built HxAnalytics report or dashboard definition" },
+        { "id": "dashboard",        "label": "Dashboard",         "color": "#7c3aed", "description": "Custom analytics dashboard layout with widgets" },
+        { "id": "process_mining",   "label": "Process Mining Pack","color": "#6d28d9", "description": "Pre-configured process mining analysis for a case type" }
+      ]
+    },
+    {
+      "label": "Configuration",
+      "types": [
+        { "id": "data_model",       "label": "Data Model",        "color": "#0d9488", "description": "Case data schema definition and field structure" },
+        { "id": "sla_policy",       "label": "SLA Policy",        "color": "#0f766e", "description": "Service level agreement policy template" },
+        { "id": "access_role",      "label": "Access Role",       "color": "#115e59", "description": "Pre-configured access group role with privilege set" },
+        { "id": "sandbox_dataset",  "label": "Sandbox Dataset",   "color": "#134e4a", "description": "Synthetic test data set for marketplace sandbox environments" }
+      ]
+    },
+    {
+      "label": "AI & Intelligence",
+      "types": [
+        { "id": "nlp_pack",         "label": "NLP Pack",          "color": "#ec4899", "description": "Curated HxNexus prompt templates for a domain or use case" },
+        { "id": "ai_model_config",  "label": "AI Model Config",   "color": "#db2777", "description": "Pre-tuned AI backend configuration for a specific domain" },
+        { "id": "knowledge_base",   "label": "Knowledge Base",    "color": "#be185d", "description": "Pre-populated HxDocs articles and glossary for a domain" }
+      ]
+    },
+    {
+      "label": "Platform",
+      "types": [
+        { "id": "portal_theme",     "label": "Portal Theme",      "color": "#f97316", "description": "CSS and branding overrides for the Customer Portal" },
+        { "id": "module",           "label": "Studio Module",     "color": "#ea580c", "description": "New Studio sidebar module (feature flag enabled on install)" },
+        { "id": "migration_script", "label": "Migration Script",  "color": "#c2410c", "description": "HxMigrate-compatible import script for a legacy BPM platform" },
+        { "id": "bundle",           "label": "Bundle",            "color": "#9a3412", "description": "Multi-type package combining connectors, templates, and config" }
+      ]
+    }
+  ]
+}

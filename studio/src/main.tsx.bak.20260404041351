@@ -1,0 +1,26 @@
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+
+import AppLayout from "@/app/AppLayout";
+import Dashboard from "@modules/dashboard/Dashboard";
+import Modeler from "@modules/modeler/Modeler";
+import Monitor from "@modules/monitor/Monitor";
+
+import "@shared/styles/global.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <Routes>
+        <Route element={<AppLayout />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/modeler" element={<Modeler />} />
+          <Route path="/monitor" element={<Monitor />} />
+          <Route path="/monitor/:processId" element={<Monitor />} />
+          <Route path="/monitor/:processId/:instanceId" element={<Monitor />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  </React.StrictMode>
+);

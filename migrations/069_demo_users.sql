@@ -1,0 +1,7 @@
+-- 069: Demo users — default password: Demo@1234 (must change on first login)
+
+INSERT INTO helix_users (username, email, display_name, password_hash, roles, password_change_required) VALUES ('sarah.chen', 'sarah.chen@helix.local', 'Sarah Chen', '$2b$12$TW84SxM8GPvovKnzpOKZi.1GmQgbtfMBQnwAtvwjAHkbiWyZFKuuK', '["designer"]', TRUE) ON CONFLICT (username) DO NOTHING;
+INSERT INTO helix_users (username, email, display_name, password_hash, roles, password_change_required) VALUES ('james.miller', 'james.miller@helix.local', 'James Miller', '$2b$12$WzjMANmBdTyEkUeBvrjhCeHJacXWb3Z9uQtMLZLO.Ux0Y9uytLAxm', '["case_worker"]', TRUE) ON CONFLICT (username) DO NOTHING;
+INSERT INTO helix_users (username, email, display_name, password_hash, roles, password_change_required) VALUES ('priya.patel', 'priya.patel@helix.local', 'Priya Patel', '$2b$12$4W22nnb.lriwvfZ3Gf9I3e6.B8UibauPU.aG2oLL6uTWZ9yKO8tye', '["case_worker","manager"]', TRUE) ON CONFLICT (username) DO NOTHING;
+INSERT INTO helix_users (username, email, display_name, password_hash, roles, password_change_required) VALUES ('tom.walker', 'tom.walker@helix.local', 'Tom Walker', '$2b$12$2IQNBAhyrTXWkxTiDkfY5ux/7uSzi0HGCkNKWFQPQ6l.Ae5lHn8cq', '["viewer"]', TRUE) ON CONFLICT (username) DO NOTHING;
+INSERT INTO helix_users (username, email, display_name, password_hash, roles, password_change_required) VALUES ('david.kim', 'david.kim@helix.local', 'David Kim', '$2b$12$KaCr8zxRpexMXuTd8csccuvOVsrUP06fuSAlOO5h9KrB.lZE113Q2', '["case_worker","designer"]', TRUE) ON CONFLICT (username) DO NOTHING;

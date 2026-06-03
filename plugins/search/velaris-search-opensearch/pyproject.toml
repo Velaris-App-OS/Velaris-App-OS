@@ -1,0 +1,17 @@
+[project]
+name = "velaris-search-opensearch"
+version = "0.1.0"
+description = "Velaris search plugin: opensearch"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+dependencies = ["velaris-sdk"]
+
+[project.entry-points."helix.search"]
+opensearch = "helix_search_opensearch:OpensearchBackend"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["helix_search_opensearch"]

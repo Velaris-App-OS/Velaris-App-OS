@@ -1,0 +1,156 @@
+"""SLA API router.
+
+Read SLA status and pause/resume SLA clocks.
+
+Copyright (c) 2024-2025 HELIX Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from case_service.api.schemas.cases import SLAStatusResponse
+from case_service.db import repository as repo
+from case_service.db.models import CaseSLAInstanceModel
+from case_service.db.session import get_session
+
+router = APIRouter(tags=["sla"])
+
+
+@router.get(
+    "/cases/{case_id}/sla",
+    response_model=list[SLAStatusResponse],
+)
+async def get_case_sla_status(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return current SLA status for all policies on a case."""
+    case = await repo.get_case_instance(session, case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return await repo.get_sla_instances(session, case_id)
+
+
+@router.post(
+    "/cases/{case_id}/sla/{policy_id}/pause",
+    response_model=SLAStatusResponse,
+)
+async def pause_sla(
+    case_id: uuid.UUID,
+    policy_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Pause an SLA clock (e.g. when waiting on an external party)."""
+    sla = await _get_sla_or_404(session, case_id, policy_id)
+    if sla.status == "paused":
+        raise HTTPException(
+            status_code=409, detail="SLA is already paused"
+        )
+
+    now = datetime.now(timezone.utc)
+    await repo.update_sla_instance(
+        session,
+        sla.id,
+        values={"status": "paused", "paused_at": now},
+    )
+
+    await repo.append_audit_entry(
+        session,
+        data={
+            "case_id": case_id,
+            "action": "sla_paused",
+            "actor_type": "system",
+            "details": {"sla_policy_id": policy_id},
+        },
+    )
+
+    # TODO: signal SLATimerWorkflow.pause
+
+    return await _get_sla_by_id(session, sla.id)
+
+
+@router.post(
+    "/cases/{case_id}/sla/{policy_id}/resume",
+    response_model=SLAStatusResponse,
+)
+async def resume_sla(
+    case_id: uuid.UUID,
+    policy_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Resume a paused SLA clock."""
+    sla = await _get_sla_or_404(session, case_id, policy_id)
+    if sla.status != "paused":
+        raise HTTPException(
+            status_code=409, detail="SLA is not paused"
+        )
+
+    now = datetime.now(timezone.utc)
+    paused_seconds = 0
+    if sla.paused_at:
+        paused_seconds = int((now - sla.paused_at).total_seconds())
+
+    total_paused = sla.paused_duration_seconds + paused_seconds
+    await repo.update_sla_instance(
+        session,
+        sla.id,
+        values={
+            "status": "on_track",
+            "paused_at": None,
+            "paused_duration_seconds": total_paused,
+        },
+    )
+
+    await repo.append_audit_entry(
+        session,
+        data={
+            "case_id": case_id,
+            "action": "sla_resumed",
+            "actor_type": "system",
+            "details": {
+                "sla_policy_id": policy_id,
+                "paused_seconds": paused_seconds,
+            },
+        },
+    )
+
+    # TODO: signal SLATimerWorkflow.resume
+
+    return await _get_sla_by_id(session, sla.id)
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+
+
+async def _get_sla_or_404(
+    session: AsyncSession,
+    case_id: uuid.UUID,
+    policy_id: str,
+) -> CaseSLAInstanceModel:
+    stmt = select(CaseSLAInstanceModel).where(
+        CaseSLAInstanceModel.case_id == case_id,
+        CaseSLAInstanceModel.sla_policy_id == policy_id,
+    )
+    result = await session.execute(stmt)
+    sla = result.scalar_one_or_none()
+    if sla is None:
+        raise HTTPException(
+            status_code=404, detail="SLA instance not found"
+        )
+    return sla
+
+
+async def _get_sla_by_id(
+    session: AsyncSession, sla_id: uuid.UUID
+) -> CaseSLAInstanceModel:
+    stmt = select(CaseSLAInstanceModel).where(
+        CaseSLAInstanceModel.id == sla_id
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one()

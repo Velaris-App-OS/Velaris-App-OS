@@ -1,0 +1,394 @@
+import React, { useState } from "react";
+import { useApi } from "@shared/hooks";
+import {
+  listCaseTypes,
+  deployCaseType,
+  deleteCaseType,
+  listProcesses,
+} from "@shared/api/client";
+import {
+  Card,
+  Button,
+  StatusBadge,
+  Spinner,
+  EmptyState,
+  TimeAgo,
+  Stat,
+} from "@shared/components";
+import type { CaseTypeSummary, ProcessSummary } from "@shared/types";
+
+/* ═══════════════════════════════════════════════════════════════════
+   CaseDesigner — deploy, manage, and configure case types
+   ═══════════════════════════════════════════════════════════════════ */
+
+const PRIORITY_COLORS: Record<string, string> = {
+  low: "var(--text-muted)",
+  medium: "var(--text-secondary)",
+  high: "var(--status-running)",
+  critical: "var(--status-failed)",
+  blocker: "var(--status-failed)",
+};
+
+export default function CaseDesigner() {
+  const { data, loading, error, refetch } = useApi(listCaseTypes);
+  const [showCreate, setShowCreate] = useState(false);
+  const [selected, setSelected] = useState<CaseTypeSummary | null>(null);
+
+  const caseTypes = data?.items ?? [];
+  const total = data?.total ?? 0;
+
+  return (
+    <div style={{ padding: "var(--space-xl) var(--space-2xl)", maxWidth: 1200 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-xl)" }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--font-display)", fontSize: 28, fontWeight: 700, color: "var(--text-primary)" }}>
+            Case Designer
+          </h1>
+          <p style={{ color: "var(--text-secondary)", marginTop: 4, fontSize: 13 }}>
+            Define and deploy case types with stages, SLAs, and routing rules
+          </p>
+        </div>
+        <Button onClick={() => setShowCreate(true)}>+ New Case Type</Button>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--space-md)", marginBottom: "var(--space-xl)" }}>
+        <Card><Stat label="Case Types" value={total} /></Card>
+        <Card><Stat label="Active" value={caseTypes.length} /></Card>
+        <Card><Stat label="With SLAs" value={caseTypes.filter(ct => ct.description?.includes("SLA") || ct.tags?.includes("sla")).length} /></Card>
+      </div>
+
+      {/* Content */}
+      {loading && (
+        <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-2xl)" }}>
+          <Spinner size={28} />
+        </div>
+      )}
+
+      {error && (
+        <Card style={{ borderColor: "var(--status-failed)" }}>
+          <p style={{ color: "var(--status-failed)", fontSize: 13 }}>Failed to load case types: {error}</p>
+          <Button variant="secondary" size="sm" onClick={refetch} style={{ marginTop: "var(--space-sm)" }}>
+            Retry
+          </Button>
+        </Card>
+      )}
+
+      {!loading && !error && caseTypes.length === 0 && (
+        <EmptyState
+          title="No case types yet"
+          description="Create your first case type to start building case management workflows."
+          action={<Button onClick={() => setShowCreate(true)}>+ New Case Type</Button>}
+        />
+      )}
+
+      {!loading && !error && caseTypes.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340, 1fr))", gap: "var(--space-md)" }}>
+          {caseTypes.map((ct) => (
+            <CaseTypeCard key={ct.id} caseType={ct} onSelect={() => setSelected(ct)} onDelete={async () => {
+              if (confirm(`Delete case type "${ct.name}" v${ct.version}?`)) {
+                await deleteCaseType(ct.id);
+                refetch();
+              }
+            }} />
+          ))}
+        </div>
+      )}
+
+      {/* Create modal */}
+      {showCreate && (
+        <CreateCaseTypeModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refetch(); }} />
+      )}
+
+      {/* Detail panel */}
+      {selected && (
+        <CaseTypeDetailPanel caseType={selected} onClose={() => setSelected(null)} />
+      )}
+    </div>
+  );
+}
+
+/* ── Case Type Card ───────────────────────────────────────────── */
+
+function CaseTypeCard({ caseType, onSelect, onDelete }: {
+  caseType: CaseTypeSummary;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <Card onClick={onSelect} style={{ position: "relative" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {caseType.icon && <span style={{ fontSize: 20 }}>{caseType.icon}</span>}
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)" }}>{caseType.name}</div>
+            <div style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginTop: 2 }}>
+              v{caseType.version}
+            </div>
+          </div>
+        </div>
+        <span style={{
+          fontSize: 11, fontWeight: 500, color: PRIORITY_COLORS[caseType.default_priority] || "var(--text-muted)",
+          padding: "2px 8px", borderRadius: 100,
+          background: `color-mix(in srgb, ${PRIORITY_COLORS[caseType.default_priority] || "var(--text-muted)"} 12%, transparent)`,
+          textTransform: "uppercase", fontFamily: "var(--font-mono)",
+        }}>
+          {caseType.default_priority}
+        </span>
+      </div>
+
+      {caseType.description && (
+        <p style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: "var(--space-sm)", lineHeight: 1.5 }}>
+          {caseType.description.slice(0, 120)}{caseType.description.length > 120 ? "…" : ""}
+        </p>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "var(--space-md)" }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {(caseType.tags || []).slice(0, 3).map((tag) => (
+            <span key={tag} style={{
+              fontSize: 10, padding: "2px 6px", borderRadius: "var(--radius-sm)",
+              background: "var(--bg-elevated)", color: "var(--text-muted)", fontFamily: "var(--font-mono)",
+            }}>{tag}</span>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+          <TimeAgo date={caseType.created_at} />
+        </div>
+      </div>
+
+      {/* Delete button */}
+      <div style={{ position: "absolute", top: 12, right: 12, opacity: 0.5 }}
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+        onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.5")}
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M3 3l8 8M11 3l-8 8" stroke="var(--text-muted)" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      </div>
+    </Card>
+  );
+}
+
+/* ── Create Case Type Modal ───────────────────────────────────── */
+
+function CreateCaseTypeModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const { data: processData } = useApi(listProcesses);
+  const processes = processData?.processes ?? [];
+
+  const [name, setName] = useState("");
+  const [version, setVersion] = useState("1.0.0");
+  const [description, setDescription] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [processId, setProcessId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async () => {
+    if (!name || !processId) { setError("Name and lifecycle process are required"); return; }
+    setSubmitting(true);
+    setError("");
+    try {
+      await deployCaseType({
+        name,
+        version,
+        lifecycle_process_id: processId,
+        definition_json: { stages: [] },
+        default_priority: priority,
+        description,
+      });
+      onCreated();
+    } catch (e: any) {
+      setError(e?.message || String(e) || "Failed to create case type");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ width: 480 }}>
+        <h2 style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 600, color: "var(--text-primary)", marginBottom: "var(--space-lg)" }}>
+          New Case Type
+        </h2>
+
+        <FieldGroup label="Name">
+          <Input value={name} onChange={setName} placeholder="e.g. Insurance Claim" />
+        </FieldGroup>
+
+        <FieldGroup label="Version">
+          <Input value={version} onChange={setVersion} placeholder="1.0.0" />
+        </FieldGroup>
+
+        <FieldGroup label="Description">
+          <Input value={description} onChange={setDescription} placeholder="Brief description…" />
+        </FieldGroup>
+
+        <FieldGroup label="Default Priority">
+          <Select value={priority} onChange={setPriority} options={["low", "medium", "high", "critical", "blocker"]} />
+        </FieldGroup>
+
+        <FieldGroup label="Lifecycle Process">
+          <Select
+            value={processId}
+            onChange={setProcessId}
+            options={processes.map((p) => p.process_id)}
+            labels={processes.map((p) => p.name || p.process_id)}
+            placeholder="Select a deployed BPMN process…"
+          />
+        </FieldGroup>
+
+        {error && <p style={{ color: "var(--status-failed)", fontSize: 12, marginTop: "var(--space-sm)" }}>{error}</p>}
+
+        <div style={{ display: "flex", gap: "var(--space-sm)", justifyContent: "flex-end", marginTop: "var(--space-lg)" }}>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? "Creating…" : "Create Case Type"}</Button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ── Case Type Detail Panel ───────────────────────────────────── */
+
+function CaseTypeDetailPanel({ caseType, onClose }: { caseType: CaseTypeSummary; onClose: () => void }) {
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ width: 560 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "var(--space-lg)" }}>
+          <div>
+            <h2 style={{ fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 600, color: "var(--text-primary)" }}>
+              {caseType.name}
+            </h2>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>v{caseType.version}</span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose}>✕</Button>
+        </div>
+
+        {caseType.description && (
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: "var(--space-lg)", lineHeight: 1.6 }}>
+            {caseType.description}
+          </p>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-md)", marginBottom: "var(--space-lg)" }}>
+          <DetailRow label="Default Priority" value={caseType.default_priority} />
+          <DetailRow label="Process ID" value={caseType.lifecycle_process_id.slice(0, 8) + "…"} mono />
+          <DetailRow label="Data Model" value={caseType.data_model_id ? caseType.data_model_id.slice(0, 8) + "…" : "None"} mono />
+          <DetailRow label="Created" value={new Date(caseType.created_at).toLocaleDateString()} />
+        </div>
+
+        {caseType.tags?.length > 0 && (
+          <div style={{ marginBottom: "var(--space-lg)" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", marginBottom: "var(--space-xs)" }}>
+              Tags
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {caseType.tags.map((tag) => (
+                <span key={tag} style={{ fontSize: 11, padding: "3px 8px", borderRadius: "var(--radius-sm)", background: "var(--bg-elevated)", color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+          ID: {caseType.id}
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ── Shared UI Primitives ─────────────────────────────────────── */
+
+function Overlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "var(--bg-overlay)", display: "flex",
+        alignItems: "center", justifyContent: "center", zIndex: 100,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg-card)", border: "1px solid var(--border-default)",
+          borderRadius: "var(--radius-lg)", padding: "var(--space-xl)",
+          boxShadow: "var(--shadow-lg)", maxHeight: "85vh", overflow: "auto",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: "var(--space-md)" }}>
+      <label style={{ display: "block", fontSize: 11, fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)", marginBottom: "var(--space-xs)" }}>
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function Input({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        width: "100%", padding: "8px 12px", fontSize: 13, fontFamily: "var(--font-body)",
+        background: "var(--bg-input)", border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)", color: "var(--text-primary)", outline: "none",
+        boxSizing: "border-box",
+      }}
+      onFocus={(e) => (e.target.style.borderColor = "var(--border-focus)")}
+      onBlur={(e) => (e.target.style.borderColor = "var(--border-default)")}
+    />
+  );
+}
+
+function Select({ value, onChange, options, labels, placeholder }: {
+  value: string; onChange: (v: string) => void; options: string[];
+  labels?: string[]; placeholder?: string;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: "100%", padding: "8px 12px", fontSize: 13, fontFamily: "var(--font-body)",
+        background: "var(--bg-input)", border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-sm)", color: "var(--text-primary)", outline: "none",
+        boxSizing: "border-box",
+      }}
+    >
+      {placeholder && <option value="">{placeholder}</option>}
+      {options.map((opt, i) => (
+        <option key={opt} value={opt}>{labels?.[i] || opt}</option>
+      ))}
+    </select>
+  );
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text-primary)", marginTop: 2, fontFamily: mono ? "var(--font-mono)" : "var(--font-body)" }}>
+        {value}
+      </div>
+    </div>
+  );
+}

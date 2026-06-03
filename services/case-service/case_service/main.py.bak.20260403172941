@@ -1,0 +1,62 @@
+"""HELIX Case Service — FastAPI application.
+
+Copyright (c) 2024-2025 HELIX Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from case_service.api.routers import (
+    assignments,
+    case_types,
+    cases,
+    data_models,
+    forms,
+    my_work,
+    queues,
+    rules,
+    sla,
+)
+from case_service.config import get_settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown hooks."""
+    settings = get_settings()
+    # TODO: initialise Temporal client, run DB migrations
+    yield
+    # TODO: close Temporal client, close DB engine
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(
+        title="HELIX Case Service",
+        description="Case management API for the HELIX BPM platform",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    prefix = "/api/v1"
+    app.include_router(case_types.router, prefix=prefix)
+    app.include_router(cases.router, prefix=prefix)
+    app.include_router(assignments.router, prefix=prefix)
+    app.include_router(queues.router, prefix=prefix)
+    app.include_router(sla.router, prefix=prefix)
+    app.include_router(my_work.router, prefix=prefix)
+    app.include_router(rules.router, prefix=prefix)
+    app.include_router(forms.router, prefix=prefix)
+    app.include_router(data_models.router, prefix=prefix)
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "service": settings.service_name}
+
+    return app
+
+
+app = create_app()

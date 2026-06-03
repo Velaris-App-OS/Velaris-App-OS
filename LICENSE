@@ -1,0 +1,63 @@
+Business Source License 1.1
+
+Licensor:           Velaris Contributors
+Licensed Work:      Velaris Platform
+Change Date:        Four years from each release date
+Change License:     Apache License 2.0
+
+Additional Use Grant:
+You may use the Licensed Work for any purpose, including production use,
+EXCEPT for the following restricted uses:
+
+1. Offering the Licensed Work, or any substantial portion of it, as a
+   commercial BPM-as-a-Service, process automation platform, or low-code
+   platform that competes with the Licensed Work.
+
+2. Creating a product that provides substantially similar BPM, process
+   orchestration, or workflow automation functionality to the Licensed Work
+   and distributing it as a competing product.
+
+3. Removing or modifying the Licensor's branding, name, or copyright notices
+   to present the Licensed Work as your own independent product.
+
+4. Resale and Sublicensing Prohibition: You may not resell, sublicense,
+   transfer, or redistribute the Licensed Work (in whole or in part, modified
+   or unmodified) to any third party as a standalone commercial product or
+   platform. You may purchase, install, customise, and operate the Licensed
+   Work for your own internal business purposes, but the right to use the
+   software does not extend to reselling that right — or any derivative of
+   it — to others. This restriction does not prohibit:
+     (a) selling services, consulting, or support delivered using the software;
+     (b) selling applications, workflows, or case types you build on top of
+         the platform;
+     (c) selling plugins, connectors, adapters, or extensions that integrate
+         with the platform, provided they do not themselves constitute a
+         redistribution of the core Licensed Work.
+
+You ARE permitted to:
+- Use the Licensed Work internally for any business purpose
+- Build applications, workflows, case types, and automations on the platform
+- Create and sell plugins, connectors, adapters, and extensions
+- Offer consulting, implementation, configuration, and support services
+- Modify the source code for your own internal operational use
+- Use the Licensed Work for development, testing, and evaluation
+
+Terms:
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
+
+Notice:
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
+
+For licensing enquiries, commercial agreements, or OEM arrangements, contact:
+  hello@velaris.io

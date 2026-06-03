@@ -1,0 +1,83 @@
+"""Temporal activities for stage and step management.
+
+Copyright (c) 2024-2025 HELIX Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from temporalio import activity
+
+
+@activity.defn
+async def load_case_type_definition(
+    case_type_id: str,
+) -> dict[str, Any]:
+    """Load the full case type definition from the database.
+
+    Returns a dict with ``stages``, ``case_sla_policy_ids``, etc.
+    """
+    # TODO: wire to repository via a shared DB session or
+    # internal HTTP call to case-service API.
+    activity.logger.info(
+        "Loading case type definition: %s", case_type_id
+    )
+    # Stub — will be replaced with real DB lookup
+    return {"stages": [], "case_sla_policy_ids": []}
+
+
+@activity.defn
+async def update_case_status(case_id: str, status: str) -> None:
+    """Update the case instance status in the database."""
+    activity.logger.info(
+        "Updating case %s status to %s", case_id, status
+    )
+    # TODO: call repository.update_case_instance
+
+
+@activity.defn
+async def update_case_stage(case_id: str, stage_id: str) -> None:
+    """Update the case's current_stage_id."""
+    activity.logger.info(
+        "Case %s entering stage %s", case_id, stage_id
+    )
+    # TODO: call repository.update_case_instance
+
+
+@activity.defn
+async def create_stage_assignments(
+    case_id: str,
+    stage_id: str,
+    steps: list[dict[str, Any]],
+) -> list[str]:
+    """Create work-item assignments for each step in the stage.
+
+    Returns a list of created assignment IDs.
+    """
+    activity.logger.info(
+        "Creating %d assignments for case %s stage %s",
+        len(steps),
+        case_id,
+        stage_id,
+    )
+    # TODO: for each step, evaluate AssignmentRule and call
+    # repository.create_assignment
+    return []
+
+
+@activity.defn
+async def evaluate_exit_criteria(
+    case_id: str, stage_id: str
+) -> bool:
+    """Evaluate the stage's exit criteria rules.
+
+    Returns True if the stage can be exited.
+    """
+    activity.logger.info(
+        "Evaluating exit criteria for case %s stage %s",
+        case_id,
+        stage_id,
+    )
+    # TODO: call RulesEngine protocol to evaluate exit criteria
+    return True

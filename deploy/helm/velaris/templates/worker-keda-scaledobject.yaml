@@ -1,0 +1,24 @@
+{{- if and .Values.worker.enabled .Values.worker.keda.enabled }}
+# Requires KEDA installed in the cluster (kubectl apply -f https://github.com/kedacore/keda/releases/...).
+# Scales the Temporal worker based on queue depth.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "helix.workerName" . }}-scaler
+spec:
+  scaleTargetRef:
+    name: {{ include "helix.workerName" . }}
+  minReplicaCount: {{ .Values.worker.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.worker.keda.maxReplicaCount }}
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    # Option A — Temporal task-queue depth (requires temporal scaler in KEDA >= 2.14)
+    - type: temporal
+      metadata:
+        endpoint: {{ .Values.worker.temporalHost | quote }}
+        namespace: "default"
+        taskQueue: {{ .Values.worker.taskQueue | quote }}
+        queueTypes: "workflow,activity"
+        targetQueueSize: "{{ .Values.worker.keda.queueDepthThreshold }}"
+{{- end }}

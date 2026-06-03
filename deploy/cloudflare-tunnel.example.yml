@@ -1,0 +1,68 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Velaris — Cloudflare Tunnel Configuration Example
+#  One tunnel daemon, multiple services. No separate tunnels needed.
+#
+#  Setup:
+#    1. cloudflared tunnel create velaris
+#    2. Copy this file to ~/.cloudflared/config.yml
+#    3. Fill in your tunnel UUID and domain
+#    4. cloudflared tunnel route dns velaris velaris.io
+#    5. cloudflared tunnel route dns velaris app.velaris.io
+#    6. cloudflared tunnel route dns velaris api.velaris.io
+#    7. cloudflared tunnel route dns velaris register.velaris.io
+#    8. sudo systemctl enable --now cloudflared
+#
+#  Docs: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+# ═══════════════════════════════════════════════════════════════════
+
+tunnel: YOUR-TUNNEL-UUID-HERE
+credentials-file: /home/YOUR_USER/.cloudflared/YOUR-TUNNEL-UUID-HERE.json
+
+# ── Ingress rules (matched top to bottom) ────────────────────────
+ingress:
+
+  # Marketing + documentation website (static files)
+  # Serve with: python3 -m http.server 80 --directory /path/to/helix/website
+  # Or nginx — see deploy/nginx.example.conf
+  - hostname: velaris.io
+    service: http://localhost:80
+    originRequest:
+      connectTimeout: 10s
+
+  # Velaris Studio (Vite dev or production build)
+  - hostname: app.velaris.io
+    service: http://localhost:5173
+    originRequest:
+      connectTimeout: 10s
+
+  # Case Service REST API (Studio talks to this)
+  - hostname: api.velaris.io
+    service: http://localhost:8200
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: false
+
+  # Registration service — key issuance + activation + heartbeat
+  # Dashboard at /dashboard is basic-auth protected and accessible locally:
+  #   http://localhost:8300/dashboard
+  # To expose dashboard publicly (NOT recommended), add it here.
+  - hostname: register.velaris.io
+    service: http://localhost:8300
+    originRequest:
+      connectTimeout: 10s
+
+  # ── Required catch-all ─────────────────────────────────────────
+  - service: http_status:404
+
+# ── Notes ────────────────────────────────────────────────────────
+# PostgreSQL (5432): NEVER expose through Cloudflare tunnel.
+#   Only the registration service API talks to its DB via localhost.
+#
+# Dashboard (8300/dashboard): local access only — do NOT add a
+#   public ingress rule for it. Access at http://localhost:8300/dashboard
+#
+# Velaris Engine (8100): internal only (Studio talks to Case Service
+#   directly). Only expose if you need external engine access.
+#
+# Cloudflare provides free DDoS protection, TLS, and CDN caching
+# for all tunneled services automatically.

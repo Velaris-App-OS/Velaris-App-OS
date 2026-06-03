@@ -1,0 +1,31 @@
+# Add this service to your main docker-compose.yml when deploying
+# Or use: docker compose -f docker-compose.yml -f services/case-service/docker-compose.service.yml up
+
+services:
+  helix-case-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8200:8200"
+    environment:
+      - HELIX_CASE_DATABASE_URL=postgresql+asyncpg://helix:helix_dev_password@helix-db:5432/helix
+      - HELIX_CASE_TEMPORAL_HOST=temporal:7233
+      - HELIX_CASE_DEBUG=false
+    depends_on:
+      helix-db:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8200/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"

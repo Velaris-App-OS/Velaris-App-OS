@@ -1,0 +1,230 @@
+import React from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+
+/* ═══════════════════════════════════════════════════════════════════
+   App Layout — sidebar + main content area
+   ═══════════════════════════════════════════════════════════════════ */
+
+const NAV_ITEMS = [
+  { path: "/", label: "Dashboard", icon: DashboardIcon },
+  { path: "/modeler", label: "Modeler", icon: ModelerIcon },
+  { path: "/monitor", label: "Monitor", icon: MonitorIcon },
+];
+
+export default function AppLayout() {
+  return (
+    <div style={{ display: "flex", height: "100vh", width: "100vw" }}>
+      <Sidebar />
+      <main style={{ flex: 1, overflow: "auto", background: "var(--bg-root)" }}>
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+
+function Sidebar() {
+  const location = useLocation();
+
+  return (
+    <nav
+      style={{
+        width: 220,
+        minWidth: 220,
+        background: "var(--bg-panel)",
+        borderRight: "1px solid var(--border-subtle)",
+        display: "flex",
+        flexDirection: "column",
+        padding: "var(--space-md)",
+        gap: "var(--space-xs)",
+      }}
+    >
+      {/* Logo */}
+      <div
+        style={{
+          padding: "var(--space-md) var(--space-sm)",
+          marginBottom: "var(--space-lg)",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <HelixLogo />
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontWeight: 700,
+            fontSize: 15,
+            letterSpacing: "0.08em",
+            color: "var(--text-primary)",
+          }}
+        >
+          HELIX
+        </span>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            color: "var(--text-muted)",
+            padding: "2px 6px",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "var(--radius-sm)",
+          }}
+        >
+          STUDIO
+        </span>
+      </div>
+
+      {/* Nav items */}
+      {NAV_ITEMS.map((item) => {
+        const isActive =
+          item.path === "/"
+            ? location.pathname === "/"
+            : location.pathname.startsWith(item.path);
+
+        return (
+          <NavLink
+            key={item.path}
+            to={item.path}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "10px 12px",
+              borderRadius: "var(--radius-sm)",
+              fontSize: 13,
+              fontWeight: 500,
+              color: isActive ? "var(--accent)" : "var(--text-secondary)",
+              background: isActive ? "var(--accent-dim)" : "transparent",
+              textDecoration: "none",
+              transition: "all 0.12s ease",
+            }}
+          >
+            <item.icon active={isActive} />
+            {item.label}
+          </NavLink>
+        );
+      })}
+
+      {/* Spacer */}
+      <div style={{ flex: 1 }} />
+
+      {/* Engine status */}
+      <EngineStatus />
+    </nav>
+  );
+}
+
+/* ── Engine status indicator at bottom of sidebar ─────────────── */
+
+function EngineStatus() {
+  const [status, setStatus] = React.useState<{
+    database: string;
+    temporal: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    const check = () =>
+      fetch("/api/ready")
+        .then((r) => r.json())
+        .then(setStatus)
+        .catch(() => setStatus(null));
+
+    check();
+    const id = setInterval(check, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  const dbOk = status?.database === "connected";
+  const tmpOk = status?.temporal === "connected";
+
+  return (
+    <div
+      style={{
+        padding: "var(--space-md) var(--space-sm)",
+        borderTop: "1px solid var(--border-subtle)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        fontSize: 11,
+        fontFamily: "var(--font-mono)",
+        color: "var(--text-muted)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: dbOk ? "var(--status-completed)" : "var(--status-failed)",
+          }}
+        />
+        PostgreSQL {dbOk ? "connected" : "offline"}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: tmpOk ? "var(--status-completed)" : "var(--status-failed)",
+          }}
+        />
+        Temporal {tmpOk ? "connected" : "offline"}
+      </div>
+    </div>
+  );
+}
+
+/* ── Icons (inline SVG for zero dependencies) ─────────────────── */
+
+function HelixLogo() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"
+        fill="none"
+        stroke="var(--accent)"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M8 8c2 3 6 3 8 0M8 16c2-3 6-3 8 0"
+        stroke="var(--accent)"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function DashboardIcon({ active }: { active: boolean }) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect x="1" y="1" width="6" height="6" rx="1" stroke={c} strokeWidth="1.5" />
+      <rect x="9" y="1" width="6" height="6" rx="1" stroke={c} strokeWidth="1.5" />
+      <rect x="1" y="9" width="6" height="6" rx="1" stroke={c} strokeWidth="1.5" />
+      <rect x="9" y="9" width="6" height="6" rx="1" stroke={c} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function ModelerIcon({ active }: { active: boolean }) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <circle cx="3" cy="8" r="2" stroke={c} strokeWidth="1.5" />
+      <rect x="8" y="5" width="6" height="6" rx="1" stroke={c} strokeWidth="1.5" />
+      <path d="M5 8h3" stroke={c} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function MonitorIcon({ active }: { active: boolean }) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path d="M2 12l3-4 3 2 4-6 2 3" stroke={c} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}

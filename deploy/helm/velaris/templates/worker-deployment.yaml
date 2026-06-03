@@ -1,0 +1,31 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helix.workerName" . }}
+  labels: { app: worker }
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector: { matchLabels: { app: worker } }
+  template:
+    metadata: { labels: { app: worker } }
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.worker.repository }}:{{ .Values.image.worker.tag }}"
+          command: ["python", "-m", "case_service.temporal.worker"]
+          env:
+            - name: HELIX_CASE_DATABASE_URL
+              value: {{ include "helix.databaseUrl" . | quote }}
+            - name: TEMPORAL_HOST
+              value: {{ .Values.worker.temporalHost | quote }}
+            - name: HELIX_CASE_TASK_QUEUE
+              value: {{ .Values.worker.taskQueue | quote }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- end }}

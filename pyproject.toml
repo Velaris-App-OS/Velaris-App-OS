@@ -1,0 +1,46 @@
+[project]
+name = "velaris"
+version = "0.1.0"
+description = "Enterprise Case Management and Process Automation Platform"
+requires-python = ">=3.12"
+license = "LicenseRef-BSL-1.1"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "pyotp>=2.9.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "libs/velaris-ir/python",
+    "libs/velaris-sdk",
+    "engine",
+    "services/*",
+    "codegen",
+    "scout/cli",
+    "scout/agent",
+    "migration",
+    "plugins/*/*",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.uv.sources]
+velaris-ir = { workspace = true }
+velaris-sdk = { workspace = true }
+velaris-engine = { workspace = true }

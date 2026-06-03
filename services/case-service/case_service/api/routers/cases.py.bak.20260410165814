@@ -1,0 +1,479 @@
+"""Case instance API router.
+
+Handles creation, retrieval, status changes, stage transitions,
+and lifecycle operations for case instances.
+
+Copyright (c) 2024-2025 HELIX Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from case_service.api.schemas.cases import (
+    AuditEntryResponse,
+    CaseAction,
+    CaseCreate,
+    CaseDataUpdate,
+    CaseListResponse,
+    CasePriorityChange,
+    CaseResolve,
+    CaseResponse,
+    CaseStageTransition,
+    CaseStatusChange,
+    RelationshipCreate,
+    RelationshipResponse,
+)
+from case_service.core import case_lifecycle
+from case_service.db import repository as repo
+from case_service.db.session import get_session
+
+router = APIRouter(prefix="/cases", tags=["cases"])
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+
+
+async def _get_case_or_404(
+    session: AsyncSession, case_id: uuid.UUID
+):
+    case = await repo.get_case_instance(session, case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+async def _audit(
+    session: AsyncSession,
+    case_id: uuid.UUID,
+    action: str,
+    actor_id: str | None = None,
+    **kwargs,
+):
+    await repo.append_audit_entry(
+        session,
+        data={
+            "case_id": case_id,
+            "action": action,
+            "actor_id": actor_id,
+            "actor_type": kwargs.pop("actor_type", "user"),
+            "details": kwargs.pop("details", {}),
+            "previous_value": kwargs.pop("previous_value", None),
+            "new_value": kwargs.pop("new_value", None),
+        },
+    )
+
+
+# ─── CRUD ─────────────────────────────────────────────────────────────
+
+
+@router.post("", response_model=CaseResponse, status_code=201)
+async def create_case(
+    body: CaseCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Create a new case instance and (eventually) start its lifecycle."""
+    # Verify case type exists
+    case_type = await repo.get_case_type(session, body.case_type_id)
+    if case_type is None:
+        raise HTTPException(status_code=404, detail="Case type not found")
+
+    case = await repo.create_case_instance(
+        session,
+        data={
+            "case_type_id": body.case_type_id,
+            "case_type_version": case_type.version,
+            "status": "new",
+            "priority": body.priority or case_type.default_priority,
+            "data": body.data,
+            "parent_case_id": body.parent_case_id,
+            "created_by": body.created_by,
+        },
+    )
+
+    await _audit(
+        session,
+        case.id,
+        "created",
+        actor_id=body.created_by,
+        details={"case_type": case_type.name, "priority": case.priority},
+    )
+
+    # TODO: start CaseLifecycleWorkflow via Temporal here
+    # workflow_id = await start_case_lifecycle(case.id, case_type)
+    # await repo.update_case_instance(
+    #     session, case.id, values={"process_instance_id": workflow_id}
+    # )
+
+    return case
+
+
+@router.get("", response_model=CaseListResponse)
+async def list_cases(
+    status: str | None = None,
+    priority: str | None = None,
+    case_type_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    """Search / list case instances."""
+    filters: dict = {}
+    if status:
+        filters["status"] = status
+    if priority:
+        filters["priority"] = priority
+    if case_type_id:
+        filters["case_type_id"] = case_type_id
+
+    cases, total = await repo.search_case_instances(
+        session,
+        filters=filters,
+        offset=(page - 1) * page_size,
+        limit=page_size,
+    )
+    return CaseListResponse(
+        items=cases, total=total, page=page, page_size=page_size
+    )
+
+
+@router.get("/{case_id}", response_model=CaseResponse)
+async def get_case(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    return await _get_case_or_404(session, case_id)
+
+
+@router.patch("/{case_id}", response_model=CaseResponse)
+async def update_case_data(
+    case_id: uuid.UUID,
+    body: CaseDataUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Merge-update the case's data payload."""
+    case = await _get_case_or_404(session, case_id)
+    merged = {**case.data, **body.data}
+    await repo.update_case_instance(
+        session, case_id, values={"data": merged}
+    )
+    await _audit(
+        session,
+        case_id,
+        "data_updated",
+        actor_id=body.updated_by,
+        previous_value=case.data,
+        new_value=merged,
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+# ─── Status Changes ──────────────────────────────────────────────────
+
+
+@router.post("/{case_id}/status", response_model=CaseResponse)
+async def change_status(
+    case_id: uuid.UUID,
+    body: CaseStatusChange,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.status
+    await repo.update_case_instance(
+        session, case_id, values={"status": body.status}
+    )
+    await _audit(
+        session,
+        case_id,
+        "status_changed",
+        actor_id=body.actor_id,
+        previous_value={"status": prev},
+        new_value={"status": body.status},
+        details={"reason": body.reason},
+    )
+    await case_lifecycle.on_status_changed(
+        session, case_id=case_id, old_status=prev, new_status=body.status
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/priority", response_model=CaseResponse)
+async def change_priority(
+    case_id: uuid.UUID,
+    body: CasePriorityChange,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.priority
+    await repo.update_case_instance(
+        session, case_id, values={"priority": body.priority}
+    )
+    await _audit(
+        session,
+        case_id,
+        "priority_changed",
+        actor_id=body.actor_id,
+        previous_value={"priority": prev},
+        new_value={"priority": body.priority},
+    )
+    await case_lifecycle.on_priority_changed(
+        session, case_id=case_id, new_priority=body.priority
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/stage", response_model=CaseResponse)
+async def transition_stage(
+    case_id: uuid.UUID,
+    body: CaseStageTransition,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.current_stage_id
+    await repo.update_case_instance(
+        session, case_id, values={"current_stage_id": body.target_stage_id}
+    )
+    await _audit(
+        session,
+        case_id,
+        "stage_transitioned",
+        actor_id=body.actor_id,
+        previous_value={"stage_id": prev},
+        new_value={"stage_id": body.target_stage_id},
+    )
+    # TODO: signal CaseLifecycleWorkflow
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/resolve", response_model=CaseResponse)
+async def resolve_case(
+    case_id: uuid.UUID,
+    body: CaseResolve,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.status
+    now = datetime.now(timezone.utc)
+    await repo.update_case_instance(
+        session,
+        case_id,
+        values={"status": "resolved", "resolved_at": now},
+    )
+    await _audit(
+        session,
+        case_id,
+        "resolved",
+        actor_id=body.actor_id,
+        details={"resolution": body.resolution},
+    )
+    await case_lifecycle.on_status_changed(
+        session, case_id=case_id, old_status=prev, new_status="resolved"
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/close", response_model=CaseResponse)
+async def close_case(
+    case_id: uuid.UUID,
+    body: CaseAction,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.status
+    now = datetime.now(timezone.utc)
+    await repo.update_case_instance(
+        session,
+        case_id,
+        values={"status": "closed", "closed_at": now},
+    )
+    await _audit(session, case_id, "closed", actor_id=body.actor_id)
+    await case_lifecycle.on_status_changed(
+        session, case_id=case_id, old_status=prev, new_status="closed"
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/reopen", response_model=CaseResponse)
+async def reopen_case(
+    case_id: uuid.UUID,
+    body: CaseAction,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.status
+    await repo.update_case_instance(
+        session, case_id, values={"status": "reopened"}
+    )
+    await _audit(
+        session,
+        case_id,
+        "reopened",
+        actor_id=body.actor_id,
+        details={"reason": body.reason},
+    )
+    await case_lifecycle.on_status_changed(
+        session, case_id=case_id, old_status=prev, new_status="reopened"
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+@router.post("/{case_id}/cancel", response_model=CaseResponse)
+async def cancel_case(
+    case_id: uuid.UUID,
+    body: CaseAction,
+    session: AsyncSession = Depends(get_session),
+):
+    case = await _get_case_or_404(session, case_id)
+    prev = case.status
+    await repo.update_case_instance(
+        session, case_id, values={"status": "cancelled"}
+    )
+    await _audit(
+        session,
+        case_id,
+        "cancelled",
+        actor_id=body.actor_id,
+        details={"reason": body.reason},
+    )
+    await case_lifecycle.on_status_changed(
+        session, case_id=case_id, old_status=prev, new_status="cancelled"
+    )
+    return await repo.get_case_instance(session, case_id)
+
+
+# ─── History ──────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/{case_id}/history", response_model=list[AuditEntryResponse]
+)
+async def get_case_history(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_case_or_404(session, case_id)
+    return await repo.get_audit_log(session, case_id)
+
+
+# ─── Relationships ────────────────────────────────────────────────────
+
+
+@router.post(
+    "/{case_id}/relationships",
+    response_model=RelationshipResponse,
+    status_code=201,
+)
+async def add_relationship(
+    case_id: uuid.UUID,
+    body: RelationshipCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_case_or_404(session, case_id)
+    await _get_case_or_404(session, body.target_case_id)
+    rel = await repo.create_relationship(
+        session,
+        data={
+            "source_case_id": case_id,
+            "target_case_id": body.target_case_id,
+            "relationship_type": body.relationship_type,
+            "propagate_status": body.propagate_status,
+            "propagate_priority": body.propagate_priority,
+            "required": body.required,
+        },
+    )
+    await _audit(
+        session,
+        case_id,
+        "relationship_added",
+        details={
+            "target_case_id": str(body.target_case_id),
+            "type": body.relationship_type,
+        },
+    )
+    return rel
+
+
+@router.get(
+    "/{case_id}/relationships",
+    response_model=list[RelationshipResponse],
+)
+async def list_relationships(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_case_or_404(session, case_id)
+    return await repo.get_relationships(session, case_id)
+
+
+# ─── Child Cases ──────────────────────────────────────────────────────
+
+
+@router.post(
+    "/{case_id}/children", response_model=CaseResponse, status_code=201
+)
+async def create_child_case(
+    case_id: uuid.UUID,
+    body: CaseCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Create a child case linked to the parent."""
+    parent = await _get_case_or_404(session, case_id)
+    body.parent_case_id = case_id
+    # Delegate to the standard create flow
+    case_type = await repo.get_case_type(session, body.case_type_id)
+    if case_type is None:
+        raise HTTPException(status_code=404, detail="Case type not found")
+
+    child = await repo.create_case_instance(
+        session,
+        data={
+            "case_type_id": body.case_type_id,
+            "case_type_version": case_type.version,
+            "status": "new",
+            "priority": body.priority or case_type.default_priority,
+            "data": body.data,
+            "parent_case_id": case_id,
+            "created_by": body.created_by,
+        },
+    )
+
+    # Auto-create parent↔child relationship
+    await repo.create_relationship(
+        session,
+        data={
+            "source_case_id": case_id,
+            "target_case_id": child.id,
+            "relationship_type": "child",
+            "propagate_status": True,
+        },
+    )
+
+    await _audit(
+        session,
+        case_id,
+        "child_case_created",
+        actor_id=body.created_by,
+        details={"child_case_id": str(child.id)},
+    )
+
+    return child
+
+
+@router.get(
+    "/{case_id}/children", response_model=list[CaseResponse]
+)
+async def list_child_cases(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_case_or_404(session, case_id)
+    children, _ = await repo.search_case_instances(
+        session,
+        filters={"parent_case_id": case_id},
+        limit=200,
+    )
+    return children

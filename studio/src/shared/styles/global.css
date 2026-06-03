@@ -1,0 +1,211 @@
+/* ═══════════════════════════════════════════════════════════════════
+   HELIX Studio — Global Styles
+   Aesthetic: Industrial precision. Bloomberg Terminal meets Figma.
+   Dark theme with high-contrast accents.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surfaces ─────────────────────────────────────────────────── */
+  --bg-root: #0a0a0c;
+  --bg-panel: #111114;
+  --bg-card: #18181c;
+  --bg-card-hover: #1e1e24;
+  --bg-input: #0e0e12;
+  --bg-elevated: #222228;
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  /* ── Borders ──────────────────────────────────────────────────── */
+  --border-subtle: #1e1e24;
+  --border-default: #2a2a32;
+  --border-strong: #3a3a44;
+  --border-focus: #0d9488;
+
+  /* ── Text ─────────────────────────────────────────────────────── */
+  --text-primary: #e8e8ed;
+  --text-secondary: #8888a0;
+  --text-muted: #55556a;
+  --text-inverse: #0a0a0c;
+  --text-headline: #0d9488;
+
+  /* ── Accent — Teal ────────────────────────────────────────────── */
+  --accent: #0d9488;
+  --accent-hover: #0f766e;
+  --accent-dim: rgba(13, 148, 136, 0.18);
+  --accent-text: #14b8a6;
+
+  /* ── Status colors ────────────────────────────────────────────── */
+  --status-running: #f7b731;
+  --status-completed: #0d9488;
+  --status-failed: #fc5c65;
+  --status-cancelled: #8888a0;
+  --status-active: #0d9488;
+  --status-deprecated: #8888a0;
+
+  /* ── Typography ───────────────────────────────────────────────── */
+  --font-display: "DM Sans", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --font-body: "DM Sans", sans-serif;
+
+  /* ── Spacing scale ────────────────────────────────────────────── */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* ── Radii ────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* ── Shadows ──────────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+
+  /* ── Canvas (BPMN modeler) ────────────────────────────────────── */
+  --canvas-bg: #0d0d10;
+  --canvas-grid: #161620;
+  --canvas-grid-major: #1c1c28;
+
+  /* ── BPMN element colors ──────────────────────────────────────── */
+  --bpmn-event-stroke: #0d9488;
+  --bpmn-event-fill: rgba(13, 148, 136, 0.10);
+  --bpmn-task-stroke: #6c6c88;
+  --bpmn-task-fill: #18181c;
+  --bpmn-gateway-stroke: #f7b731;
+  --bpmn-gateway-fill: rgba(247, 183, 49, 0.08);
+  --bpmn-flow-stroke: #4a4a5c;
+  --bpmn-selected: #0d9488;
+}
+
+/* ── Light theme overrides ───────────────────────────────────────
+   Applied when <html data-theme="light"> is set (via ThemeToggle).
+   ───────────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-root:          #f0f2f5;
+  --bg-panel:         #ffffff;
+  --bg-card:          #ffffff;
+  --bg-card-hover:    #f8f9fc;
+  --bg-input:         #ffffff;
+  --bg-elevated:      #f0f2f5;
+  --bg-overlay:       rgba(0, 0, 0, 0.3);
+
+  --border-subtle:    #e4e7ec;
+  --border-default:   #d0d5dd;
+  --border-strong:    #98a2b3;
+  --border-focus:     #4ecdc4;
+
+  --text-primary:     #101828;
+  --text-secondary:   #475467;
+  --text-muted:       #98a2b3;
+  --text-inverse:     #ffffff;
+  --text-headline:    #0d9488;
+
+  --accent:           #0d9488;
+  --accent-hover:     #0f766e;
+  --accent-dim:       rgba(13, 148, 136, 0.12);
+  --accent-text:      #0d9488;
+
+  --status-running:   #b45309;
+  --status-completed: #0d9488;
+  --status-failed:    #dc2626;
+  --status-cancelled: #6b7280;
+  --status-active:    #0d9488;
+  --status-deprecated:#6b7280;
+
+  --shadow-sm: 0 1px 2px rgba(16,24,40,0.06);
+  --shadow-md: 0 4px 12px rgba(16,24,40,0.08);
+  --shadow-lg: 0 8px 32px rgba(16,24,40,0.12);
+
+  --canvas-bg:         #f8fafc;
+  --canvas-grid:       #e9ecf1;
+  --canvas-grid-major: #d5dae3;
+}
+
+/* ── Reset ──────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-root);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Headline colour — #0d9488 across all themes ─────────────────
+   Applies to native h1/h2/h3 elements. Inline colour styles on
+   divs/spans are overridden via the !important rule below so the
+   brand teal is consistent everywhere regardless of how the element
+   was originally written.
+   ──────────────────────────────────────────────────────────────── */
+h1, h2, h3 {
+  color: var(--text-headline) !important;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* ── Selection ──────────────────────────────────────────────────── */
+::selection {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* ── Focus ring ─────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* ── Links ──────────────────────────────────────────────────────── */
+a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ── Code ───────────────────────────────────────────────────────── */
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Connection hover effect */
+.conn-line:hover .conn-hover {
+  opacity: 0.3;
+}

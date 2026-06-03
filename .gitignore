@@ -1,0 +1,50 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+*.whl
+
+# ── Node / Studio ─────────────────────────────────────────
+node_modules/
+.next/
+.turbo/
+studio/dist/
+studio/.env
+
+# ── Environment & secrets ─────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Velaris runtime files (generated on install) ──────────
+.velaris-key
+.velaris-setup-complete
+.backups/
+
+# ── Logs ──────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE & OS ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ── Misc ──────────────────────────────────────────────────
+*.tar.gz
+*.pkl
+*.onnx
+*.pt
+*.bin
+uv.lock

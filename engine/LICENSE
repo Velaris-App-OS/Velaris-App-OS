@@ -1,0 +1,46 @@
+Business Source License 1.1
+
+Licensor:           HELIX Contributors
+Licensed Work:      HELIX Platform
+Change Date:        Four years from each release date
+Change License:     Apache License 2.0
+
+Additional Use Grant:
+You may use the Licensed Work for any purpose, including production use,
+EXCEPT for the following:
+
+1. Offering the Licensed Work, or any substantial portion of it, as a
+   commercial BPM-as-a-Service, process automation platform, or low-code
+   platform that competes with the Licensed Work.
+
+2. Creating a product that provides substantially similar BPM, process
+   orchestration, or workflow automation functionality to the Licensed Work
+   and distributing it as a competing product.
+
+3. Removing or modifying the Licensor's branding to present the Licensed
+   Work as your own product.
+
+You ARE permitted to:
+- Use the Licensed Work internally for any business purpose
+- Build applications, workflows, and automations using the Licensed Work
+- Create and sell plugins, connectors, adapters, and extensions
+- Offer consulting, implementation, and support services
+- Modify the source code for your own internal use
+- Use the Licensed Work for development, testing, and evaluation
+
+Terms:
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
+
+Notice:
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.

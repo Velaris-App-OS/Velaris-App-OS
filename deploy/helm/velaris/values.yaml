@@ -1,0 +1,79 @@
+# ── HELIX Helm chart values ─────────────────────────────────────────
+
+image:
+  caseService:
+    repository: helix/case-service
+    tag: latest
+    pullPolicy: IfNotPresent
+  engine:
+    repository: helix/engine
+    tag: latest
+    pullPolicy: IfNotPresent
+  worker:
+    repository: helix/case-service  # Same image, different entrypoint
+    tag: latest
+
+caseService:
+  replicaCount: 2
+  port: 8200
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: 1000m, memory: 1Gi }
+  env:
+    HELIX_CASE_REDIS_ENABLED: "true"
+    HELIX_CASE_RATE_LIMIT_BACKEND: "redis"
+    HELIX_CASE_DEBUG: "false"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+engine:
+  replicaCount: 2
+  port: 8100
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: 1000m, memory: 1Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+
+worker:
+  enabled: true
+  replicaCount: 2
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: 750m, memory: 768Mi }
+  temporalHost: "temporal.default.svc.cluster.local:7233"
+  taskQueue: "helix-case-service"
+  keda:
+    enabled: false    # Toggle on to use KEDA ScaledObject (needs KEDA CRDs installed)
+    minReplicaCount: 1
+    maxReplicaCount: 20
+    queueDepthThreshold: 50
+
+postgresql:
+  enabled: true
+  auth:
+    username: helix
+    password: helix_dev_password
+    database: helix
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+    - host: helix.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: case-service

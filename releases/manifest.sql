@@ -1,0 +1,17 @@
+-- Velaris-App Release Manifest
+--
+-- This file is the single source of truth for which features are active
+-- on a Velaris instance. start-velaris.sh compares the INSERT count here
+-- against the row count in scheduled_releases — if they differ, this file
+-- is applied automatically.
+--
+-- Rules:
+--   - One INSERT per feature. Never delete existing INSERTs.
+--   - To release a new feature: append a new INSERT block at the bottom.
+--   - ON CONFLICT DO NOTHING: existing rows are preserved, only new ones inserted.
+--   - Do not use this file for schema changes — use migrations/ for that.
+--
+-- Format:
+--   feature_key  must match the flag name used in is_feature_enabled() in code
+--   version      matches the entry in releases.txt on the website server
+--   enabled      same as version — activates the feature on install
