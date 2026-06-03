@@ -95,7 +95,7 @@ def main() -> int:
     # ── 3. Immediate local revocation check (cached) ──────────────────
     if cache.get("status") == "revoked":
         print(red(f"  ✗  Your Velaris product key ({key_id}) has been revoked."))
-        print(red("     Contact support: hello@velaris.io"))
+        print(red("     Contact support: velaris.app.os@gmail.com"))
         return 1
 
     # ── 4. Call registration server ───────────────────────────────────
@@ -110,7 +110,7 @@ def main() -> int:
             cache["status"] = "revoked"
             write_cache(cache)
             print(red(f"  ✗  Key {key_id} has been revoked."))
-            print(red("     Contact support: hello@velaris.io"))
+            print(red("     Contact support: velaris.app.os@gmail.com"))
             return 1
 
         if status == "mac_mismatch":

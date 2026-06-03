@@ -24,7 +24,6 @@ Velaris is a production-grade BPM and case management platform built for operati
 │  ├── HxDeploy (CI/CD governance)                            │
 │  ├── HxConnect (integrations hub)                           │
 │  ├── HxShield (security)                                    │
-│  ├── Marketplace                                            │
 │  ├── Portal Admin                                           │
 │  └── Analytics, Compliance, Observability                   │
 └────────────────────────┬────────────────────────────────────┘
@@ -44,7 +43,6 @@ Velaris is a production-grade BPM and case management platform built for operati
 │  ├── HxConnect (payments, KYC, e-sign, CRM, SMS, OCR)       │
 │  ├── HxAnalytics / HxSync / HxGlobal                        │
 │  ├── HxMigrate / HxBranch / HxDocs / HxCanvas               │
-│  ├── Marketplace (sandbox + install governance)             │
 │  ├── Customer Portal + multi-tenant                         │
 │  └── SLA engine, queues, notifications, compliance          │
 └────────────────────────┬────────────────────────────────────┘
@@ -170,7 +168,6 @@ services/
 │       ├── hxdeploy/      # CI/CD promotion governance
 │       ├── hxwork/        # Tasks + stories + sprints
 │       ├── hxstream/      # Real-time event tracing
-│       ├── marketplace/   # Sandbox + install governance
 │       └── middleware/    # Auth, rate limiting, audit, CORS
 ├── ai-service/
 ├── analytics-service/
@@ -233,7 +230,6 @@ Key Case Service endpoint groups:
 | `/api/v1/nexus` | HxNexus AI assistant |
 | `/api/v1/forms` | Form definitions |
 | `/api/v1/deploy` | HxDeploy promotion governance |
-| `/api/v1/marketplace` | App marketplace — browse, sandbox, install |
 | `/api/v1/bridge` | HxBridge connector execution |
 | `/api/v1/payments` | Stripe payments (HxConnect) |
 | `/api/v1/identity` | KYC / identity verification (HxConnect) |
@@ -275,7 +271,6 @@ Key variables in `.env`:
 | `HELIX_CASE_AUTH_SECRET` | JWT signing secret |
 | `HELIX_CASE_AI_PROVIDER` | AI provider: `ollama`, `openai`, `anthropic`, `groq` |
 | `HELIX_CASE_AI_OLLAMA_URL` | Ollama endpoint (default: `http://localhost:11434`) |
-| `HELIX_CASE_MARKETPLACE_ENABLED` | Enable/disable marketplace module |
 | `VELARIS_REGISTER_URL` | Product key registration server |
 
 Generate secrets:
@@ -308,4 +303,4 @@ releases/notes/
 
 **BSL 1.1 summary:** You can use, run, and customise Velaris for any internal business purpose. You may sell services, plugins, and applications built on the platform. You may not resell the platform itself, sublicense it, or offer it as a competing SaaS product. See `LICENSE` for full terms.
 
-For commercial licensing or enterprise agreements: **hello@velaris.io**
+For commercial licensing or enterprise agreements: **velaris.app.os@gmail.com**

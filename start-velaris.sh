@@ -37,7 +37,7 @@ if ! uv run python "$HELIX_DIR/scripts/verify_key.py"; then
   red "╔═══════════════════════════════════════════════════════╗"
   red "║  STARTUP BLOCKED: product key verification failed.   ║"
   red "║  Run ./setup-velaris.sh if this is a new install.    ║"
-  red "║  Contact support: hello@velaris.io                   ║"
+  red "║  Contact support: velaris.app.os@gmail.com                   ║"
   red "╚═══════════════════════════════════════════════════════╝"
   exit 1
 fi
