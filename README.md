@@ -49,18 +49,18 @@ Velaris is a production-grade BPM and case management platform built for operati
                          │
 ┌────────────────────────▼────────────────────────────────────┐
 │  Engine (FastAPI + Temporal)           :8100                │
-│  └── BPMN 2.0 process orchestration                        │
+│  └── BPMN 2.0 process orchestration                         │
 └────────────────────────┬────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────┐
 │  Infrastructure (Docker Compose)                            │
 │  ├── PostgreSQL 16          :5432                           │
-│  ├── Temporal               :7233  (UI :8233)              │
+│  ├── Temporal               :7233  (UI :8233)               │
 │  ├── Redis                  :6379                           │
 │  ├── Redpanda (Kafka)       :9092                           │
 │  ├── OpenSearch             :9200                           │
-│  ├── MinIO                  :9000  (console :9001)         │
-│  └── Mailpit (SMTP dev)     :1025  (UI :8025)              │
+│  ├── MinIO                  :9000  (console :9001)          │
+│  └── Mailpit (SMTP dev)     :1025  (UI :8025)               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
