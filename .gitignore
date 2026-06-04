@@ -30,6 +30,7 @@ studio/.env
 .velaris-key
 .velaris-setup-complete
 .backups/
+git_push.sh
 
 # ── Logs ──────────────────────────────────────────────────
 *.log
