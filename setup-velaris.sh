@@ -261,6 +261,11 @@ for i in $(seq 1 20); do
   sleep 1
 done
 
+# Sync DB user password to match .env (prevents auth failures on TCP connections)
+docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+  -c "ALTER USER ${DB_USER} PASSWORD '${VELARIS_DB_PASSWORD}';" 2>/dev/null \
+  && ok "DB user password synced" || warn "Could not sync DB password — continuing"
+
 # ── Step 8: Run migrations (including 071_superadmin) ─────────────
 step "Step 8/9 — Running database migrations..."
 
