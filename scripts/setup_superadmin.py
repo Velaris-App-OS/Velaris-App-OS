@@ -98,7 +98,7 @@ def validate_key_format(key: str) -> tuple[bool, str]:
         return False, "Key format invalid. Expected: VELARIS-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
     import base64
     b32_str = "".join(parts[2:])
-    if len(b32_str) != 32:
+    if len(b32_str) != 40:
         return False, "Key checksum section invalid length."
     try:
         padding = (8 - len(b32_str) % 8) % 8
