@@ -37,9 +37,10 @@ VELARIS_PUBLIC_KEY_HEX = os.environ.get(
 )
 
 REGISTER_URL  = os.environ.get("VELARIS_REGISTER_URL", "https://register.velaris.io")
+_db_password  = os.environ.get("VELARIS_DB_PASSWORD", "helix")
 DATABASE_URL  = os.environ.get(
     "DATABASE_URL",
-    "postgresql+asyncpg://helix:helix@localhost:5432/helix"
+    f"postgresql+asyncpg://helix:{_db_password}@localhost:5432/helix"
 )
 HELIX_DIR     = Path(__file__).parent.parent
 KEY_CACHE     = HELIX_DIR / ".velaris-key"
