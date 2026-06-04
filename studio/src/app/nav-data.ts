@@ -226,15 +226,15 @@ export const NAV_DATA: NavEntry[] = [
     roles: ["devops", "admin"],
   },
 
-  // ── Marketplace — hidden until v1.2.0 release ──
-  // {
-  //   path:        "/marketplace",
-  //   label:       "Marketplace",
-  //   description: "Install connectors | Case templates | Modules | NLP packs | Themes | Sandbox testing | Admin review",
-  //   section:     "Integration",
-  //   roles:       ["developer", "admin", "manager"],
-  //   featureKey:  "marketplace",
-  // },
+  // ── Marketplace — hidden until enabled via scheduled_releases ──
+  {
+    path:        "/marketplace",
+    label:       "Marketplace",
+    description: "Install connectors | Case templates | Modules | NLP packs | Themes | Sandbox testing | Admin review",
+    section:     "Integration",
+    roles:       [],
+    featureKey:  "marketplace",
+  },
 
   // ── Integration ──────────────────────────────────────────────────────
   {
@@ -295,15 +295,15 @@ export const NAV_DATA: NavEntry[] = [
     section: "Security",
     roles: ["security", "admin", "designer"],
   },
-  // ── HxDB Manager — hidden until v1.3.0 release ──
-  // {
-  //   path:        "/hxdbmanager",
-  //   label:       "HxDB Manager",
-  //   description: "Schema browser | Table viewer | SQL editor | AI SQL assistant | EXPLAIN visualiser | Index advisor | Query history",
-  //   section:     "Security",
-  //   roles:       ["admin"],
-  //   featureKey:  "hxdbmanager",
-  // },
+  // ── HxDB Manager — hidden until enabled via scheduled_releases ──
+  {
+    path:        "/hxdbmanager",
+    label:       "HxDB Manager",
+    description: "Schema browser | Table viewer | SQL editor | AI SQL assistant | EXPLAIN visualiser | Index advisor | Query history",
+    section:     "Security",
+    roles:       [],
+    featureKey:  "hxdbmanager",
+  },
   {
     path: "/compliance",
     label: "Compliance",

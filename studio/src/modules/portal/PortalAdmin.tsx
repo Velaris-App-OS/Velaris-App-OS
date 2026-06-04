@@ -1,5 +1,6 @@
 // HELIX P33 — Customer Portal Admin
 import React, { useEffect, useState, useCallback } from "react";
+import { useFeatureFlags } from "@/app/FeatureFlagsContext";
 
 type Tenant = {
   id: string;
@@ -63,13 +64,15 @@ async function apiJSON<T>(url: string, opts: RequestInit = {}): Promise<T> {
 
 export default function PortalAdmin() {
   const [tab, setTab] = useState<Tab>("tenants");
+  const { isEnabled } = useFeatureFlags();
+
+  const tabs: Tab[] = ["tenants", "submissions", ...(isEnabled("customer_accounts") ? ["customers" as Tab] : [])];
 
   return (
     <div style={{ padding: "var(--space-xl) var(--space-2xl)", width: "100%", overflow: "auto", height: "100%", boxSizing: "border-box" }}>
       {/* Tabs */}
       <div style={{ display: "flex", gap: 4, marginBottom: "var(--space-lg)", borderBottom: "1px solid var(--border-subtle)", paddingBottom: 0 }}>
-        {/* P65 HIDDEN — replace with ["tenants","submissions","customers"] to enable Customer Accounts */}
-        {(["tenants", "submissions"] as Tab[]).map(t => (
+        {tabs.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             padding: "8px 20px", border: "none", cursor: "pointer", fontSize: 13,
             background: "none", fontFamily: "var(--font-body)",
