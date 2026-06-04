@@ -253,7 +253,7 @@ echo ""
 # ── Step 8: Start Studio ─────────────────────────────────────────
 echo "▶ Starting Velaris Studio (port 5173)..."
 cd "$HELIX_DIR/studio"
-nohup npm run dev -- --host 0.0.0.0 --allowed-hosts all > /tmp/velaris-studio.log 2>&1 &
+nohup npm run dev -- --host 0.0.0.0 > /tmp/velaris-studio.log 2>&1 &
 echo "  PID: $! | Logs: tail -f /tmp/velaris-studio.log"
 sleep 3
 echo ""
