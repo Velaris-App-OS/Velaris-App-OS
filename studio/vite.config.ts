@@ -16,7 +16,7 @@ export default defineConfig({
     allowedHosts: "all",
     fs: {
       // Allow serving files from root node_modules (hoisted monorepo deps)
-      allow: [path.resolve(__dirname, ".."), "/home/utpal-bhadra/helix/node_modules"],
+      allow: [path.resolve(__dirname, "..")],
     },
     proxy: {
       "/api/v1/cases": {
