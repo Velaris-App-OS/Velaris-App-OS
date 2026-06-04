@@ -117,9 +117,9 @@ function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; on
   const location = useLocation();
   const { user } = useAuth();
   const { isRouteAllowed } = usePermissions();
-  const { isEnabled } = useFeatureFlags();
+  const { isEnabled, loading: flagsLoading } = useFeatureFlags();
 
-  const visibleItems = NAV_ITEMS.filter(item => {
+  const visibleItems = flagsLoading ? [] : NAV_ITEMS.filter(item => {
     if (!isRouteAllowed(item.path, user?.roles ?? [], user?.is_admin ?? false)) return false;
     if (item.featureKey && !isEnabled(item.featureKey)) return false;
     return true;
