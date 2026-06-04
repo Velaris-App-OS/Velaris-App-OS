@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -155,6 +156,15 @@ class Settings(BaseSettings):
     # HxDBManager Security is now version-gated via the Release Scheduler.
     # Use is_feature_enabled("hxdbmanager_security", "v1.0.0") in code.
     # <<< HxDBManager Security
+
+    @model_validator(mode="after")
+    def _fix_rsa_newlines(self) -> "Settings":
+        # .env files store \n as literal two-char sequence; convert to real newlines
+        if self.auth_rsa_private_key:
+            self.auth_rsa_private_key = self.auth_rsa_private_key.replace("\\n", "\n")
+        if self.auth_rsa_public_key:
+            self.auth_rsa_public_key = self.auth_rsa_public_key.replace("\\n", "\n")
+        return self
 
     model_config = {"env_prefix": "HELIX_CASE_", "env_file": ".env", "extra": "ignore"}
 
