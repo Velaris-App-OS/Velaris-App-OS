@@ -40,8 +40,159 @@ PROVIDER_URLS: dict[str, str] = {
 }
 
 
+# ── Group E: AI egress guard (layers 1–3) ─────────────────────────────────────
+
+def _is_local_url(url: str) -> bool:
+    return any(h in (url or "") for h in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"))
+
+
+class EgressGuardedBackend:
+    """Wraps an external backend so embeddings never leave the platform.
+
+    embed() is always delegated to the local Ollama backend — indexing a
+    document embeds every chunk, so without this the entire document leaves
+    the platform at index time.
+
+    Group H escalation ladder (layer 4): complete() answers with the LOCAL
+    model first; the external provider is consulted only when the local
+    model is unavailable / returns nothing, or when the caller explicitly
+    opted in for this call (`prefer_external = True`, set per request by the
+    service layer). `last_route` records which side answered — the service
+    uses it for the external-AI disclosure and the egress audit.
+
+    Note: chunks embedded locally are not comparable with chunks embedded
+    by an external model. Deployments that indexed documents under
+    ai_egress_policy=full must re-index after switching to minimized.
+    """
+    is_external = True
+    embeddings_local = True
+
+    def __init__(self, external, local) -> None:
+        self._external = external
+        self._local = local
+        self.prefer_external = False        # per-request opt-in, set by the service
+        self.last_route = "local"           # "local" | "external" — who answered last
+        self.suppress_generic_audit = False  # qa/chat write their own rich audit rows
+
+    def __getattr__(self, name):
+        return getattr(self._external, name)
+
+    async def embed(self, text: str) -> list[float]:
+        return await self._local.embed(text)
+
+    async def complete(self, prompt: str, **kwargs):
+        if not self.prefer_external and getattr(self._local, "available", False):
+            try:
+                answer = await self._local.complete(prompt, **kwargs)
+                if answer and answer.strip():
+                    self.last_route = "local"
+                    return answer
+                log.info("egress ladder: local answer empty — escalating to external")
+            except Exception as exc:
+                log.info("egress ladder: local completion failed (%s) — escalating", exc)
+        self.last_route = "external"
+        if not self.suppress_generic_audit:
+            # Catch-all audit for every other caller (generate_json: NLP
+            # Builder, Scout, BPM importer, …) — flushed to SecurityEvents
+            # by the watcher. qa/chat suppress this and write richer rows.
+            from .egress_audit import queue_egress
+            queue_egress(
+                purpose="completion",
+                provider=getattr(self._external, "backend_name", "external"),
+                bytes_out=len(prompt or "") + len(kwargs.get("system", "") or ""),
+            )
+        return await self._external.complete(prompt, **kwargs)
+
+
+class GuardedBackend:
+    """§5.3 universal LLM hardening around *any* backend's ``complete()``.
+
+    Applied to whatever ``get_llm_backend()`` resolves (local or external), so
+    every caller — chat, generate_json, blueprints, autodoc, decision points,
+    polyglot — is protected at one place, not just the chat edge:
+
+      * **model-DoS size cap** — total prompt+system chars vs the configured
+        ceiling; raises before the model is reached;
+      * **prompt-injection scan** — flagged prompts are queued as
+        ``ai.prompt_flagged`` SecurityEvents (signal, non-blocking — the
+        governed system prompt remains the actual defense);
+      * **output scrub** — secret-like patterns redacted from every response.
+
+    Every other attribute is proxied transparently in BOTH directions, so the
+    egress ladder's per-request flags (``prefer_external``, ``last_route``,
+    ``suppress_generic_audit``) still land on the inner backend.
+    """
+
+    def __init__(self, inner) -> None:
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_inner"), name, value)
+
+    async def complete(self, prompt: str, **kwargs):
+        from . import guard
+        from .egress_audit import queue_prompt_flagged
+        system = kwargs.get("system", "") or ""
+        guard.validate_prompt_size(prompt, system)          # model-DoS — raises
+        scan = guard.scan_input(prompt or "")               # injection signal
+        if scan.flagged:
+            queue_prompt_flagged(signals=scan.signals)
+        raw = await self._inner.complete(prompt, **kwargs)
+        return guard.scrub_output(raw) if isinstance(raw, str) else raw
+
+
+def _local_backend(s) -> OllamaBackend:
+    b = OllamaBackend(
+        url=s.ai_ollama_url,
+        model=s.ai_ollama_model,
+        embed_model=s.ai_ollama_embed_model,
+    )
+    b.is_external = False
+    return b
+
+
+def _apply_egress_policy(backend, s):
+    """Enforce HELIX_CASE_AI_EGRESS_POLICY on the resolved backend.
+
+      local_only — external providers refused; local Ollama is used instead
+      minimized  — external completions allowed, embeddings stay local (default)
+      full       — external provider used as-is (explicit opt-in)
+    """
+    if not getattr(backend, "is_external", False):
+        return backend
+
+    policy = (s.ai_egress_policy or "minimized").lower().strip()
+
+    if policy == "local_only":
+        log.warning(
+            "ai_egress_policy=local_only: refusing external provider '%s' — using local Ollama",
+            getattr(backend, "backend_name", "?"),
+        )
+        return _local_backend(s)
+
+    if policy == "full":
+        return backend
+
+    if policy != "minimized":
+        log.warning("unknown ai_egress_policy '%s' — treating as 'minimized'", policy)
+    return EgressGuardedBackend(backend, _local_backend(s))
+
+
 def get_llm_backend():
-    """Return the project-wide LLM backend.
+    """Project-wide LLM backend, wrapped in the §5.3 universal guard.
+
+    All AI callers go through here, so wrapping the resolved backend in
+    :class:`GuardedBackend` enforces model-DoS limits, injection signalling,
+    and output scrubbing on every completion — local or external.
+    """
+    return GuardedBackend(_resolve_llm_backend())
+
+
+def _resolve_llm_backend():
+    """Resolve the raw backend.
 
     Resolution order:
       1. Universal vars (HELIX_CASE_AI_PROVIDER / API_KEY / MODEL) — preferred
@@ -63,7 +214,8 @@ def get_llm_backend():
             b = AnthropicBackend()
             if api_key:   b._api_key = api_key
             if model:     b._model   = model
-            return b
+            b.is_external = True
+            return _apply_egress_policy(b, s)
 
         # All other known providers use the OpenAI-compatible API
         base_url = s.ai_base_url or PROVIDER_URLS.get(provider, "")
@@ -77,7 +229,9 @@ def get_llm_backend():
         if embed_model:
             b._embed_model = embed_model
         b.backend_name = provider
-        return b
+        # `custom` pointed at a localhost URL (LM Studio, vLLM, …) stays local
+        b.is_external = not (provider == "custom" and _is_local_url(b._base_url))
+        return _apply_egress_policy(b, s)
 
     # ── 2. Legacy provider-specific vars ─────────────────────────────────────
     choice = s.ai_backend.lower()
@@ -87,20 +241,18 @@ def get_llm_backend():
         b._api_key     = s.ai_openai_api_key or b._api_key
         b._model       = s.ai_openai_model
         b._embed_model = s.ai_openai_embed_model
-        return b
+        b.is_external  = not _is_local_url(b._base_url)
+        return _apply_egress_policy(b, s)
 
     if choice == "anthropic" or (choice == "auto" and s.ai_anthropic_api_key):
         b = AnthropicBackend()
         b._api_key = s.ai_anthropic_api_key or b._api_key
         b._model   = s.ai_anthropic_model
-        return b
+        b.is_external = True
+        return _apply_egress_policy(b, s)
 
     # ── 3. Ollama fallback ────────────────────────────────────────────────────
-    return OllamaBackend(
-        url=s.ai_ollama_url,
-        model=s.ai_ollama_model,
-        embed_model=s.ai_ollama_embed_model,
-    )
+    return _local_backend(s)
 
 
 async def generate_json(
@@ -176,6 +328,9 @@ def get_ai_info() -> dict:
     llm = get_llm_backend()
     return {
         "backend": llm.backend_name,
+        "egress_policy": (s.ai_egress_policy or "minimized").lower().strip(),
+        "is_external": getattr(llm, "is_external", False),
+        "embeddings_local": getattr(llm, "embeddings_local", not getattr(llm, "is_external", False)),
         "config": {
             "ai_backend": s.ai_backend,
             "ollama_url": s.ai_ollama_url,

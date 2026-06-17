@@ -13,6 +13,7 @@ import time
 import httpx
 
 from case_service.hxbridge.protocol import register_connector
+from case_service.hxbridge.security import validate_outbound_url
 
 
 @register_connector("webhook")
@@ -45,6 +46,7 @@ class WebhookConnector:
 
     async def execute(self, input_data: dict) -> dict:
         url     = self._config["url"]
+        await validate_outbound_url(url)
         method  = self._config.get("method", "POST").upper()
         timeout = self._config.get("timeout_seconds", 15)
         headers = {"Content-Type": "application/json"}
@@ -60,14 +62,15 @@ class WebhookConnector:
             header_name = self._config.get("signature_header", "X-Helix-Signature")
             headers[header_name] = f"t={ts},v1={sig}"
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             r = await client.request(method, url, headers=headers, json=input_data)
             r.raise_for_status()
             return {"status_code": r.status_code, "delivered": True}
 
     async def test(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
+            await validate_outbound_url(self._config.get("url", ""))
+            async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
                 r = await client.head(self._config.get("url", ""))
                 return r.status_code < 500
         except Exception:

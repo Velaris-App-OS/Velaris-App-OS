@@ -9,9 +9,11 @@ SPDX-License-Identifier: BSL-1.1
 """
 from __future__ import annotations
 
+import httpx
 from fastapi import APIRouter, Depends
 
 from case_service.auth.dependencies import get_current_user
+from case_service.config import get_settings
 
 router = APIRouter(prefix="/sitemap", tags=["sitemap"], dependencies=[Depends(get_current_user)])
 
@@ -26,6 +28,7 @@ MODULES = [
         "phase": 0,
         "dev_time": "1 day",
         "api_endpoints": ["/api/v1/cases", "/api/v1/analytics"],
+        "ai_dependency": "none",
     },
     {
         "category": "Process",
@@ -35,6 +38,7 @@ MODULES = [
         "phase": 2,
         "dev_time": "5 days",
         "api_endpoints": ["/api/v1/processes"],
+        "ai_dependency": "none",
     },
     {
         "category": "Process",
@@ -44,6 +48,7 @@ MODULES = [
         "phase": 2,
         "dev_time": "2 days",
         "api_endpoints": ["/api/v1/cases"],
+        "ai_dependency": "none",
     },
     # ── Cases ──
     {
@@ -54,6 +59,7 @@ MODULES = [
         "phase": 3,
         "dev_time": "5 days",
         "api_endpoints": ["/api/v1/case-types"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -63,6 +69,7 @@ MODULES = [
         "phase": 7,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/forms", "/api/v1/documents/upload"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -72,6 +79,7 @@ MODULES = [
         "phase": 18,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/codegen"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -86,6 +94,7 @@ MODULES = [
             "/api/v1/nlp/generate-full",
             "/api/v1/nlp/preview",
         ],
+        "ai_dependency": "required",
     },
     {
         "category": "Cases",
@@ -95,6 +104,7 @@ MODULES = [
         "phase": 3,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/cases"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -104,6 +114,7 @@ MODULES = [
         "phase": 24,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/documents"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -113,6 +124,7 @@ MODULES = [
         "phase": 25,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/email"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -122,6 +134,7 @@ MODULES = [
         "phase": 3,
         "dev_time": "5 days",
         "api_endpoints": ["/api/v1/my"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -131,6 +144,7 @@ MODULES = [
         "phase": 8,
         "dev_time": "4 days",
         "api_endpoints": ["/api/v1/analytics"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -140,6 +154,7 @@ MODULES = [
         "phase": 14,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/process-mining"],
+        "ai_dependency": "none",
     },
 
     # ── Admin ──
@@ -151,6 +166,7 @@ MODULES = [
         "phase": 10,
         "dev_time": "2 days",
         "api_endpoints": ["/api/v1/admin"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -160,6 +176,7 @@ MODULES = [
         "phase": 17,
         "dev_time": "2 days",
         "api_endpoints": ["/api/v1/tenants"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -169,6 +186,7 @@ MODULES = [
         "phase": 16,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/scout"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -178,6 +196,7 @@ MODULES = [
         "phase": 21,
         "dev_time": "4 days",
         "api_endpoints": ["/api/v1/orchestrator"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -187,6 +206,7 @@ MODULES = [
         "phase": 19,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/scout-ai"],
+        "ai_dependency": "required",
     },
     {
         "category": "Admin",
@@ -196,6 +216,7 @@ MODULES = [
         "phase": 20,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/enterprise"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -205,6 +226,7 @@ MODULES = [
         "phase": 23,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/observability/metrics", "/api/v1/observability/traces/recent", "/health/deep"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -214,6 +236,7 @@ MODULES = [
         "phase": 34,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/escalation-trees", "/api/v1/cases/{id}/sla"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -223,6 +246,7 @@ MODULES = [
         "phase": 37,
         "dev_time": "4 days",
         "api_endpoints": ["/api/v1/user-directory", "/api/v1/access-roles", "/api/v1/access-groups", "/api/v1/portals"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -232,6 +256,7 @@ MODULES = [
         "phase": 36,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/compliance"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -241,6 +266,7 @@ MODULES = [
         "phase": 25,
         "dev_time": "2 days",
         "api_endpoints": ["/api/v1/email/accounts", "/api/v1/email/templates"],
+        "ai_dependency": "none",
     },
     {
         "category": "Cases",
@@ -250,6 +276,7 @@ MODULES = [
         "phase": 30,
         "dev_time": "5 days",
         "api_endpoints": ["/api/v1/hxnexus/chat", "/api/v1/hxnexus/cases/{id}/suggest", "/api/v1/hxnexus/cases/{id}/qa"],
+        "ai_dependency": "required",
     },
     {
         "category": "Admin",
@@ -259,6 +286,7 @@ MODULES = [
         "phase": 27,
         "dev_time": "2 days",
         "api_endpoints": ["/api/v1/push/devices", "/api/v1/push/preferences", "/api/v1/push/admin/logs"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -268,6 +296,7 @@ MODULES = [
         "phase": 33,
         "dev_time": "4 days",
         "api_endpoints": ["/api/v1/portal-admin/tenants", "/api/v1/portal-admin/submissions", "/api/v1/portal/{slug}"],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -284,6 +313,7 @@ MODULES = [
             "/api/v1/analytics/reports",
             "/api/v1/analytics/odata",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Admin",
@@ -301,6 +331,7 @@ MODULES = [
             "/api/v1/global/migrate-tenant",
             "/api/v1/global/access-log",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -317,6 +348,7 @@ MODULES = [
             "/api/v1/sync/destinations/{id}/field-mappings",
             "/api/v1/sync/destinations/{id}/redaction-rules",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -334,6 +366,7 @@ MODULES = [
             "/api/v1/hxbridge/dlq",
             "/api/v1/webhooks/{connector_id}/receive",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Security",
@@ -349,6 +382,7 @@ MODULES = [
             "/api/v1/shield/score",
             "/api/v1/shield/stats",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Integrations",
@@ -385,6 +419,7 @@ MODULES = [
             "/api/v1/devconn/connectors/from-openapi",
             "/api/v1/devconn/connectors",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Automation",
@@ -400,6 +435,7 @@ MODULES = [
             "/api/v1/fusion/director/advise",
             "/api/v1/fusion/stats",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Planning",
@@ -419,6 +455,7 @@ MODULES = [
             "/api/v1/hxwork/sprints/{id}/complete",
             "/api/v1/hxwork/sprints/{id}/cards",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Documentation",
@@ -436,6 +473,7 @@ MODULES = [
             "/api/v1/hxdocs/search",
             "/api/v1/hxdocs/generate",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Planning",
@@ -453,6 +491,7 @@ MODULES = [
             "/api/v1/hxcanvas/boards/{id}/export/bpmn",
             "/api/v1/hxcanvas/graph-nodes/search",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "DevOps",
@@ -473,6 +512,7 @@ MODULES = [
             "/api/v1/deploy/windows",
             "/api/v1/deploy/analyse-risk",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Migration",
@@ -488,6 +528,7 @@ MODULES = [
             "/api/v1/hxmigrate/runs/{id}/result",
             "/api/v1/hxmigrate/platforms",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Integrations",
@@ -504,6 +545,7 @@ MODULES = [
             "/api/v1/devconn/webhooks/receive/{connector_id}",
             "/api/v1/devconn/events",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "DevOps",
@@ -522,6 +564,7 @@ MODULES = [
             "/api/v1/branches/envs/{env_id}/token",
             "/api/v1/branches/envs/{env_id}/test-connection",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -535,6 +578,7 @@ MODULES = [
             "/api/v1/graph/path", "/api/v1/graph/explain", "/api/v1/graph/report",
             "/api/v1/graph/visualize", "/api/v1/graph/export",
         ],
+        "ai_dependency": "none",
     },
     {
         "category": "Admin",
@@ -544,6 +588,7 @@ MODULES = [
         "phase": 40,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/knowledge/overview", "/api/v1/knowledge/case-types", "/api/v1/knowledge/glossary", "/api/v1/knowledge/modules"],
+        "ai_dependency": "none",
     },
     {
         "category": "Security",
@@ -553,6 +598,7 @@ MODULES = [
         "phase": 46,
         "dev_time": "3 days",
         "api_endpoints": ["/api/v1/hxstream/events", "/api/v1/hxstream/ws", "/api/v1/hxstream/replay/{case_id}"],
+        "ai_dependency": "none",
     },
     {
         "category": "Security",
@@ -567,6 +613,7 @@ MODULES = [
             "/api/v1/hxlogs/analyse",
             "/api/v1/hxlogs/correlate",
         ],
+        "ai_dependency": "optional",
     },
     {
         "category": "Admin",
@@ -576,6 +623,7 @@ MODULES = [
         "phase": 20,
         "dev_time": "1 day",
         "api_endpoints": ["/api/v1/sitemap"],
+        "ai_dependency": "none",
     },
 ]
 
@@ -685,3 +733,33 @@ async def search_modules(q: str = ""):
         if q_lower in m["label"].lower() or q_lower in m["description"].lower()
     ]
     return {"results": results, "query": q}
+
+
+@router.get("/ai-status")
+async def ai_status():
+    """Probe whether the AI backend (Ollama) is reachable.
+
+    Returns {ai_available, degraded_modules} so the frontend can show a
+    degraded-mode banner in AI-dependent modules without blocking their
+    non-AI features.
+    """
+    settings = get_settings()
+    ollama_url = settings.ai_ollama_url.rstrip("/")
+    available = False
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
+            resp = await client.get(f"{ollama_url}/api/tags")
+            available = resp.status_code < 400
+    except Exception:
+        available = False
+
+    # ai_dependency tri-state (roadmap #11, §4.4): none | optional | required.
+    # When AI is down: "required" modules are unavailable, "optional" run degraded.
+    unavailable = [m["label"] for m in MODULES if m.get("ai_dependency") == "required" and not available]
+    degraded = [m["label"] for m in MODULES if m.get("ai_dependency") == "optional" and not available]
+    return {
+        "ai_available": available,
+        "unavailable_modules": unavailable,
+        "degraded_modules": degraded,
+    }

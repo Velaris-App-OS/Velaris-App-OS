@@ -6,7 +6,7 @@ SPDX-License-Identifier: BSL-1.1
 from __future__ import annotations
 
 import re
-from xml.etree import ElementTree as ET
+import defusedxml.ElementTree as ET
 
 from case_service.scout.base import (
     ArtifactType, CompatibilityLevel, ScannedArtifact, ScanResult,

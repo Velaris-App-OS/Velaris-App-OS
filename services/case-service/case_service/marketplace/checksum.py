@@ -26,6 +26,11 @@ class ManifestError(Exception):
 REQUIRED_FIELDS = {"id", "name", "type", "publisher", "publisher_tier", "outbound_domains"}
 VALID_TYPES = {"connector", "case_template", "module", "nlp_pack", "portal_theme", "bundle"}
 VALID_TIERS = {"official", "community"}
+# Roadmap #15: runtime co-existence split. "python" is the default and the
+# compatibility fallback; "wasm" is declarable NOW (the schema is locked
+# before HxSandbox ships) but rejected at install time until HxSandbox (#17)
+# can actually execute it.
+VALID_RUNTIMES = {"python", "wasm"}
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+")
 
 
@@ -89,5 +94,30 @@ def parse_and_validate_manifest(hxapp_bytes: bytes) -> dict[str, Any]:
     version = manifest.get("version", "")
     if not SEMVER_RE.match(str(version)):
         raise ManifestError(f"version '{version}' is not valid semver (must be X.Y.Z)")
+
+    # Manifest schema version (roadmap #14): v1 = locked RBAC format.
+    # Missing field = v1 (grandfathered); unsupported versions fail loudly.
+    from case_service.marketplace.manifest_version import (
+        ManifestVersionError, check_manifest_version,
+    )
+    try:
+        check_manifest_version(manifest)
+    except ManifestVersionError as e:
+        raise ManifestError(str(e))
+
+    # Runtime split (roadmap #15): missing = "python" (grandfathered).
+    runtime = manifest.get("runtime", "python")
+    if runtime not in VALID_RUNTIMES:
+        raise ManifestError(
+            f"Invalid runtime '{runtime}'. Must be one of: {', '.join(sorted(VALID_RUNTIMES))}"
+        )
+
+    # ai_dependency declaration (roadmap #11/#22, §4.4): optional, validated
+    # when present — none | optional | required.
+    ai_dep = manifest.get("ai_dependency")
+    if ai_dep is not None and ai_dep not in ("none", "optional", "required"):
+        raise ManifestError(
+            f"Invalid ai_dependency '{ai_dep}'. Must be one of: none, optional, required"
+        )
 
     return manifest

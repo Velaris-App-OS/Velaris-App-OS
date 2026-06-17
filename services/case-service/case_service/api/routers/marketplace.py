@@ -223,26 +223,38 @@ async def _fetch_official_index() -> list[dict[str, Any]]:
         return []
 
 
-def _effective_tier(source_url: str) -> str:
-    """Determine package tier from the source URL — never from the manifest.
+def _effective_tier(source_url: str, package_id: str = "") -> str:
+    """Determine package tier — never from the manifest. Official requires ALL of:
 
-    Extracts the GitHub org name from the URL and checks it against the
-    configured official orgs list. Works for both:
-      https://github.com/{org}/{repo}/...
-      https://raw.githubusercontent.com/{org}/{repo}/...
+      1. the source URL's GitHub org is in the configured official orgs,
+      2. the source URL is under the write-protected `official/` folder, AND
+      3. the package id is in the baked-in official registry (`official_registry.json`).
 
-    Any source not in the official orgs list is always Community regardless
-    of what its velaris.json declares — prevents self-tagging as Official.
+    All three matter because Official and Community now live in the SAME repo/org
+    (`Velaris-App-OS/Marketplace`, folders `official/` + `community/`) — the org
+    check alone would bless the whole repo, and even the registry id alone could be
+    claimed by a community entry (the community index shares the org). The
+    write-protected `official/` folder is the real boundary (only the Velaris org
+    can publish there); the registry is the per-id allowlist on top. A manifest
+    cannot self-tag, and a community contributor cannot append to the registry (a
+    platform-release change), so Official is unspoofable. Works for github.com and
+    raw.githubusercontent.com URLs.
+
+    A missing/empty `package_id` (callers that haven't resolved the id yet) can
+    never be Official — fail-closed.
     """
+    from case_service.marketplace.official_registry import is_registered_official
+
     settings = get_settings()
     official_orgs = {o.strip().lower() for o in settings.marketplace_official_orgs.split(",") if o.strip()}
 
-    # Extract org from GitHub-style URLs: domain/{org}/{repo}/...
+    # Extract org + path segments from GitHub-style URLs: domain/{org}/{repo}/...
     try:
         from urllib.parse import urlparse
-        path_parts = urlparse(source_url).path.strip("/").split("/")
-        org = path_parts[0].lower() if path_parts else ""
-        if org in official_orgs:
+        path_parts = [p.lower() for p in urlparse(source_url).path.strip("/").split("/")]
+        org = path_parts[0] if path_parts else ""
+        in_official_folder = "official" in path_parts
+        if org in official_orgs and in_official_folder and package_id and is_registered_official(package_id):
             return "official"
     except Exception:
         pass
@@ -430,8 +442,8 @@ async def _poll_source(
             existing.release_notes    = latest_entry.get("release_notes")
             existing.all_versions     = json.dumps(versions)
             existing.updated_at       = latest_entry.get("released_at", existing.updated_at)
-            # Tier always derived from source URL — never from the manifest
-            existing.publisher_tier   = _effective_tier(source.url)
+            # Tier derived from source URL org + baked official registry — never the manifest
+            existing.publisher_tier   = _effective_tier(source.url, pkg_id)
             existing.source_id        = source.id
             existing.fetched_at       = _utcnow()
 
@@ -453,8 +465,8 @@ async def _poll_source(
                 package_type=raw.get("type", "connector"),
                 category=raw.get("category", ""),
                 publisher=raw.get("publisher", source.name),
-                # Tier derived from source URL — manifest value ignored
-                publisher_tier=_effective_tier(source.url),
+                # Tier derived from source URL org + baked official registry — manifest ignored
+                publisher_tier=_effective_tier(source.url, pkg_id),
                 version=latest_ver,
                 price=raw.get("price", "free"),
                 price_label=raw.get("price_label"),
@@ -535,20 +547,31 @@ async def _record_update_available(
 
 
 async def _ensure_sources_seeded(session: AsyncSession) -> None:
-    """Seed the official Velaris index as a source if no sources exist yet."""
+    """Seed the Velaris official (and community) indexes as sources, once.
+
+    Both live in the Velaris-App-OS/Marketplace repo (folders official/ +
+    community/). The seeded `tier` is a display hint only — actual tier is always
+    re-derived per package by `_effective_tier` (org + registry)."""
     result = await session.execute(select(MarketplaceSourceModel))
     if result.scalars().first():
         return   # already seeded
 
     settings = get_settings()
-    official = MarketplaceSourceModel(
+    session.add(MarketplaceSourceModel(
         name="Velaris Official",
         url=settings.marketplace_index_url,
         tier="official",
         poll_interval_hours=settings.marketplace_official_poll_interval_hours,
         added_by="system",
-    )
-    session.add(official)
+    ))
+    if settings.marketplace_community_index_url:
+        session.add(MarketplaceSourceModel(
+            name="Velaris Community",
+            url=settings.marketplace_community_index_url,
+            tier="community",
+            poll_interval_hours=settings.marketplace_poll_interval_hours,
+            added_by="system",
+        ))
     await session.commit()
 
 
@@ -1071,8 +1094,18 @@ async def install_package(
                 hxapp_bytes = r.content
             from case_service.marketplace.checksum import verify_checksum, parse_and_validate_manifest
             verify_checksum(hxapp_bytes, pkg.checksum_sha256)
-            parse_and_validate_manifest(hxapp_bytes)
+            manifest = parse_and_validate_manifest(hxapp_bytes)
+            # Roadmap #15: wasm is a declarable runtime (schema locked ahead
+            # of HxSandbox) but cannot EXECUTE until HxSandbox (#17) ships —
+            # reject at install, not at first run.
+            if manifest.get("runtime", "python") == "wasm":
+                raise HTTPException(400,
+                    "This package declares runtime 'wasm' — HxSandbox is not "
+                    "yet available on this platform; only runtime 'python' "
+                    "packages can be installed.")
             logger.info("Package %s checksum + manifest verified", body.package_id)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"Package verification failed: {exc}")
 
@@ -1103,6 +1136,15 @@ async def submit_workspace(
         raise HTTPException(400, f"Workspace is already '{ws.status}'")
     if not user.is_admin and ws.created_by != user.user_id:
         raise HTTPException(403, "Cannot submit another user's workspace")
+    # Conformance gate (#27 Phase C, decision D3): a NEW submission must pass 100%
+    # structural conformance first. (Pre-gate packages are grandfathered separately
+    # via conformance_status='legacy_unverified' and are never re-submitted here.)
+    if ws.conformance_status not in ("structural_passed", "full_passed"):
+        raise HTTPException(
+            400,
+            "Workspace must pass the structural Conformance Suite before submission. "
+            "Run POST /api/v1/testsuite/conformance first.",
+        )
     ws.status = "submitted"
     ws.submitted_at = _utcnow()
     if body.notes:
@@ -1355,9 +1397,18 @@ async def list_installs(
 @router.delete("/installs/{install_id}")
 async def revoke_install(
     install_id: str,
+    delete_data: bool = False,
     user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    """Uninstall a package for this tenant.
+
+    `delete_data=false` (default) — **revoke**: close the gate (the app's routes/
+    UI go dark) but keep its data, so re-install is instant and lossless.
+    `delete_data=true` — **revoke + delete data**: also run the app's registered
+    data teardown (first-party official apps only). For HxTest this deletes its
+    AI-generated suites + runs/results; the core Test Suite data is untouched.
+    """
     _require_admin(user)
     install = await session.get(MarketplaceInstallModel, uuid.UUID(install_id))
     if not install:
@@ -1365,8 +1416,12 @@ async def revoke_install(
     if install.tenant_id != (user.tenant_id or "default"):
         raise HTTPException(403, "Cannot revoke install from another tenant")
     install.revoked_at = _utcnow()
+    teardown = {"deleted": False}
+    if delete_data:
+        from case_service.marketplace.app_lifecycle import teardown_package_data
+        teardown = await teardown_package_data(session, install.package_id, install.tenant_id)
     await session.commit()
-    return {"revoked": install_id, "package_id": install.package_id}
+    return {"revoked": install_id, "package_id": install.package_id, "data_teardown": teardown}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

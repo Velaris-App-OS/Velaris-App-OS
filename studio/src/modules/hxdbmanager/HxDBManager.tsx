@@ -38,6 +38,7 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 
 function fmtMs(ms: number | null) { return ms == null ? "—" : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`; }
 function fmtNum(n: number | null) { return n == null ? "—" : n.toLocaleString(); }
+function fmtCountdown(s: number) { const m = Math.floor(s / 60), r = s % 60; return `${m}:${r.toString().padStart(2, "0")}`; }
 
 // ── Pagination ────────────────────────────────────────────────────────────────
 function PaginationBar({ page, totalPages, total, pageSize, onChange }: {
@@ -257,6 +258,32 @@ function TableTab({ initialTable }: { initialTable: string | null }) {
   const [masked, setMasked]         = useState(false);
   const [expose, setExpose]         = useState(false);
 
+  // ── DBView — Tier 2 reveal for non-superadmin holders of db_manager.view_sensitive ──
+  const [dbviewPrivilege, setDbviewPrivilege] = useState(false);
+  const [dbviewExpiresIn, setDbviewExpiresIn] = useState(0);   // seconds remaining, 0 = not elevated
+  const [showReauth, setShowReauth]           = useState(false);
+  const [reauthPassword, setReauthPassword]   = useState("");
+  const [reauthErr, setReauthErr]             = useState<string | null>(null);
+  const [reauthBusy, setReauthBusy]           = useState(false);
+  const dbviewElevated = dbviewExpiresIn > 0;
+
+  const refreshDbviewStatus = useCallback(async () => {
+    try {
+      const d = await req("GET", "/reauth/status");
+      setDbviewPrivilege(!!d.has_dbview_privilege);
+      setDbviewExpiresIn(d.expires_in_seconds ?? 0);
+    } catch { /* status check is best-effort */ }
+  }, []);
+
+  useEffect(() => { refreshDbviewStatus(); }, [refreshDbviewStatus]);
+
+  // Countdown the elevation badge locally between status refreshes
+  useEffect(() => {
+    if (dbviewExpiresIn <= 0) return;
+    const t = setInterval(() => setDbviewExpiresIn(s => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [dbviewExpiresIn > 0]);
+
   useEffect(() => {
     req("GET", "/schema").then(d => setTables((d.tables ?? []).map((t: any) => t.table_name)));
   }, []);
@@ -276,6 +303,17 @@ function TableTab({ initialTable }: { initialTable: string | null }) {
   }, [pageSize]);
 
   useEffect(() => { if (table) load(table, page, sortCol, sortDir, expose); }, [table, page, sortCol, sortDir, expose, load]);
+
+  const submitReauth = async () => {
+    setReauthBusy(true); setReauthErr(null);
+    try {
+      const d = await req("POST", "/reauth", { password: reauthPassword });
+      setDbviewExpiresIn(d.expires_in_seconds ?? 0);
+      setShowReauth(false); setReauthPassword("");
+      if (table) load(table, page, sortCol, sortDir, expose);   // re-fetch so Tier 2 reveals immediately
+    } catch (e: any) { setReauthErr(e.message); }
+    finally { setReauthBusy(false); }
+  };
 
   const cols = rows.length > 0 ? Object.keys(rows[0]) : [];
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -331,7 +369,20 @@ function TableTab({ initialTable }: { initialTable: string | null }) {
             {expose ? "Hide Sensitive Values" : "Expose Sensitive Values"}
           </button>
         )}
-        {table && masked && !expose && (
+        {/* DBView — Tier 2 reveal for non-superadmin holders of db_manager.view_sensitive */}
+        {table && !isSuperadmin && dbviewPrivilege && masked && !dbviewElevated && (
+          <button onClick={() => { setReauthErr(null); setReauthPassword(""); setShowReauth(true); }}
+            style={{ ...S.btn, background: "rgba(56,189,248,.12)", color: "var(--status-running)",
+              border: "1px solid rgba(56,189,248,.3)" }}>
+            Unlock Account Data (DBView)
+          </button>
+        )}
+        {table && !isSuperadmin && dbviewElevated && (
+          <span style={{ fontSize: 11, color: "var(--status-running)", background: "rgba(56,189,248,.1)", border: "1px solid rgba(56,189,248,.3)", borderRadius: 4, padding: "2px 8px" }}>
+            DBView active — expires in {fmtCountdown(dbviewExpiresIn)}
+          </span>
+        )}
+        {table && masked && !expose && !dbviewElevated && (
           <span style={{ fontSize: 11, color: "var(--status-running)", background: "rgba(251,191,36,.1)", border: "1px solid rgba(251,191,36,.3)", borderRadius: 4, padding: "2px 8px" }}>
             Sensitive columns masked
           </span>
@@ -343,6 +394,39 @@ function TableTab({ initialTable }: { initialTable: string | null }) {
       {expose && (
         <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 6, padding: "10px 14px", fontSize: 12, color: "var(--status-failed)" }}>
           Sensitive values are visible. This view is logged. Export is disabled while Expose is active — sensitive data cannot be written to a file.
+        </div>
+      )}
+
+      {/* DBView elevation banner */}
+      {!isSuperadmin && dbviewElevated && (
+        <div style={{ background: "rgba(56,189,248,.08)", border: "1px solid rgba(56,189,248,.3)", borderRadius: 6, padding: "10px 14px", fontSize: 12, color: "var(--status-running)" }}>
+          Account/financial data (Tier 2) is visible for {fmtCountdown(dbviewExpiresIn)}. This view is logged. Credentials and secrets (Tier 1) remain masked regardless.
+        </div>
+      )}
+
+      {/* DBView re-authentication modal — "sudo mode" */}
+      {showReauth && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex",
+          alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+          onClick={() => !reauthBusy && setShowReauth(false)}>
+          <div style={{ ...S.card, width: 360, marginBottom: 0 }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>Confirm your password</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Viewing account numbers, IBANs, and other Tier 2 data requires re-entering your
+              password — like <code>sudo</code>. Access is unlocked for 15 minutes and is logged.
+            </div>
+            <input type="password" autoFocus value={reauthPassword}
+              onChange={e => setReauthPassword(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && reauthPassword && !reauthBusy) submitReauth(); }}
+              placeholder="Current password" style={{ ...S.input, marginBottom: 10 }} />
+            {reauthErr && <div style={{ ...S.err, marginBottom: 10 }}>{reauthErr}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button style={{ ...S.btn, ...S.btnGhost }} onClick={() => setShowReauth(false)} disabled={reauthBusy}>Cancel</button>
+              <button style={{ ...S.btn, ...S.btnPrimary }} onClick={submitReauth} disabled={reauthBusy || !reauthPassword}>
+                {reauthBusy ? "Verifying…" : "Unlock"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

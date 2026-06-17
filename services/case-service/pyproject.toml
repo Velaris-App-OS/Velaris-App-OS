@@ -43,6 +43,8 @@ dependencies = [
     "docker>=7.0.0",
     "faker>=25.0.0",
     "semver>=3.0.0",
+    "webauthn>=2.0.0",
+    "wasmtime>=45,<46",
 ]
 
 [project.optional-dependencies]

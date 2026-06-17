@@ -20,6 +20,7 @@ import {
   completeAssignment,
   dismissAssignment,
   getAssignmentForm,
+  getCaseVariables,
   submitForm,
   initiatePaymentRequest,
   listCasePaymentRequests,
@@ -1742,6 +1743,7 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
   const CURRENT_USER = user?.user_id ?? "current-user";
   const [showForm, setShowForm] = React.useState(false);
   const [formData, setFormData] = React.useState<any>(null);
+  const [prefillValues, setPrefillValues] = React.useState<Record<string, any>>({});
   const [loadingForm, setLoadingForm] = React.useState(false);
   const [confirmDismiss, setConfirmDismiss] = React.useState(false);
 
@@ -1754,6 +1756,23 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
     try {
       const formInfo = await getAssignmentForm(assignment.id);
       if (formInfo.has_form && formInfo.form) {
+        // Pre-fill from case variables (Case Variables Phase 3): explicit
+        // per-field `variable` binding wins, else field_key match. Reads are
+        // redacted server-side — masked values show as ***.
+        let prefill: Record<string, any> = {};
+        try {
+          const { variables } = await getCaseVariables(assignment.case_id);
+          for (const section of formInfo.form.definition_json?.sections ?? []) {
+            for (const field of section.fields ?? []) {
+              const key = field.field_key || field.id;
+              const source = field.variable || key;
+              if (variables[source] !== undefined && variables[source] !== null) {
+                prefill[key] = variables[source];
+              }
+            }
+          }
+        } catch { /* variables unavailable — open the form unfilled */ }
+        setPrefillValues(prefill);
         setFormData(formInfo.form);
         setShowForm(true);
       } else {
@@ -1869,6 +1888,8 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
             <FormRenderer
               formName={formData.name}
               definition={formData.definition_json}
+              initialValues={prefillValues}
+              caseId={assignment.case_id}
               onSubmit={handleFormSubmit}
               onCancel={() => setShowForm(false)}
             />

@@ -5,6 +5,7 @@ import {
 } from "@shared/api/client";
 import { BRAND } from "@/branding";
 import { Card, Button, Spinner } from "@shared/components";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const PEGA_SAMPLE = `// Pega Activity: CalculatePayout
 Property.pyStatus = "Processing";
@@ -82,6 +83,8 @@ export default function ScoutAI() {
 
   return (
     <div style={{ padding: "var(--space-xl) var(--space-2xl)", width: "100%", overflow: "auto", height: "100%", boxSizing: "border-box" }}>
+      <AiUnavailableBanner featureName="AI code analysis" />
+
       {status && (
         <div style={{
           padding: "var(--space-sm) var(--space-md)",

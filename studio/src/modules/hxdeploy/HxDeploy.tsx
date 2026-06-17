@@ -4,6 +4,7 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@shared/components";
+import { PlatformRolloutPlans } from "@shared/components/PlatformRolloutPlans";
 import { useAuth } from "@/auth";
 
 const API = "/api/v1/deploy";
@@ -258,6 +259,9 @@ function EnvironmentsTab({ activeEnv, onEnvsChanged }: { activeEnv: string; onEn
           <Button onClick={handleAdd}>Register</Button>
         </div>
       )}
+
+      {/* PUO Phase 3 — platform code rollouts (separate from artifact deployment) */}
+      <PlatformRolloutPlans />
     </div>
   );
 }

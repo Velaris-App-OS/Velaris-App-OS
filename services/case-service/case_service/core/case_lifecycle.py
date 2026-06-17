@@ -29,11 +29,92 @@ from case_service.db import repository as repo
 logger = logging.getLogger(__name__)
 
 
+def _sla_uses_v2(sla_policy: dict[str, Any]) -> bool:
+    """P34b — a policy opts into v2 via use_v2=true OR escalation_tree_id."""
+    return bool(sla_policy.get("use_v2") or sla_policy.get("escalation_tree_id"))
+
+
+async def _start_policy_sla(
+    session: AsyncSession,
+    *,
+    case_id: uuid.UUID,
+    case_type_id: uuid.UUID | None,
+    sla_policy: dict[str, Any],
+    target_id: str,
+    tenant_id: str | None = None,
+):
+    """Start one SLA instance, routing to v2 when the policy opts in."""
+    if _sla_uses_v2(sla_policy):
+        return await sla_tracker.start_sla_v2(
+            session,
+            case_id=case_id,
+            case_type_id=case_type_id,
+            sla_policy=sla_policy,
+            target_id=target_id,
+            tenant_id=tenant_id,
+        )
+    return await sla_tracker.start_sla(
+        session,
+        case_id=case_id,
+        sla_policy=sla_policy,
+        target_id=target_id,
+    )
+
+
+async def start_stage_slas(
+    session: AsyncSession,
+    *,
+    case_id: uuid.UUID,
+    case_type_id: uuid.UUID | None,
+    stage: dict[str, Any],
+    case_type_def: dict[str, Any],
+    tenant_id: str | None = None,
+) -> int:
+    """Start the SLA configured on a stage, if any and not already running.
+
+    Chokepoint for every stage-entry path (manual transition, auto-advance,
+    module-driven advance). Idempotent: re-entering a stage while its SLA
+    is still active does not start a duplicate.
+    """
+    sla_policy_id = stage.get("sla_policy_id")
+    if not sla_policy_id:
+        return 0
+
+    stage_id = stage["id"]
+    existing = await repo.get_sla_instances(session, case_id)
+    for sla in existing:
+        if (
+            sla.sla_policy_id == sla_policy_id
+            and sla.target_id == stage_id
+            and sla.status in ("on_track", "at_risk", "paused")
+        ):
+            return 0
+
+    for sp in case_type_def.get("sla_policies", []):
+        if sp["id"] == sla_policy_id:
+            await _start_policy_sla(
+                session,
+                case_id=case_id,
+                case_type_id=case_type_id,
+                sla_policy=sp,
+                target_id=stage_id,
+                tenant_id=tenant_id,
+            )
+            return 1
+    logger.warning(
+        "Stage %s references SLA policy %s not present in case type definition",
+        stage_id, sla_policy_id,
+    )
+    return 0
+
+
 async def on_case_created(
     session: AsyncSession,
     *,
     case_id: uuid.UUID,
     case_type_def: dict[str, Any],
+    case_type_id: uuid.UUID | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Post-creation hook: start case-level SLAs and compute initial urgency.
 
@@ -44,11 +125,13 @@ async def on_case_created(
     for sla_policy in case_type_def.get("sla_policies", []):
         # Only case-level SLAs (not stage-scoped)
         if sla_policy.get("scope", "case") == "case":
-            await sla_tracker.start_sla(
+            await _start_policy_sla(
                 session,
                 case_id=case_id,
+                case_type_id=case_type_id,
                 sla_policy=sla_policy,
                 target_id=str(case_id),
+                tenant_id=tenant_id,
             )
 
     # Initial urgency
@@ -77,18 +160,13 @@ async def on_stage_entered(
     )
 
     # Start stage SLA if configured
-    sla_policy_id = stage.get("sla_policy_id")
-    if sla_policy_id:
-        # Find the SLA policy in the case type definition
-        for sp in case_type_def.get("sla_policies", []):
-            if sp["id"] == sla_policy_id:
-                await sla_tracker.start_sla(
-                    session,
-                    case_id=case_id,
-                    sla_policy=sp,
-                    target_id=stage_id,
-                )
-                break
+    await start_stage_slas(
+        session,
+        case_id=case_id,
+        case_type_id=None,
+        stage=stage,
+        case_type_def=case_type_def,
+    )
 
     # Create assignments
     steps = stage.get("steps", [])

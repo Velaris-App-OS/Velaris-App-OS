@@ -13,8 +13,8 @@ class TestAppConfig:
     def test_default_config(self):
         from case_service.codegen.generator import AppConfig
         c = AppConfig()
-        assert c.app_name == "HELIX Mobile"
-        assert c.app_slug == "helix-mobile"
+        assert c.app_name == "Velaris Mobile"
+        assert c.app_slug == "velaris-mobile"
 
     def test_slug_sanitization(self):
         from case_service.codegen.generator import AppConfig

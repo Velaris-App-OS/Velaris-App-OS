@@ -5,6 +5,7 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@shared/components";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/hxcanvas";
 function _authHdr(): Record<string, string> {
@@ -73,6 +74,8 @@ const STICKY_COLORS = ["#fde68a", "#86efac", "#93c5fd", "#f9a8d4", "#c4b5fd", "#
 function BoardCard({ board, onOpen, onDelete }: { board: Board; onOpen: () => void; onDelete: () => void }) {
   return (
     <div style={S.card} onClick={onOpen}>
+      <AiUnavailableBanner featureName="AI BPMN export" />
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>{board.name}</div>
         <button

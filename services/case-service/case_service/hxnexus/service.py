@@ -37,7 +37,7 @@ _NBA_SYSTEM = GOVERNED_SYSTEM_PROMPT + """
 
 TASK: Next-Best-Action
 Given the current state of a case, suggest the 3 most valuable next actions
-for the case worker — based solely on the Helix workflow for this case type.
+for the case worker — based solely on the Velaris workflow for this case type.
 Return ONLY valid JSON: {"suggestions": [{"action": "...", "reason": "...", "priority": "high|medium|low"}]}
 Do not include any text outside the JSON object."""
 
@@ -134,14 +134,35 @@ async def qa_over_documents(
     top_k: int = 5,
     backend=None,
     vector_store=None,
+    use_cloud: bool = False,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
-    """RAG Q&A: embed question → retrieve chunks → answer with LLM."""
+    """RAG Q&A: embed question → retrieve chunks → answer with LLM.
+
+    Group H (egress guard layers 4-7): when an external completion provider
+    is configured, retrieval is minimized (fewer chunks, relevance floor,
+    context cap), outgoing text is pseudonymized, the escalation ladder
+    answers locally first (use_cloud=True opts into external for this call),
+    and any actual egress is audited + disclosed via `external_ai`.
+    The minimized/pseudonymized prompt is used for BOTH ladder legs so data
+    is never un-minimized even when the local leg unexpectedly fails.
+    """
+    from case_service.config import get_settings
     from case_service.db.models import DocumentChunkModel
 
     llm = backend or get_llm_backend()
 
+    external_capable = bool(getattr(llm, "is_external", False))
+    if hasattr(llm, "prefer_external"):
+        llm.prefer_external = use_cloud
+        llm.suppress_generic_audit = True  # this flow writes its own rich audit row
+
+    settings = get_settings()
+    if external_capable:
+        top_k = min(top_k, settings.ai_egress_top_k)
+
     if not llm.available:
-        return {"answer": _UNAVAILABLE, "sources": []}
+        return {"answer": _UNAVAILABLE, "sources": [], "external_ai": False}
 
     q_embedding = await llm.embed(question)
 
@@ -169,18 +190,62 @@ async def qa_over_documents(
         )[:top_k]
 
     if not chunks:
-        return {"answer": "No indexed documents found for this case.", "sources": []}
+        return {"answer": "No indexed documents found for this case.", "sources": [], "external_ai": False}
+
+    # Layer 5: minimization when the completion may leave the platform
+    pseudo = None
+    if external_capable:
+        chunks = [c for c in chunks if c["score"] >= settings.ai_egress_min_score] or chunks[:1]
+        budget = settings.ai_egress_max_context_chars
+        kept, used = [], 0
+        for c in chunks:
+            text = c["text"] or ""
+            if used + len(text) > budget and kept:
+                break
+            kept.append(c)
+            used += len(text)
+        chunks = kept
+
+        # Layer 6: pseudonymize everything that may leave
+        from .pseudonymizer import Pseudonymizer
+        pseudo = Pseudonymizer()
+        question_out = pseudo.redact(question)
+        chunk_texts = [pseudo.redact(c["text"] or "") for c in chunks]
+    else:
+        question_out = question
+        chunk_texts = [c["text"] or "" for c in chunks]
 
     context = "\n\n---\n\n".join(
-        f"[Excerpt {i+1}]\n{wrap_document(c['text'])}" for i, c in enumerate(chunks)
+        f"[Excerpt {i+1}]\n{wrap_document(t)}" for i, t in enumerate(chunk_texts)
     )
-    prompt = wrap_user_input(f"Question: {question}") + f"\n\nDocument excerpts:\n{context}"
+    prompt = wrap_user_input(f"Question: {question_out}") + f"\n\nDocument excerpts:\n{context}"
 
     answer = await llm.complete(prompt, system=_QA_SYSTEM, temperature=0.2)
     answer = scrub_output(answer or _UNAVAILABLE)
+    if pseudo is not None:
+        answer = pseudo.restore(answer)
+
+    # Layer 7: audit + disclose actual egress
+    went_external = external_capable and getattr(llm, "last_route", "external") == "external"
+    if went_external:
+        from .egress_audit import chunk_hash, record_egress
+        await record_egress(
+            session,
+            user_id=user_id,
+            purpose="doc_qa",
+            provider=getattr(llm, "backend_name", "external"),
+            case_id=case_id,
+            doc_ids=sorted({c.get("metadata", {}).get("document_id") for c in chunks if c.get("metadata")}),
+            chunk_hashes=[chunk_hash(t) for t in chunk_texts],
+            bytes_out=len(prompt) + len(_QA_SYSTEM),
+            pseudonymized=pseudo is not None,
+            redactions=pseudo.replaced_count if pseudo else 0,
+        )
+        await session.commit()
+
     sources = [{"chunk_id": c["chunk_id"], "score": round(c["score"], 4),
                 "document_id": c.get("metadata", {}).get("document_id")} for c in chunks]
-    return {"answer": answer, "sources": sources}
+    return {"answer": answer, "sources": sources, "external_ai": went_external}
 
 
 # ── Multi-turn chat ───────────────────────────────────────────────────
@@ -188,8 +253,8 @@ async def qa_over_documents(
 _CHAT_SYSTEM = GOVERNED_SYSTEM_PROMPT + """
 
 TASK: Conversational Assistant
-Help the user work effectively within the Helix platform. Answer questions about
-their cases, guide them through Helix features, and suggest next steps.
+Help the user work effectively within the Velaris platform. Answer questions about
+their cases, guide them through Velaris features, and suggest next steps.
 Be helpful, concise, and professional. Decline anything outside your permitted scope."""
 
 
@@ -201,13 +266,23 @@ async def chat(
     message: str,
     tenant_id: str | None,
     backend=None,
+    use_cloud: bool = False,
 ) -> dict[str, Any]:
-    """Send a message and get a response. Creates conversation if needed."""
+    """Send a message and get a response. Creates conversation if needed.
+
+    Group H: with an external provider configured, the outgoing prompt
+    (message + history) is pseudonymized, the ladder answers locally first
+    (use_cloud opts into external), and actual egress is audited + disclosed.
+    """
     from case_service.db.models import (
         CopilotConversationModel, CopilotMessageModel,
     )
 
     llm = backend or get_llm_backend()
+    external_capable = bool(getattr(llm, "is_external", False))
+    if hasattr(llm, "prefer_external"):
+        llm.prefer_external = use_cloud
+        llm.suppress_generic_audit = True  # this flow writes its own rich audit row
 
     # Get or create conversation
     conv = None
@@ -239,19 +314,47 @@ async def chat(
             user_id, scan.signals, conv.id,
         )
 
-    # Build prompt with history; wrap current message in data delimiter
-    history_text = "\n".join(
-        f"{'User' if m.role == 'user' else 'HxNexus'}: {m.content}"
-        for m in history
-    )
-    wrapped_msg = wrap_user_input(message)
+    # Build prompt with history; wrap current message in data delimiter.
+    # Layer 6: pseudonymize everything that may leave the platform.
+    pseudo = None
+    if external_capable:
+        from .pseudonymizer import Pseudonymizer
+        pseudo = Pseudonymizer()
+        message_out = pseudo.redact(message)
+        history_text = "\n".join(
+            f"{'User' if m.role == 'user' else 'HxNexus'}: {pseudo.redact(m.content or '')}"
+            for m in history
+        )
+    else:
+        message_out = message
+        history_text = "\n".join(
+            f"{'User' if m.role == 'user' else 'HxNexus'}: {m.content}"
+            for m in history
+        )
+    wrapped_msg = wrap_user_input(message_out)
     prompt = f"{history_text}\n{wrapped_msg}" if history_text else wrapped_msg
 
+    went_external = False
     if not llm.available:
         reply = _UNAVAILABLE
     else:
         reply = await llm.complete(prompt, system=_CHAT_SYSTEM, temperature=0.5, max_tokens=512)
         reply = scrub_output(reply or _UNAVAILABLE)
+        if pseudo is not None:
+            reply = pseudo.restore(reply)
+        went_external = external_capable and getattr(llm, "last_route", "external") == "external"
+        if went_external:
+            from .egress_audit import record_egress
+            await record_egress(
+                session,
+                user_id=user_id,
+                purpose="chat",
+                provider=getattr(llm, "backend_name", "external"),
+                case_id=case_id,
+                bytes_out=len(prompt) + len(_CHAT_SYSTEM),
+                pseudonymized=pseudo is not None,
+                redactions=pseudo.replaced_count if pseudo else 0,
+            )
 
     # Persist user message + assistant reply
     session.add(CopilotMessageModel(conversation_id=conv.id, role="user", content=message))
@@ -263,6 +366,7 @@ async def chat(
         "conversation_id": str(conv.id),
         "reply": reply,
         "llm_backend": llm.backend_name,
+        "external_ai": went_external,
     }
 
 

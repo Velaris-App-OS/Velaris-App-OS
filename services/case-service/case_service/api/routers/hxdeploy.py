@@ -570,7 +570,10 @@ async def import_bundle(
     if not isinstance(bundle, dict):
         raise HTTPException(400, "Body must be a JSON object (bundle)")
 
-    result = await apply_bundle(session, bundle, target_tenant)
+    try:
+        result = await apply_bundle(session, bundle, target_tenant)
+    except ValueError as ve:
+        raise HTTPException(400, str(ve))
     await session.commit()
     return {**result, "target_env": target_env.name, "tenant_id": target_tenant}
 

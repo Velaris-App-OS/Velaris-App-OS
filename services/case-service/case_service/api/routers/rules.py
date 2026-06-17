@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.api.schemas.rules import (
@@ -34,6 +34,30 @@ from case_service.db.session import get_session
 
 router = APIRouter(prefix="/rules", tags=["rules"], dependencies=[Depends(get_current_user)])
 
+_EXPRESSION_RULE_TYPES = ("expression", "declare_expression")
+
+
+def _validate_expression_rule(rule_type: str, definition_json: dict) -> None:
+    """Hard-reject non-CONFORMING expression rules at write time.
+
+    HxSandbox #17 Phase 1: new expression rules must parse within the strict
+    safe grammar, so attacker-supplied input never reaches the hardened
+    ``eval`` fallback (which exists only to keep pre-existing rules running
+    during the deprecation window). Raises HTTP 400 otherwise.
+    """
+    if rule_type not in _EXPRESSION_RULE_TYPES:
+        return
+    from case_service.core.safe_expression import (
+        Classification, classify_expression,
+    )
+    expression = (definition_json or {}).get("expression", "")
+    classification, reason = classify_expression(expression)
+    if classification is not Classification.CONFORMING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expression rejected by HxSandbox: {reason or classification.value}",
+        )
+
 
 # ─── CRUD ─────────────────────────────────────────────────────────
 
@@ -41,8 +65,10 @@ router = APIRouter(prefix="/rules", tags=["rules"], dependencies=[Depends(get_cu
 @router.post("", response_model=RuleResponse, status_code=201)
 async def create_rule(
     body: RuleCreate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
+    _validate_expression_rule(body.rule_type, body.definition_json)
     rule = await repo.create_rule(
         session,
         data={
@@ -56,6 +82,11 @@ async def create_rule(
             "priority": body.priority,
         },
     )
+    # #27 Part B: a rule change can affect AI scenarios → flag them stale (manual
+    # regen). scope_target_id is the case type for case-type-scoped rules; None
+    # (global) flags all generated suites.
+    from case_service.testsuite import regen
+    background_tasks.add_task(regen.bg_scenario_source_changed, body.scope_target_id)
     return rule
 
 
@@ -81,6 +112,51 @@ async def list_rules(
     )
 
 
+@router.get("/lint")
+async def lint_expression_rules(
+    scope: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Classify every stored expression rule (roadmap #28, pulled forward).
+
+    HxSandbox #17 Phase 1: reports, per rule, whether it is CONFORMING (runs
+    on the safe evaluator), NEEDS_MIGRATION (still runs on the hardened
+    fallback during the deprecation window), or REJECTED (escape attempt /
+    over-limit — returns None at runtime). No rule is migrated automatically.
+    """
+    from case_service.core.safe_expression import (
+        Classification, classify_expression,
+    )
+
+    findings: list[dict] = []
+    summary = {c.value: 0 for c in Classification}
+    for rule_type in _EXPRESSION_RULE_TYPES:
+        items, _ = await repo.list_rules(
+            session, rule_type=rule_type, scope=scope, offset=0, limit=10_000,
+        )
+        for rule in items:
+            expression = (rule.definition_json or {}).get("expression", "")
+            classification, reason = classify_expression(expression)
+            summary[classification.value] += 1
+            findings.append({
+                "rule_id": str(rule.id),
+                "name": rule.name,
+                "rule_type": rule.rule_type,
+                "scope": rule.scope,
+                "scope_target_id": rule.scope_target_id,
+                "enabled": rule.enabled,
+                "classification": classification.value,
+                "reason": reason,
+                "expression": expression,
+            })
+
+    return {
+        "summary": summary,
+        "total": len(findings),
+        "findings": findings,
+    }
+
+
 @router.get("/{rule_id}", response_model=RuleResponse)
 async def get_rule(
     rule_id: uuid.UUID,
@@ -96,6 +172,7 @@ async def get_rule(
 async def update_rule(
     rule_id: uuid.UUID,
     body: RuleUpdate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
     rule = await repo.get_rule(session, rule_id)
@@ -104,6 +181,7 @@ async def update_rule(
 
     values = {}
     if body.definition_json is not None:
+        _validate_expression_rule(rule.rule_type, body.definition_json)
         values["definition_json"] = body.definition_json
     if body.enabled is not None:
         values["enabled"] = body.enabled
@@ -112,6 +190,9 @@ async def update_rule(
 
     if values:
         await repo.update_rule(session, rule_id, values=values)
+        # #27 Part B: rule changed → flag affected AI scenarios stale (manual regen).
+        from case_service.testsuite import regen
+        background_tasks.add_task(regen.bg_scenario_source_changed, rule.scope_target_id)
 
     return await repo.get_rule(session, rule_id)
 
@@ -119,11 +200,17 @@ async def update_rule(
 @router.delete("/{rule_id}", status_code=204)
 async def delete_rule(
     rule_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
+    rule = await repo.get_rule(session, rule_id)         # capture target before delete
     deleted = await repo.delete_rule(session, rule_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Rule not found")
+    # #27 Part B: rule removed → flag affected AI scenarios stale (manual regen).
+    from case_service.testsuite import regen
+    background_tasks.add_task(regen.bg_scenario_source_changed,
+                              rule.scope_target_id if rule else None)
 
 
 # ─── Evaluation ───────────────────────────────────────────────────

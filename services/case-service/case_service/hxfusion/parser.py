@@ -5,10 +5,24 @@ sequence flows.  No BPMN engine library dependency — uses stdlib xml.etree.
 """
 from __future__ import annotations
 
+import ast
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
+
+# AST node types allowed in BPMN condition expressions.
+# Call, Attribute, Subscript, Import etc. are absent — any such node in a
+# parsed expression is rejected before eval() is ever called.
+_ALLOWED_EXPR_NODES = frozenset({
+    ast.Expression,
+    ast.BoolOp, ast.And, ast.Or,
+    ast.UnaryOp, ast.Not,
+    ast.Compare,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.Name, ast.Constant,
+    ast.Load,   # context node on every Name — must be allowed
+})
 
 # BPMN 2.0 namespaces
 _NS = {
@@ -172,18 +186,32 @@ def parse(bpmn_xml: str) -> BpmnProcess:
 
 
 def _eval_condition(expr: str, context: dict) -> bool:
-    """Evaluate a simple condition expression against context.
+    """Evaluate a BPMN condition expression against context.
 
     Supports: ${field == 'value'}, ${field > 5}, ${field}, Python-style
-    and BPMN/Groovy-style (true/false/null → True/False/None).
-    Falls back to False on any error.
+    and BPMN/Groovy-style literals (true/false/null).
+
+    Security: the expression is parsed to an AST and every node type is
+    checked against _ALLOWED_EXPR_NODES before eval() is called. Any node
+    that could cause side-effects (Call, Attribute, Subscript, Import, …)
+    causes an immediate False return — eval() never runs.
     """
     stripped = re.sub(r"^\$\{(.+)\}$", r"\1", expr.strip())
-    # Normalise BPMN/JS literals to Python equivalents
     stripped = re.sub(r"\btrue\b",  "True",  stripped)
     stripped = re.sub(r"\bfalse\b", "False", stripped)
     stripped = re.sub(r"\bnull\b",  "None",  stripped)
     try:
-        return bool(eval(stripped, {"__builtins__": {}}, context))  # noqa: S307
+        tree = ast.parse(stripped, mode="eval")
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if type(node) not in _ALLOWED_EXPR_NODES:
+            return False
+    try:
+        return bool(eval(  # noqa: S307 — AST-validated; no calls/attrs/subscripts
+            compile(tree, "<bpmn_condition>", "eval"),
+            {"__builtins__": {}},
+            context,
+        ))
     except Exception:
         return False

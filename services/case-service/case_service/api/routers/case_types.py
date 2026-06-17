@@ -213,6 +213,10 @@ async def update_case_type(
     # Auto-regenerate any linked HxDocs lifecycle articles in the background
     if "definition_json" in values:
         background_tasks.add_task(_sync_lifecycle_docs, case_type_id)
+        # #27 Part B: definition changed → refresh the case type's structural test
+        # suite (deterministic); its AI scenarios are flagged stale for manual regen.
+        from case_service.testsuite import regen
+        background_tasks.add_task(regen.bg_case_type_changed, case_type_id)
 
     return result
 

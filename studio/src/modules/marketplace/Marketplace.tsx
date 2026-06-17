@@ -868,11 +868,11 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
                 Host in your own repo, submit one URL to the index.
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <a href="https://github.com/velaris-marketplace/index" target="_blank" rel="noreferrer"
+                <a href="https://github.com/Velaris-App-OS/Marketplace/tree/main/community" target="_blank" rel="noreferrer"
                   style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}>
                   Submit your source URL →
                 </a>
-                <a href="https://github.com/velaris-marketplace/index/blob/main/PUBLISHING.md" target="_blank" rel="noreferrer"
+                <a href="https://github.com/Velaris-App-OS/Marketplace/blob/main/community/APP_TEMPLATE.md" target="_blank" rel="noreferrer"
                   style={{ fontSize: 11, color: "var(--text-muted)", textDecoration: "none" }}>
                   Publishing guide
                 </a>

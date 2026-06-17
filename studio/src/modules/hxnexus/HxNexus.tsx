@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 type Tab = "chat" | "suggest" | "qa" | "translator";
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant"; content: string; external_ai?: boolean };
 type Suggestion = { action: string; reason: string; priority: "high" | "medium" | "low" };
 type BackendStatus = { name: string; backend: string; available: boolean; capabilities: string[] };
 type Summary = { summary: string; key_points: string[]; action_items: string[] };
@@ -60,6 +61,8 @@ export default function HxNexus() {
   const [qaLoading, setQaLoading] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [useCloud, setUseCloud] = useState(false);  // Group H: per-query external-AI opt-in
+  const [qaExternal, setQaExternal] = useState(false);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
 
@@ -81,14 +84,14 @@ export default function HxNexus() {
     setMessages(m => [...m, { role: "user", content: userMsg }]);
     setChatLoading(true);
     try {
-      const body: any = { message: userMsg };
+      const body: any = { message: userMsg, use_cloud: useCloud };
       if (convId) body.conversation_id = convId;
       if (caseId.trim()) body.case_id = caseId.trim();
-      const res = await apiJSON<{ reply: string; conversation_id: string }>(
+      const res = await apiJSON<{ reply: string; conversation_id: string; external_ai?: boolean }>(
         "/api/v1/hxnexus/chat", { method: "POST", body: JSON.stringify(body) }
       );
       setConvId(res.conversation_id);
-      setMessages(m => [...m, { role: "assistant", content: res.reply }]);
+      setMessages(m => [...m, { role: "assistant", content: res.reply, external_ai: res.external_ai }]);
     } catch (e: any) {
       setMessages(m => [...m, { role: "assistant", content: `Error: ${e.message}` }]);
     } finally {
@@ -141,14 +144,15 @@ export default function HxNexus() {
 
   async function fetchQA() {
     if (!qaCaseId.trim() || !qaQuestion.trim()) return;
-    setQaLoading(true); setQaError(null); setQaAnswer(null); setQaSources([]);
+    setQaLoading(true); setQaError(null); setQaAnswer(null); setQaSources([]); setQaExternal(false);
     try {
-      const res = await apiJSON<{ answer: string; sources: any[] }>(
+      const res = await apiJSON<{ answer: string; sources: any[]; external_ai?: boolean }>(
         `/api/v1/hxnexus/cases/${qaCaseId.trim()}/qa`,
-        { method: "POST", body: JSON.stringify({ question: qaQuestion.trim(), top_k: 5 }) }
+        { method: "POST", body: JSON.stringify({ question: qaQuestion.trim(), top_k: 5, use_cloud: useCloud }) }
       );
       setQaAnswer(res.answer);
       setQaSources(res.sources || []);
+      setQaExternal(!!res.external_ai);
     } catch (e: any) {
       setQaError(e.message);
     } finally {
@@ -181,6 +185,8 @@ export default function HxNexus() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <AiUnavailableBanner featureName="AI chat & suggestions" />
+
       {/* Tab bar — matches Work Center format, no duplicate title */}
       <div style={{
         padding: "var(--space-md) var(--space-2xl)",
@@ -287,6 +293,11 @@ export default function HxNexus() {
                 whiteSpace: "pre-wrap",
               }}>
                 {m.content}
+                {m.external_ai && (
+                  <div style={{ fontSize: 10, opacity: 0.65, marginTop: 4 }}>
+                    ☁ answered using external AI (minimized &amp; pseudonymized)
+                  </div>
+                )}
               </div>
             ))}
             {chatLoading && (
@@ -298,7 +309,12 @@ export default function HxNexus() {
           </div>
 
           {/* Input */}
-          <div style={{ padding: "var(--space-md) var(--space-2xl)", borderTop: "1px solid var(--border-subtle)", display: "flex", gap: 8, flexShrink: 0 }}>
+          <div style={{ padding: "var(--space-md) var(--space-2xl)", borderTop: "1px solid var(--border-subtle)", display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}>
+            <label title="Escalate this question to the configured external AI provider (content is minimized and pseudonymized before it leaves the platform)"
+              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer" }}>
+              <input type="checkbox" checked={useCloud} onChange={e => setUseCloud(e.target.checked)} />
+              ☁ cloud AI
+            </label>
             <input
               value={input}
               onChange={e => setInput(e.target.value)}
@@ -403,6 +419,11 @@ export default function HxNexus() {
             <div style={{ marginBottom: 20 }}>
               <div style={{ padding: 16, background: "var(--accent-dim)", border: "1px solid var(--border-subtle)", borderRadius: 10, fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
                 <strong style={{ color: "#0d9488" }}>HxNexus:</strong> {qaAnswer}
+                {qaExternal && (
+                  <div style={{ fontSize: 10, opacity: 0.65, marginTop: 4 }}>
+                    ☁ answered using external AI (minimized &amp; pseudonymized)
+                  </div>
+                )}
               </div>
               {qaSources.length > 0 && (
                 <div style={{ marginTop: 10 }}>

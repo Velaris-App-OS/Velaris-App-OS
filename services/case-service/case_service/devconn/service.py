@@ -17,6 +17,7 @@ from case_service.db.models import (
     WebhookReceiverRuleModel,
 )
 from case_service.hxbridge.encryption import encrypt_credentials, decrypt_credentials
+from case_service import hxvault
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +80,32 @@ async def receive_webhook(
         event.rule_id         = matched_rule.id
         event.status          = "matched"
 
-        # Apply field updates to case data
+        # Apply field updates as case variables — the write lands in this
+        # connector's registered namespace (identity-derived, Phase 2).
+        # Connectors without a registered namespace fall back to the legacy
+        # case.data blob so pre-Phase-2 rules keep working.
         if matched_rule.field_updates:
-            data = dict(matched_case.data or {})
+            from case_service.case_vars import service as case_vars
+            ctx = case_vars.CallerContext(
+                kind="devconn", ref=connector_id, actor_id=f"webhook:{connector_id}",
+            )
+            legacy_data: dict | None = None
             for case_field, payload_path in matched_rule.field_updates.items():
                 val = _get_nested(payload, payload_path)
-                if val is not None:
-                    data[case_field] = val
-            matched_case.data = data
+                if val is None:
+                    continue
+                try:
+                    await case_vars.set_variable(session, ctx, matched_case.id, case_field, val)
+                except case_vars.VariableError as exc:
+                    if legacy_data is None:
+                        logger.warning(
+                            "devconn webhook %s: case_vars write rejected (%s) — "
+                            "falling back to case.data blob", connector_id, exc,
+                        )
+                        legacy_data = dict(matched_case.data or {})
+                    legacy_data[case_field] = val
+            if legacy_data is not None:
+                matched_case.data = legacy_data
 
         # Advance stage if configured
         if matched_rule.advance_stage:
@@ -126,16 +145,29 @@ async def _find_case(
             except ValueError:
                 pass
 
-    # Strategy 2: match a case data field against a payload value
+    # Strategy 2: match a case data field against a payload value — read
+    # through the case_vars façade so typed variables match too (blob
+    # fallback keeps existing bare-key matches working).
     if rule.match_case_field and rule.match_payload_field:
         match_val = _get_nested(payload, rule.match_payload_field)
         if match_val is not None:
-            from sqlalchemy import cast, String
-            from sqlalchemy.dialects.postgresql import JSONB
+            from case_service.case_vars import service as case_vars
             rows = (await session.execute(select(CaseInstanceModel))).scalars().all()
+            ctx = case_vars.CallerContext(
+                kind="devconn", ref=rule.connector_id, actor_id="webhook-match",
+            )
+            ids = [c.id for c in rows]
+            vars_by_case: dict = {}
+            for i in range(0, len(ids), 500):   # get_all_bulk caps at 500
+                vars_by_case.update(await case_vars.get_all_bulk(session, ctx, ids[i:i + 500]))
             for case in rows:
-                data = case.data or {}
-                if str(data.get(rule.match_case_field)) == str(match_val):
+                data = vars_by_case.get(case.id, {})
+                candidate = data.get(rule.match_case_field)
+                # never match on a redaction mask — an attacker sending "***"
+                # must not bind the webhook to an arbitrary masked case
+                if candidate is None or candidate == "***":
+                    continue
+                if str(candidate) == str(match_val):
                     return case
 
     return None
@@ -185,6 +217,7 @@ async def build_http_connector(
     response_mapping: dict,
     credentials: dict,
 ) -> ConnectorRegistryModel:
+    await hxvault.ensure_dek(session, tenant_id)
     row = ConnectorRegistryModel(
         name=name,
         connector_type="http_custom",
@@ -196,7 +229,7 @@ async def build_http_connector(
             "body_template":    body_template,
             "response_mapping": response_mapping,
         },
-        credentials=encrypt_credentials(credentials),
+        credentials=encrypt_credentials(credentials, tenant_id=tenant_id, vault=True),
         tenant_id=tenant_id,
         enabled=True,
     )

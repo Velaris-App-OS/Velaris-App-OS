@@ -253,9 +253,34 @@ async def create_assignment_for_step(
     then persists the assignment record.
     """
     assignment_rule = step.get("assignment")
-    assignee_type, assignee_id = await resolve_assignment(
-        session, assignment_rule, context
+
+    # #22 DecisionPoint: policy is the default path (identical behavior);
+    # the AI resolver participates only when the case type opts in AND the
+    # step's cognitive mode is "automatic". AI failure → policy, always.
+    from case_service.decisions import cognitive_mode_for_step, decision_ai_config
+    from case_service.decisions.assignment import assignment_decision_point
+    ai_enabled, threshold = False, 1.0
+    mode = cognitive_mode_for_step(step)
+    if mode == "automatic":
+        from sqlalchemy import select as _select
+        from case_service.db.models import CaseInstanceModel, CaseTypeModel
+        ct_def = (await session.execute(
+            _select(CaseTypeModel.definition_json)
+            .join(CaseInstanceModel, CaseInstanceModel.case_type_id == CaseTypeModel.id)
+            .where(CaseInstanceModel.id == case_id)
+        )).scalar_one_or_none()
+        ai_enabled, threshold = decision_ai_config(ct_def)
+
+    outcome = await assignment_decision_point.resolve(
+        session,
+        {"rule": assignment_rule, "context": context},
+        case_id=case_id,
+        ai_enabled=ai_enabled,
+        threshold=threshold,
+        cognitive_mode=mode,
     )
+    assignee_type = outcome.decision["assignee_type"]
+    assignee_id = outcome.decision["assignee_id"]
 
     # Compute due date from step SLA if available
     due_at = None

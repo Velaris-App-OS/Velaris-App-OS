@@ -29,19 +29,50 @@ async def receive_webhook(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Receive any inbound webhook and route it to a Helix case."""
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {"raw": (await request.body()).decode(errors="replace")}
+    """Receive any inbound webhook and route it to a Helix case.
 
-    # Derive tenant from connector
+    Unauthenticated by design (external senders), but: when the connector's
+    credentials contain a ``webhook_secret``, the request MUST carry a valid
+    HMAC-SHA256 signature of the raw body in ``X-Velaris-Signature`` (or
+    ``X-Hub-Signature-256``), ``sha256=<hex>`` or bare hex. Without a secret
+    the only gate is the unguessable connector UUID — configure a secret for
+    any connector whose rules write case variables.
+    """
+    import hashlib
+    import hmac as hmac_mod
+    import json as json_mod
+
+    raw_body = await request.body()
+
     from sqlalchemy import select
     from case_service.db.models import ConnectorRegistryModel
     conn = (await session.execute(
         select(ConnectorRegistryModel).where(ConnectorRegistryModel.id == connector_id)
     )).scalar_one_or_none()
-    tenant_id = conn.tenant_id if conn else "default"
+    if conn is None:
+        raise HTTPException(404, "Unknown connector")
+    tenant_id = conn.tenant_id or "default"
+
+    from case_service.hxbridge.encryption import decrypt_credentials
+    secret = (decrypt_credentials(conn.credentials or {}) or {}).get("webhook_secret")
+    if secret:
+        provided = (
+            request.headers.get("x-velaris-signature")
+            or request.headers.get("x-hub-signature-256")
+            or ""
+        ).removeprefix("sha256=").strip()
+        expected = hmac_mod.new(
+            str(secret).encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        if not provided or not hmac_mod.compare_digest(provided, expected):
+            raise HTTPException(401, "Invalid or missing webhook signature")
+
+    try:
+        payload = json_mod.loads(raw_body)
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+    except Exception:
+        payload = {"raw": raw_body.decode(errors="replace")}
 
     event = await service.receive_webhook(session, connector_id, payload, tenant_id)
     await session.commit()
@@ -161,6 +192,9 @@ class BuildConnectorIn(BaseModel):
     body_template:    str = ""
     response_mapping: dict[str, str] = {}
     credentials:      dict[str, str] = {}
+    # Phase 2 (case variables): namespace this connector's inbound webhook
+    # field updates and response mappings write into.
+    variable_namespace: str | None = None
 
 
 class ConnectorOut(BaseModel):
@@ -185,6 +219,24 @@ async def build_connector(
         body.body_template, body.response_mapping,
         body.credentials,
     )
+    if body.variable_namespace:
+        # Same admin-grade gate as POST /variables/namespaces — connector
+        # CRUD must not be a namespace-squatting path. Decided by HxGuard
+        # (action: devconn.namespace.register, fail-closed).
+        from case_service import hxguard
+        await hxguard.require(
+            session, hxguard.subject_from_user(user), "devconn.namespace.register",
+        )
+        from case_service.case_vars import service as case_vars
+        try:
+            await case_vars.register_connector_namespace(
+                session, name=body.variable_namespace,
+                owner_type="devconn", owner_ref=row.id,
+                created_by=user.user_id,
+            )
+        except case_vars.VariableError as ve:
+            await session.rollback()
+            raise HTTPException(400, str(ve))
     await session.commit()
     return row
 

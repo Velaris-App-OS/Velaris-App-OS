@@ -1,9 +1,42 @@
-import { defineConfig } from "vite";
+import { defineConfig, Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
+/**
+ * Warn when a non-auth file calls raw fetch() instead of apiClient.
+ *
+ * Exempt files (raw fetch is intentional):
+ *   src/auth/         — login, refresh, SSO flows exist before tokens
+ *   src/shared/api/client.ts — the canonical wrapper that wraps fetch itself
+ *
+ * All other .ts/.tsx files that contain `fetch(` (word-boundary match to
+ * exclude `prefetch(`, `fetchData(` etc.) emit a Vite warning at build/dev
+ * transform time. This does NOT break the build — it guides developers to
+ * use apiClient so auth headers are always included.
+ */
+function noRawFetchPlugin(): Plugin {
+  const RAW_FETCH = /\bfetch\s*\(/;
+  const EXEMPT = [
+    `${path.sep}src${path.sep}auth${path.sep}`,
+    `${path.sep}src${path.sep}shared${path.sep}api${path.sep}client.ts`,
+  ];
+
+  return {
+    name: "no-raw-fetch",
+    transform(code, id) {
+      if (!id.endsWith(".ts") && !id.endsWith(".tsx")) return;
+      if (EXEMPT.some((seg) => id.includes(seg))) return;
+      if (RAW_FETCH.test(code)) {
+        this.warn(
+          `raw fetch() detected — use apiClient from @shared/api/client so auth headers are always included`
+        );
+      }
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), noRawFetchPlugin()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
@@ -13,10 +46,10 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    allowedHosts: true,
+    allowedHosts: "all",
     fs: {
       // Allow serving files from root node_modules (hoisted monorepo deps)
-      allow: [path.resolve(__dirname, "..")],
+      allow: [path.resolve(__dirname, ".."), "/home/utpal-bhadra/helix/node_modules"],
     },
     proxy: {
       "/api/v1/cases": {

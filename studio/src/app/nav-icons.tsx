@@ -86,6 +86,7 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   "/modeler":        ModelerIcon,
   "/app-builder":    AppBuilderIcon,
   "/hxwork":         withSparkleBox(HxWorkIcon),
+  "/testsuite":      withSparkleBox(TestSuiteIcon),
   "/hxbranch":       withSparkleBox(HxBranchIcon),
   "/graph":          withSparkleBox(HxGraphIcon),
   "/process-mining": ProcessMiningIcon,
@@ -605,6 +606,17 @@ function DevConnIcon({ active, size = 16 }: NavIconProps) {
       <path d="M6.5 9.5L5.5 8l1-1.5" stroke={c} strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M9.5 9.5L10.5 8l-1-1.5" stroke={c} strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M8.5 6.5L7.5 9.5" stroke={c} strokeWidth="0.9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TestSuiteIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      {/* "{TS}" monogram — rendered inside the withSparkleBox() box */}
+      <text x="8" y="10.8" textAnchor="middle" fontSize="6.5" fontWeight="700"
+            fontFamily="var(--font-mono, ui-monospace, monospace)" fill={c}>{"{TS}"}</text>
     </svg>
   );
 }

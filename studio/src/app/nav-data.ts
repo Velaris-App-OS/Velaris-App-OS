@@ -226,7 +226,7 @@ export const NAV_DATA: NavEntry[] = [
     roles: ["devops", "admin"],
   },
 
-  // ── Marketplace — hidden until enabled via scheduled_releases ──
+  // ── Marketplace — hidden until v1.2.0 release (controlled by scheduled_releases flag) ──
   {
     path:        "/marketplace",
     label:       "Marketplace",
@@ -257,6 +257,13 @@ export const NAV_DATA: NavEntry[] = [
     description: "Custom connectors | Webhook receiver | OpenAPI builder | Inbound webhooks | API explorer | No-code HTTP",
     section: "Integration",
     roles: ["integration", "admin", "designer"],
+  },
+  {
+    path: "/testsuite",
+    label: "Test Suite",
+    description: "Platform test suites | Component & Security tests | Run history | Marketplace conformance gate | Structural checks | HxTest AI generation (marketplace add-on)",
+    section: "Integration",
+    roles: ["admin"],
   },
   {
     path: "/hxsync",
@@ -295,7 +302,7 @@ export const NAV_DATA: NavEntry[] = [
     section: "Security",
     roles: ["security", "admin", "designer"],
   },
-  // ── HxDB Manager — hidden until enabled via scheduled_releases ──
+  // ── HxDB Manager — hidden until v1.3.0 release (controlled by scheduled_releases flag) ──
   {
     path:        "/hxdbmanager",
     label:       "HxDB Manager",

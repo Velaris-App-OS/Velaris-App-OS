@@ -24,6 +24,43 @@ from case_service.db import repository as repo
 from case_service.auth.dependencies import get_current_user
 from case_service.db.session import get_session
 
+
+async def _sync_assignee_tuple(
+    session: AsyncSession, case_id: uuid.UUID, user_id: str | None,
+    *, add: bool,
+) -> None:
+    """HxGuard Phase B: keep the case#assignee@user tuple in step with
+    assignment state, in the SAME transaction.
+
+    Removal only happens when the user holds NO other active user-assignment
+    on the case — one completed step must not revoke access granted by a
+    still-active one."""
+    if not user_id:
+        return
+    from case_service.hxguard import tuples as hxg_tuples
+    if add:
+        await hxg_tuples.write_tuple(
+            session, object_type="case", object_id=case_id,
+            relation="assignee", subject_type="user",
+            subject_id=str(user_id), created_by="assignment",
+        )
+        return
+    from sqlalchemy import select
+    from case_service.db.models import CaseAssignmentModel
+    remaining = (await session.execute(
+        select(CaseAssignmentModel.id)
+        .where(CaseAssignmentModel.case_id == case_id)
+        .where(CaseAssignmentModel.assignee_id == str(user_id))
+        .where(CaseAssignmentModel.assignee_type == "user")
+        .where(CaseAssignmentModel.status == "active")
+        .limit(1)
+    )).scalar_one_or_none()
+    if remaining is None:
+        await hxg_tuples.remove_tuple(
+            session, object_type="case", object_id=case_id,
+            relation="assignee", subject_type="user", subject_id=str(user_id),
+        )
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assignments", tags=["assignments"], dependencies=[Depends(get_current_user)])
@@ -67,6 +104,7 @@ async def claim_assignment(
             "claimed_at": now,
         },
     )
+    await _sync_assignee_tuple(session, assignment.case_id, body.user_id, add=True)
 
     await repo.append_audit_entry(
         session,
@@ -108,6 +146,7 @@ async def release_assignment(
             "claimed_at": None,
         },
     )
+    await _sync_assignee_tuple(session, assignment.case_id, body.user_id, add=False)
 
     await repo.append_audit_entry(
         session,
@@ -143,6 +182,9 @@ async def reassign_assignment(
             "claimed_at": datetime.now(timezone.utc),
         },
     )
+    if assignment.assignee_type == "user":
+        await _sync_assignee_tuple(session, assignment.case_id, prev_assignee, add=False)
+    await _sync_assignee_tuple(session, assignment.case_id, body.new_assignee_id, add=True)
 
     await repo.append_audit_entry(
         session,
@@ -183,6 +225,8 @@ async def complete_assignment(
         assignment_id,
         values={"status": "completed", "completed_at": now},
     )
+    if assignment.assignee_type == "user":
+        await _sync_assignee_tuple(session, assignment.case_id, assignment.assignee_id, add=False)
 
     await repo.append_audit_entry(
         session,
@@ -237,5 +281,11 @@ async def delete_assignment(
 ):
     """Delete an assignment (e.g. test assignments created via self-assign)."""
     assignment = await _get_assignment_or_404(session, assignment_id)
+    case_id, assignee_type, assignee_id = (
+        assignment.case_id, assignment.assignee_type, assignment.assignee_id,
+    )
     await session.delete(assignment)
+    await session.flush()
+    if assignee_type == "user":
+        await _sync_assignee_tuple(session, case_id, assignee_id, add=False)
     await session.commit()

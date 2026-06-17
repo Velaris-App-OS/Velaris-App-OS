@@ -11,12 +11,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.api.schemas.cases import SLAStatusResponse
+from case_service.core import sla_tracker
 from case_service.core.sla_tracker import start_sla as sla_start, start_sla_v2
 from case_service.db import repository as repo
 from case_service.db.models import CaseSLAInstanceModel
@@ -24,6 +25,18 @@ from case_service.auth.dependencies import get_current_user
 from case_service.db.session import get_session
 
 router = APIRouter(tags=["sla"], dependencies=[Depends(get_current_user)])
+
+
+async def _signal_companion(request: Request, case_id: uuid.UUID) -> None:
+    """Best-effort wake of the case's SLA companion workflow."""
+    client = getattr(request.app.state, "temporal_client", None)
+    if client is None:
+        return
+    try:
+        handle = client.get_workflow_handle(f"helix-case-{case_id}")
+        await handle.signal("sla_refresh", {})
+    except Exception:
+        pass  # companion rescans periodically; the nudge is optional
 
 
 class SLAStartRequest(BaseModel):
@@ -54,13 +67,10 @@ async def get_case_sla_status(
 async def start_sla_endpoint(
     case_id: uuid.UUID,
     body: SLAStartRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Start SLA tracking for a case or stage.
-
-    Called by the Temporal workflow activity when entering a stage
-    that has an SLA policy configured.
-    """
+    """Start SLA tracking for a case or stage (manual/API path)."""
     case = await repo.get_case_instance(session, case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -89,6 +99,7 @@ async def start_sla_endpoint(
         sla_policy=sla_policy,
         target_id=body.target_id,
     )
+    await _signal_companion(request, case_id)
     return sla
 
 
@@ -99,6 +110,7 @@ async def start_sla_endpoint(
 async def pause_sla(
     case_id: uuid.UUID,
     policy_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
     """Pause an SLA clock (e.g. when waiting on an external party)."""
@@ -108,23 +120,15 @@ async def pause_sla(
             status_code=409, detail="SLA is already paused"
         )
 
-    now = datetime.now(timezone.utc)
-    await repo.update_sla_instance(
-        session,
-        sla.id,
-        values={"status": "paused", "paused_at": now},
+    paused = await sla_tracker.pause_sla(
+        session, case_id=case_id, sla_policy_id=policy_id
     )
+    if not paused:
+        raise HTTPException(
+            status_code=409, detail="SLA is not in a pausable state"
+        )
 
-    await repo.append_audit_entry(
-        session,
-        data={
-            "case_id": case_id,
-            "action": "sla_paused",
-            "actor_type": "system",
-            "details": {"sla_policy_id": policy_id},
-        },
-    )
-
+    await _signal_companion(request, case_id)
     return await _get_sla_by_id(session, sla.id)
 
 
@@ -135,44 +139,27 @@ async def pause_sla(
 async def resume_sla(
     case_id: uuid.UUID,
     policy_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Resume a paused SLA clock."""
+    """Resume a paused SLA clock.
+
+    Delegates to sla_tracker.resume_sla, which shifts goal_at/deadline_at
+    forward by the paused duration — pausing actually stops the clock.
+    """
     sla = await _get_sla_or_404(session, case_id, policy_id)
     if sla.status != "paused":
         raise HTTPException(
             status_code=409, detail="SLA is not paused"
         )
 
-    now = datetime.now(timezone.utc)
-    paused_seconds = 0
-    if sla.paused_at:
-        paused_seconds = int((now - sla.paused_at).total_seconds())
-
-    total_paused = sla.paused_duration_seconds + paused_seconds
-    await repo.update_sla_instance(
-        session,
-        sla.id,
-        values={
-            "status": "on_track",
-            "paused_at": None,
-            "paused_duration_seconds": total_paused,
-        },
+    resumed = await sla_tracker.resume_sla(
+        session, case_id=case_id, sla_policy_id=policy_id
     )
+    if not resumed:
+        raise HTTPException(status_code=409, detail="SLA could not be resumed")
 
-    await repo.append_audit_entry(
-        session,
-        data={
-            "case_id": case_id,
-            "action": "sla_resumed",
-            "actor_type": "system",
-            "details": {
-                "sla_policy_id": policy_id,
-                "paused_seconds": paused_seconds,
-            },
-        },
-    )
-
+    await _signal_companion(request, case_id)
     return await _get_sla_by_id(session, sla.id)
 
 
@@ -216,12 +203,10 @@ async def _get_sla_by_id(
 async def start_sla_v2_endpoint(
     case_id: uuid.UUID,
     body: SLAStartRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Start SLA v2 — snapshots escalation tree, computes level schedule.
-
-    Called by CaseLifecycleWorkflow via start_sla_v2_tracking activity.
-    """
+    """Start SLA v2 — snapshots escalation tree, computes level schedule."""
     case = await repo.get_case_instance(session, case_id)
     if case is None:
         raise HTTPException(404, "Case not found")
@@ -244,4 +229,5 @@ async def start_sla_v2_endpoint(
         target_id=body.target_id,
         tenant_id=tenant_id,
     )
+    await _signal_companion(request, case_id)
     return sla

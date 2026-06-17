@@ -212,7 +212,9 @@ async def capture_bundle(session: AsyncSession) -> dict:
         "migrations":         migrations,
     }
 
+    from case_service.marketplace.manifest_version import MANIFEST_VERSION
     manifest = {
+        "manifest_version":   MANIFEST_VERSION,   # v1 = locked RBAC format (#14)
         "case_types":         len(case_types),
         "forms":              len(forms),
         "rules":              len(rules),

@@ -3,6 +3,7 @@
  * Tabs: Definitions · Instances · Bindings · AI Director · Stats
  */
 import React, { useState, useEffect, useCallback } from "react";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/fusion";
 
@@ -266,6 +267,8 @@ function DefinitionsTab() {
 
   return (
     <div>
+      <AiUnavailableBanner featureName="AI director mode" />
+
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <span style={{ fontWeight: 600 }}>{defs.length} process definition(s)</span>
         <button style={{ ...S.btn, ...S.btnP }} onClick={() => { setCreating(true); setEditingId(null); setErr(null); }}>

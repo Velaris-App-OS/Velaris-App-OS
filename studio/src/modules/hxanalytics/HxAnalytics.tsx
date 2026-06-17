@@ -3,6 +3,7 @@
  * Tabs: Dashboard · Query · Reports
  */
 import React, { useState, useEffect, useCallback } from "react";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/analytics";
 
@@ -51,6 +52,8 @@ function BarChart({ series, height = 120 }: { series: Series; height?: number })
   const max = Math.max(...series.map(s => s.value), 1);
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height, overflow: "hidden" }}>
+      <AiUnavailableBanner featureName="Natural language queries" />
+
       {series.slice(0, 16).map((s, i) => (
         <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 9, color: "var(--text-secondary)", marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", maxWidth: "100%", textOverflow: "ellipsis" }}>

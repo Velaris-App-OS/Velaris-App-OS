@@ -294,6 +294,9 @@ _PRIVILEGE_CATALOG = {
         {"id": "security",     "label": "Security Events", "actions": [
             {"id": "read",   "label": "View"},
         ]},
+        {"id": "db_manager",   "label": "DB Manager",      "actions": [
+            {"id": "view_sensitive", "label": "View masked account/financial data (DBView, requires re-auth)"},
+        ]},
         {"id": "admin",        "label": "Admin Console",   "actions": [
             {"id": "read",   "label": "View"},
             {"id": "manage", "label": "Manage"},

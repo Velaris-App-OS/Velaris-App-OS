@@ -169,8 +169,22 @@ async def search_case_instances(
     filters: dict[str, Any],
     offset: int = 0,
     limit: int = 50,
+    variable_filters: list[tuple[str, str]] | None = None,
+    accessible_to_user: tuple[str, list] | None = None,
 ) -> tuple[list[CaseInstanceModel], int]:
-    """Search cases with simple equality filters on top-level columns."""
+    """Search cases with simple equality filters on top-level columns.
+
+    ``variable_filters`` (Case Variables Phase 3): (full_key, raw_value)
+    pairs matched against case_instance_variables via EXISTS subqueries on
+    the fixed (full_key, value_*) indexes from migration 087. AND semantics
+    across pairs. Callers enforce the indexed-only policy — this function
+    only builds SQL (never DDL, never string interpolation).
+
+    ``accessible_to_user`` (HxGuard enforce cutover): (user_id,
+    allowed_case_type_ids) — restricts results to owner OR relationship
+    tuple OR allowed case types. None = unrestricted (admin/manager, "*"
+    scope, or shadow/off mode).
+    """
     base = select(CaseInstanceModel)
     count_base = select(func.count()).select_from(CaseInstanceModel)
 
@@ -179,6 +193,48 @@ async def search_case_instances(
             col = getattr(CaseInstanceModel, key)
             base = base.where(col == val)
             count_base = count_base.where(col == val)
+
+    if accessible_to_user is not None:
+        # HxGuard enforce mode: restrict the list to cases the user has a
+        # relationship with — owner, tuple (assignee/viewer/editor), or an
+        # access-group-allowed case type. Mirrors RebacBackend.evaluate.
+        from sqlalchemy import exists, or_
+        from case_service.db.models import HxGuardTupleModel as _HXT
+        uid, allowed_type_ids = accessible_to_user
+        clauses = [
+            CaseInstanceModel.created_by == uid,
+            exists().where(
+                _HXT.object_type == "case",
+                _HXT.object_id == CaseInstanceModel.id,
+                _HXT.subject_type == "user",
+                _HXT.subject_id == uid,
+                _HXT.relation.in_(("assignee", "viewer", "editor")),
+            ),
+        ]
+        if allowed_type_ids:
+            clauses.append(CaseInstanceModel.case_type_id.in_(allowed_type_ids))
+        cond = or_(*clauses)
+        base = base.where(cond)
+        count_base = count_base.where(cond)
+
+    if variable_filters:
+        from sqlalchemy import exists, or_
+        from case_service.db.models import CaseInstanceVariableModel as _CIV
+        for full_key, raw in variable_filters:
+            value_clauses = [_CIV.value_text == raw]
+            try:
+                value_clauses.append(_CIV.value_num == float(raw))
+            except (TypeError, ValueError):
+                pass
+            if raw.lower() in ("true", "false"):
+                value_clauses.append(_CIV.value_bool == (raw.lower() == "true"))
+            cond = exists().where(
+                _CIV.case_id == CaseInstanceModel.id,
+                _CIV.full_key == full_key,
+                or_(*value_clauses),
+            )
+            base = base.where(cond)
+            count_base = count_base.where(cond)
 
     total = (await session.execute(count_base)).scalar_one()
     stmt = base.order_by(
@@ -198,6 +254,15 @@ async def create_assignment(
     model = CaseAssignmentModel(**data)
     session.add(model)
     await session.flush()
+    # HxGuard Phase B: user assignments materialize an assignee tuple in the
+    # SAME transaction — authz can't diverge from assignment state.
+    if model.assignee_type == "user" and model.assignee_id:
+        from case_service.hxguard import tuples as hxg_tuples
+        await hxg_tuples.write_tuple(
+            session, object_type="case", object_id=model.case_id,
+            relation="assignee", subject_type="user",
+            subject_id=str(model.assignee_id), created_by="assignment",
+        )
     return model
 
 

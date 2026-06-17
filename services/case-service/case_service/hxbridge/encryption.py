@@ -65,11 +65,20 @@ def _get_key() -> bytes:
     return _derive_key(get_settings().auth_secret)
 
 
-def encrypt_credentials(creds: dict) -> dict:
-    """Encrypt a credentials dict for storage. Returns {'_enc': '<hxv1:...>'}."""
+def encrypt_credentials(creds: dict, *, tenant_id=None, vault: bool = False) -> dict:
+    """Encrypt a credentials dict for storage. Returns {'_enc': '<...>'}.
+
+    vault=True routes through HxVault (#19) per-tenant DEK envelope encryption
+    (hxv2). The caller MUST `await hxvault.ensure_dek(session, tenant_id)` first
+    so the DEK is cached. vault=False keeps the legacy hxv1 single-key path for
+    not-yet-migrated callers; both formats decrypt transparently below.
+    """
     if not creds:
         return {}
     plaintext = json.dumps(creds, sort_keys=True).encode()
+    if vault:
+        from case_service.hxvault import encrypt as _vault_encrypt
+        return {"_enc": _vault_encrypt(tenant_id, plaintext, "connector_credentials")}
     key = _get_key()
     nonce = os.urandom(16)
     ciphertext = _xor_encrypt(key, plaintext, nonce)
@@ -78,17 +87,25 @@ def encrypt_credentials(creds: dict) -> dict:
 
 
 def decrypt_credentials(stored: dict) -> dict:
-    """Decrypt a stored credentials dict. Returns plain dict."""
+    """Decrypt a stored credentials dict. Returns plain dict.
+
+    Universal read path: hxv2 (HxVault per-tenant DEK), hxv1 (legacy single key),
+    or a plain dict (dev/test). Tenant/context for hxv2 are self-describing in the
+    envelope, so this needs no tenant argument — existing call sites are unchanged.
+    """
     if not stored:
         return {}
     enc = stored.get("_enc", "")
-    if not enc or not enc.startswith(_PREFIX):
+    if not enc:
         return stored   # unencrypted (dev/test) — return as-is
-    payload = base64.urlsafe_b64decode(enc[len(_PREFIX):].encode())
-    nonce, data = payload[:16], payload[16:]
-    key = _get_key()
-    plaintext = _xor_decrypt(key, data, nonce)
-    return json.loads(plaintext)
+    if enc.startswith("hxv2:"):
+        from case_service.hxvault import decrypt as _vault_decrypt
+        return json.loads(_vault_decrypt(enc))
+    if enc.startswith(_PREFIX):  # hxv1 legacy single-key
+        payload = base64.urlsafe_b64decode(enc[len(_PREFIX):].encode())
+        nonce, data = payload[:16], payload[16:]
+        return json.loads(_xor_decrypt(_get_key(), data, nonce))
+    return stored   # unknown/plain — return as-is
 
 
 def mask_credentials(creds: dict) -> dict:

@@ -1,8 +1,12 @@
-"""Temporal workflow: SLATimerWorkflow.
+"""Temporal workflow: SLATimerWorkflow — durable clock for ONE SLA instance.
 
-Child workflow that tracks a single SLA policy instance.
-Uses Temporal timers for at-risk and breach deadlines.
-Supports pause/resume via signals.
+DB-truth design: the workflow stores only the SLA instance id. On every
+loop it asks an activity what the database says (status, next due event),
+sleeps durably until that moment, then fires an idempotent activity that
+re-verifies before writing. Pause/resume/cancel therefore need no state
+in the workflow — a "wake" signal just cuts the sleep short so the next
+DB read is picked up immediately; without a signal the timer still
+converges at the next event or periodic recheck.
 
 Copyright (c) 2024-2025 HELIX Contributors
 SPDX-License-Identifier: BSL-1.1
@@ -10,188 +14,108 @@ SPDX-License-Identifier: BSL-1.1
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
-from typing import Any
+from datetime import datetime, timedelta
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from case_service.temporal.activities.sla_activities import (
-        mark_sla_at_risk,
-        mark_sla_breached,
-        execute_sla_escalations,
+    from case_service.temporal.activities.sla_timer_activities import (
+        fire_sla_event,
+        get_sla_timer_state,
     )
 
 
 @dataclasses.dataclass
-class SLATimerParams:
-    case_id: str
-    sla_policy_id: str
-    target_id: str
-    goal_seconds: int
-    deadline_seconds: int
-    at_risk_threshold: float = 0.8
+class SLATimerInput:
+    sla_id: str
+    case_id: str = ""
 
 
-@dataclasses.dataclass
-class SLATimerResult:
-    case_id: str
-    sla_policy_id: str
-    final_status: str
+_ACTIVITY_TIMEOUT = timedelta(seconds=30)
+# Durability over giving up: retry DB-touching activities indefinitely
+# with capped backoff; the timer must survive transient outages.
+_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+)
+
+# Re-read DB state at least this often even with no event due and no
+# wake signal (catches resumes/cancellations whose signal was lost).
+_RECHECK_INTERVAL = timedelta(hours=6)
+# Cap individual sleeps so long-deadline timers periodically resync.
+_MAX_SLEEP = timedelta(hours=24)
+_HISTORY_SOFT_LIMIT = 2000
 
 
-ACTIVITY_TIMEOUT = timedelta(seconds=30)
-
-
-@workflow.defn
+@workflow.defn(name="helix.sla.timer")
 class SLATimerWorkflow:
-    """Tracks a single SLA with at-risk and breach timers.
-
-    Signals:
-        pause   — stop the clock (e.g. pending external)
-        resume  — restart the clock
-        cancel  — SLA no longer needed (case resolved/cancelled)
-    """
+    """Fires at-risk / breach / escalation-level events for one SLA row."""
 
     def __init__(self) -> None:
-        self._paused: bool = False
-        self._cancelled: bool = False
-        self._resume_requested: bool = False
+        self._wake = False
 
     @workflow.signal
-    async def pause(self) -> None:
-        self._paused = True
-
-    @workflow.signal
-    async def resume(self) -> None:
-        if self._paused:
-            self._paused = False
-            self._resume_requested = True
-
-    @workflow.signal
-    async def cancel(self) -> None:
-        self._cancelled = True
+    async def wake(self) -> None:
+        """SLA row changed (paused/resumed/cancelled) — re-read state now."""
+        self._wake = True
 
     @workflow.run
-    async def run(self, params: SLATimerParams) -> SLATimerResult:
-        # Calculate durations
-        at_risk_seconds = int(
-            params.goal_seconds * params.at_risk_threshold
-        )
-        remaining_to_goal = params.goal_seconds - at_risk_seconds
-        remaining_to_deadline = (
-            params.deadline_seconds - params.goal_seconds
-        )
+    async def run(self, params: SLATimerInput) -> dict:
+        events_fired = 0
 
-        # ── Phase 1: wait until at-risk threshold ─────────────
-        elapsed = 0
-        target = at_risk_seconds
-        while elapsed < target:
-            if self._cancelled:
-                return SLATimerResult(
-                    case_id=params.case_id,
-                    sla_policy_id=params.sla_policy_id,
-                    final_status="cancelled",
-                )
-
-            if self._paused:
-                # Wait for resume or cancel
-                await workflow.wait_condition(
-                    lambda: self._resume_requested or self._cancelled
-                )
-                self._resume_requested = False
-                continue
-
-            chunk = min(target - elapsed, 60)  # check every minute
-            try:
-                await workflow.wait_condition(
-                    lambda: self._paused or self._cancelled,
-                    timeout=timedelta(seconds=chunk),
-                )
-            except TimeoutError:
-                pass
-            if not self._paused:
-                elapsed += chunk
-
-        # Mark at-risk
-        if not self._cancelled:
-            await workflow.execute_activity(
-                mark_sla_at_risk,
-                args=[params.case_id, params.sla_policy_id],
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
+        while True:
+            state = await workflow.execute_activity(
+                get_sla_timer_state,
+                params.sla_id,
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                retry_policy=_RETRY,
             )
 
-        # ── Phase 2: wait until goal (remaining after at-risk) ─
-        elapsed = 0
-        target = remaining_to_goal
-        while elapsed < target:
-            if self._cancelled:
-                return SLATimerResult(
-                    case_id=params.case_id,
-                    sla_policy_id=params.sla_policy_id,
-                    final_status="cancelled",
-                )
-            if self._paused:
-                await workflow.wait_condition(
-                    lambda: self._resume_requested or self._cancelled
-                )
-                self._resume_requested = False
+            if state["terminal"]:
+                return {
+                    "sla_id": params.sla_id,
+                    "final_status": state["status"],
+                    "events_fired": events_fired,
+                }
+
+            if state["paused"] or state["next_event_at"] is None:
+                await self._sleep_or_wake(_RECHECK_INTERVAL)
                 continue
 
-            chunk = min(target - elapsed, 60)
-            try:
-                await workflow.wait_condition(
-                    lambda: self._paused or self._cancelled,
-                    timeout=timedelta(seconds=chunk),
-                )
-            except TimeoutError:
-                pass
-            if not self._paused:
-                elapsed += chunk
-
-        # ── Phase 3: wait from goal to hard deadline ──────────
-        elapsed = 0
-        target = remaining_to_deadline
-        while elapsed < target:
-            if self._cancelled:
-                return SLATimerResult(
-                    case_id=params.case_id,
-                    sla_policy_id=params.sla_policy_id,
-                    final_status="cancelled",
-                )
-            if self._paused:
-                await workflow.wait_condition(
-                    lambda: self._resume_requested or self._cancelled
-                )
-                self._resume_requested = False
+            next_at = datetime.fromisoformat(state["next_event_at"])
+            delay = next_at - workflow.now()
+            if delay > _MAX_SLEEP:
+                await self._sleep_or_wake(_MAX_SLEEP)
                 continue
+            if delay > timedelta(0):
+                woke = await self._sleep_or_wake(delay)
+                if woke:
+                    continue  # state changed under us — re-read before firing
 
-            chunk = min(target - elapsed, 60)
-            try:
-                await workflow.wait_condition(
-                    lambda: self._paused or self._cancelled,
-                    timeout=timedelta(seconds=chunk),
-                )
-            except TimeoutError:
-                pass
-            if not self._paused:
-                elapsed += chunk
-
-        # ── Breach ────────────────────────────────────────────
-        if not self._cancelled:
-            await workflow.execute_activity(
-                mark_sla_breached,
-                args=[params.case_id, params.sla_policy_id],
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
+            result = await workflow.execute_activity(
+                fire_sla_event,
+                params.sla_id,
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                retry_policy=_RETRY,
             )
-            await workflow.execute_activity(
-                execute_sla_escalations,
-                args=[params.case_id, params.sla_policy_id],
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-            )
+            events_fired += result.get("events_fired", 0)
 
-        return SLATimerResult(
-            case_id=params.case_id,
-            sla_policy_id=params.sla_policy_id,
-            final_status="breached" if not self._cancelled else "cancelled",
-        )
+            if workflow.info().get_current_history_length() > _HISTORY_SOFT_LIMIT:
+                workflow.continue_as_new(params)
+
+    async def _sleep_or_wake(self, timeout: timedelta) -> bool:
+        """Durable sleep that a wake signal can cut short.
+
+        Returns True if woken by signal, False on timeout.
+        """
+        try:
+            await workflow.wait_condition(
+                lambda: self._wake, timeout=timeout
+            )
+        except TimeoutError:
+            pass
+        woke = self._wake
+        self._wake = False
+        return woke

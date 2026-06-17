@@ -14,11 +14,12 @@ from case_service.auth.dependencies import get_current_user, require_role
 from case_service.auth.models import AuthenticatedUser
 from case_service.compliance import (
     chain_status, verify_chain, seal_new_entries,
+    anchor_chain_tip, list_anchors,
     generate_evidence_pack, FRAMEWORKS,
     get_case_lineage,
 )
 from case_service.db.models import ComplianceReportModel
-from case_service.db.session import get_session
+from case_service.db.session import get_analytics_session as get_session
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
 
@@ -49,6 +50,29 @@ async def verify_audit_chain(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     return await verify_chain(session, limit=limit)
+
+
+# ── External anchoring (Group I — RFC-3161) ──────────────────────────
+
+@router.get("/audit/anchors")
+async def get_audit_anchors(
+    limit: int = Query(50, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    return await list_anchors(session, limit=limit)
+
+
+@router.post("/audit/anchor")
+async def trigger_audit_anchor(
+    force: bool = Query(False, description="Anchor even if the tip is unchanged"),
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(require_role("admin")),
+):
+    try:
+        return await anchor_chain_tip(session, force=force)
+    except Exception as e:
+        raise HTTPException(502, f"Anchoring failed: {e}")
 
 
 # ── Evidence packs ───────────────────────────────────────────────────

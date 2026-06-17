@@ -1,7 +1,8 @@
 """Case-service Temporal worker.
 
-Starts a Temporal worker on the "helix-case-service" task queue
-that executes CaseLifecycleWorkflow and all case-related activities.
+Starts a Temporal worker on the "helix-case-service" task queue that
+executes the SLA companion (CaseLifecycleWorkflow), per-instance SLA
+timers (SLATimerWorkflow), and their direct-repository activities.
 
 Can run embedded (in the FastAPI process) or standalone.
 
@@ -20,40 +21,24 @@ from temporalio.worker import Worker
 from case_service.temporal.workflows.case_lifecycle_workflow import (
     CaseLifecycleWorkflow,
 )
-from case_service.temporal.activities.stage_activities import (
-    create_stage_assignments,
-    evaluate_exit_criteria,
-    load_case_type_definition,
-    resolve_case,
-    update_case_stage,
-    update_case_status,
+from case_service.temporal.workflows.sla_timer_workflow import (
+    SLATimerWorkflow,
 )
-from case_service.temporal.activities.sla_activities import (
-    cancel_case_slas,
-    check_sla_status,
-    start_sla_tracking,
-    start_sla_v2_tracking,
-)
-from case_service.temporal.activities.notification_activities import (
-    send_case_notification,
+from case_service.temporal.activities.sla_timer_activities import (
+    fire_sla_event,
+    get_sla_timer_state,
+    list_case_sla_timers,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASK_QUEUE = "helix-case-service"
 
+CASE_WORKFLOWS = [CaseLifecycleWorkflow, SLATimerWorkflow]
 CASE_ACTIVITIES = [
-    load_case_type_definition,
-    update_case_status,
-    update_case_stage,
-    create_stage_assignments,
-    evaluate_exit_criteria,
-    resolve_case,
-    start_sla_tracking,
-    start_sla_v2_tracking,
-    check_sla_status,
-    cancel_case_slas,
-    send_case_notification,
+    list_case_sla_timers,
+    get_sla_timer_state,
+    fire_sla_event,
 ]
 
 
@@ -81,13 +66,13 @@ async def start_worker(
     worker = Worker(
         client,
         task_queue=queue,
-        workflows=[CaseLifecycleWorkflow],
+        workflows=CASE_WORKFLOWS,
         activities=CASE_ACTIVITIES,
     )
     asyncio.create_task(worker.run())
     logger.info(
         "Case-service Temporal worker started: queue=%s, "
-        "workflows=[CaseLifecycleWorkflow], activities=%d",
+        "workflows=[CaseLifecycleWorkflow, SLATimerWorkflow], activities=%d",
         queue,
         len(CASE_ACTIVITIES),
     )
@@ -115,7 +100,7 @@ async def _main() -> None:
     worker = Worker(
         client,
         task_queue=queue,
-        workflows=[CaseLifecycleWorkflow],
+        workflows=CASE_WORKFLOWS,
         activities=CASE_ACTIVITIES,
     )
     logger.info("Case worker running on queue: %s", queue)

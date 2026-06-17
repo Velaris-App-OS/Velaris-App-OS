@@ -36,7 +36,7 @@ VELARIS_PUBLIC_KEY_HEX = os.environ.get(
     "86ae835f7e31e198e86f87abc634a3d68161ebe60420a99d46a481f5272cb72a"
 )
 
-REGISTER_URL  = os.environ.get("VELARIS_REGISTER_URL", "https://register.velaris.io")
+REGISTER_URL  = os.environ.get("VELARIS_REGISTER_URL", "https://velaris-app-os.duckdns.org")
 _db_password  = os.environ.get("VELARIS_DB_PASSWORD", "helix")
 DATABASE_URL  = os.environ.get(
     "DATABASE_URL",

@@ -9,6 +9,7 @@ from __future__ import annotations
 import httpx
 
 from case_service.hxbridge.protocol import register_connector
+from case_service.hxbridge.security import validate_outbound_url
 
 
 @register_connector("http")
@@ -65,12 +66,13 @@ class HttpConnector:
 
     async def execute(self, input_data: dict) -> dict:
         base   = self._config.get("base_url", "").rstrip("/")
+        await validate_outbound_url(base)
         path   = self._config.get("path", "").lstrip("/")
         method = self._config.get("method", "POST").upper()
         timeout = self._config.get("timeout_seconds", 30)
         url    = f"{base}/{path}" if path else base
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             if method in ("GET", "DELETE"):
                 r = await client.request(method, url, headers=self._build_headers(), params=input_data)
             else:
@@ -85,7 +87,8 @@ class HttpConnector:
     async def test(self) -> bool:
         try:
             base = self._config.get("base_url", "").rstrip("/")
-            async with httpx.AsyncClient(timeout=10) as client:
+            await validate_outbound_url(base)
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
                 r = await client.get(base, headers=self._build_headers())
                 return r.status_code < 500
         except Exception:

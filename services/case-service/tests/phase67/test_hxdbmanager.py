@@ -42,11 +42,12 @@ def _worker():     return _make_user(["case_worker"])
 def _viewer():     return _make_user(["viewer"])
 
 # Tests that require PostgreSQL-specific features (information_schema, EXPLAIN ANALYZE,
-# SET LOCAL statement_timeout). Always skipped in the SQLite unit test suite.
-# Run against a real Postgres instance for integration coverage.
+# SET LOCAL statement_timeout). Skipped on the default SQLite harness; they RUN when
+# the opt-in Postgres harness is active (VELARIS_TEST_DATABASE_URL set → helix_test).
+import os as _os
 REQUIRES_PG = pytest.mark.skipif(
-    True,
-    reason="Requires PostgreSQL (information_schema, statement_timeout, EXPLAIN ANALYZE)"
+    not _os.environ.get("VELARIS_TEST_DATABASE_URL"),
+    reason="Requires PostgreSQL — set VELARIS_TEST_DATABASE_URL (helix_test) to run"
 )
 
 def _override(user_fn):
@@ -54,6 +55,21 @@ def _override(user_fn):
 
 def _clear():
     app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture(autouse=True)
+def _enable_hxdbmanager_flags():
+    """HxDBManager endpoints 404 (via `_require_admin`/`_require_db_viewer`) unless the
+    `hxdbmanager` + `hxdbmanager_security` feature flags are on — set from releases.txt
+    in prod, never seeded in the test DB. Enable them for this module (restored after)
+    so the auth/DDL-safety/DoS logic under test is actually reachable."""
+    from case_service.api.routers import releases
+    saved = dict(releases._ENABLED_VERSIONS)
+    releases._ENABLED_VERSIONS["hxdbmanager"] = "v1.0.0"
+    releases._ENABLED_VERSIONS["hxdbmanager_security"] = "v1.0.0"
+    yield
+    releases._ENABLED_VERSIONS.clear()
+    releases._ENABLED_VERSIONS.update(saved)
 
 
 # ═══════════════════════════════════════════════════════
@@ -64,9 +80,9 @@ class TestAuth:
     """Every endpoint requires auth; /ddl requires superadmin."""
 
     @pytest.mark.asyncio
-    async def test_schema_no_token_returns_401(self, client: AsyncClient):
+    async def test_schema_no_token_returns_401(self, anon_client: AsyncClient):
         _clear()
-        r = await client.get("/api/v1/hxdbmanager/schema")
+        r = await anon_client.get("/api/v1/hxdbmanager/schema")
         assert r.status_code in (401, 403), r.text
 
     @pytest.mark.asyncio
@@ -117,9 +133,9 @@ class TestAuth:
         _clear()
 
     @pytest.mark.asyncio
-    async def test_execute_no_token_returns_401(self, client: AsyncClient):
+    async def test_execute_no_token_returns_401(self, anon_client: AsyncClient):
         _clear()
-        r = await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1"})
+        r = await anon_client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1"})
         assert r.status_code in (401, 403)
 
     @pytest.mark.asyncio
@@ -222,28 +238,22 @@ class TestDosPrevention:
     async def test_per_user_rate_limit(self, client: AsyncClient):
         """After 20 calls in 60s from same user, 429 must be returned."""
         from case_service.api.routers.hxdbmanager import _EXECUTE_RATE
-        user_id = f"rate-test-{uuid.uuid4()}"
-
-        def _rate_test_user():
-            return _make_user(["admin"])
-
-        # Manually pre-fill the rate bucket to just under the limit
         import collections, time as _time
-        _EXECUTE_RATE[user_id] = collections.deque([_time.monotonic()] * 20)
 
-        # Override user_id to match the pre-filled bucket
-        def _specific_user():
-            u = _make_user(["admin"])
-            u.user_id = user_id
-            return u
-
-        _override(_specific_user)
-        r = await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1"})
-        assert r.status_code == 429, f"Expected 429 rate limit, got {r.status_code}"
-        assert "rate limit" in r.json()["detail"].lower()
-        _clear()
-        # Clean up rate bucket
-        _EXECUTE_RATE.pop(user_id, None)
+        # One fixed user instance: fill the bucket under ITS id and return the SAME
+        # instance from the override, so the bucket key provably matches the user the
+        # endpoint resolves. (Filling to the limit makes the rate check trip BEFORE the
+        # SQL runs — so the test never depends on Postgres execution.)
+        u = _make_user(["admin"])
+        _EXECUTE_RATE[u.user_id] = collections.deque([_time.monotonic()] * 20)
+        _override(lambda: u)
+        try:
+            r = await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1"})
+            assert r.status_code == 429, f"Expected 429 rate limit, got {r.status_code}: {r.text}"
+            assert "rate limit" in r.json()["detail"].lower()
+        finally:
+            _clear()
+            _EXECUTE_RATE.pop(u.user_id, None)
 
 
 # ═══════════════════════════════════════════════════════
@@ -329,8 +339,11 @@ class TestInjectionPrevention:
     @REQUIRES_PG
     @pytest.mark.parametrize("table_name", INJECTION_TABLE_NAMES)
     async def test_injection_via_table_name_blocked(self, client: AsyncClient, table_name: str):
+        from urllib.parse import quote
         _override(_admin)
-        r = await client.get(f"/api/v1/hxdbmanager/schema/{table_name}")
+        # URL-encode the path segment so even a NUL byte reaches the server (httpx
+        # refuses to send a raw \x00) — the server must still block it.
+        r = await client.get(f"/api/v1/hxdbmanager/schema/{quote(table_name, safe='')}")
         # Must get 404 (table not found) — never 200 or 500
         assert r.status_code == 404, f"Expected 404 for injection attempt: {table_name!r}, got {r.status_code}: {r.text}"
         _clear()

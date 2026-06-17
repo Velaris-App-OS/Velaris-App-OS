@@ -38,7 +38,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: helix
-      POSTGRES_PASSWORD: ${VELARIS_DB_PASSWORD:-helix_dev_password}
+      POSTGRES_PASSWORD: ${VELARIS_DB_PASSWORD:?not set - run scripts/secrets-render.sh or pass --env-file ~/helix/.env}
       POSTGRES_DB: helix
     ports: ["5432:5432"]
     volumes: [helix-db:/var/lib/postgresql/data]
@@ -48,11 +48,14 @@ services:
       retries: 10
 
   cache:
-    image: redis:7-alpine
+    # Valkey = Linux Foundation fork of Redis, BSD-3 (Redis 7.4+ moved to
+    # SSPL). Protocol-compatible drop-in: same port, same client library.
+    # Architecture Report §11 mandates this swap.
+    image: valkey/valkey:8-alpine
     ports: ["6379:6379"]
     volumes: [cache-data:/data]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       retries: 10
 
@@ -69,27 +72,15 @@ services:
     volumes: [events-data:/var/lib/redpanda/data]
 
 
-  search:
-    image: opensearchproject/opensearch:2.17.0
-    environment:
-      - discovery.type=single-node
-      - plugins.security.disabled=true
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${VELARIS_SEARCH_PASSWORD:-H3lix_Dev!}
-    ports: ["9200:9200"]
-    volumes: [search-data:/usr/share/opensearch/data]
+  # search (OpenSearch) removed 2026-06-12 — zero references in platform
+  # code; it never served a request. Re-add deliberately if a search
+  # feature ships, don't resurrect from habit.
 
-  auth:
-    image: quay.io/keycloak/keycloak:26.0
-    command: start-dev
-    environment:
-      - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://helix-db:5432/helix
-      - KC_DB_USERNAME=helix
-      - KC_DB_PASSWORD=${VELARIS_DB_PASSWORD:-helix_dev_password}
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=${VELARIS_ADMIN_PASSWORD:-admin}
-    ports: ["8090:8080"]
-    depends_on: [helix-db]
+  # auth (Keycloak) removed 2026-06-12 — login is the built-in stack
+  # (/api/v1/auth/login: bcrypt + RS256 + passkeys; auth_mode="jwt").
+  # The OIDC code path (auth_mode="oidc" + oidc_discovery_url) stays in the
+  # platform; re-add an IdP container deliberately when a customer needs
+  # bring-your-own-IdP, not from habit.
 
   ollama:
     image: ollama/ollama:latest
@@ -109,6 +100,22 @@ services:
 #      HELIX_CASE_DATABASE_URL: postgresql+asyncpg://helix:helix_dev_password@helix-db:5432/helix
 #      HELIX_CASE_TEMPORAL_HOST: temporal:7233
 #      HELIX_CASE_SERVICE_PORT: "8200"
+
+  # ── API Gateway (roadmap #13a — stable /api/v1 prefix + discovery) ──
+  # Single ingress; routes by sub-prefix to the owning service. All seams
+  # resolve to case-service today (zero behaviour change); each flips to its
+  # own service as services are extracted (#13c-e).
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: velaris-gateway
+    # Host networking: the gateway reaches case-service on the host loopback
+    # (127.0.0.1:8201), which lets case-service bind loopback-ONLY so it cannot
+    # be reached around the gateway. nginx itself listens on 127.0.0.1:8200
+    # (see gateway/nginx.conf) — nothing is exposed on a public interface.
+    network_mode: host
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
 
   # >>> P23 observability services
   prometheus:
@@ -145,7 +152,7 @@ services:
     command: server /data --console-address ":9001"
     environment:
       - MINIO_ROOT_USER=helix
-      - MINIO_ROOT_PASSWORD=${VELARIS_DB_PASSWORD:-helix_dev_password}
+      - MINIO_ROOT_PASSWORD=${VELARIS_MINIO_PASSWORD:?not set - run scripts/secrets-render.sh or pass --env-file ~/helix/.env}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -160,9 +167,11 @@ services:
     image: minio/mc:RELEASE.2024-10-02T08-27-28Z
     depends_on:
       minio: { condition: service_healthy }
+    environment:
+      - MC_HELIX_PASSWORD=${VELARIS_MINIO_PASSWORD:?not set - run scripts/secrets-render.sh or pass --env-file ~/helix/.env}
     entrypoint: >
       /bin/sh -c "
-      mc alias set helix http://minio:9000 helix $${VELARIS_DB_PASSWORD:-helix_dev_password};
+      mc alias set helix http://minio:9000 helix $${MC_HELIX_PASSWORD};
       mc mb --ignore-existing helix/helix-docs;
       exit 0;
       "
@@ -189,14 +198,37 @@ services:
       retries: 5
   # <<< P25b mailpit
 
+  # >>> Group K: OpenBao secrets manager
+  # Host port 8300 (8200 belongs to case-service). Loopback-only binding:
+  # nothing off-host can reach the secrets API. The app does NOT talk to
+  # OpenBao at runtime — the agent renders .env at platform start.
+  openbao:
+    image: openbao/openbao:2
+    container_name: velaris-openbao
+    command: ["bao", "server", "-config=/openbao/config/server.hcl"]
+    cap_add:
+      - IPC_LOCK        # mlock: keep secrets out of swap
+    ports:
+      - "127.0.0.1:8300:8200"
+    volumes:
+      - openbao-data:/openbao/data
+      - ../openbao/server.hcl:/openbao/config/server.hcl:ro
+    healthcheck:
+      # uninit/sealed/standby remapped to 200 — "API up" is the health bar;
+      # seal state is handled by the start script, not the orchestrator
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8200/v1/sys/health?uninitcode=200&sealedcode=200&standbycode=200"]
+      interval: 10s
+      retries: 5
+  # <<< Group K
+
 volumes:
   temporal-db:
   helix-db:
   cache-data:
   events-data:
-  search-data:
   ollama-data:
   helix-minio-data:
   helix-prometheus-data:
   helix-mailpit-data:
+  openbao-data:
 

@@ -53,6 +53,7 @@ function BuilderTab() {
   const [bodyTpl, setBodyTpl]     = useState("");
   const [respMap, setRespMap]     = useState("");
   const [headers, setHeaders]     = useState("");
+  const [varNamespace, setVarNamespace] = useState("");
   const [connectors, setConnectors] = useState<any[]>([]);
   const [msg, setMsg]             = useState<{ text: string; ok: boolean } | null>(null);
   const [loading, setLoading]     = useState(false);
@@ -76,13 +77,13 @@ function BuilderTab() {
 
       const r = await authFetch(`${API}/connectors/build`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, method, url, headers: parsedHeaders, auth_type: authType, body_template: bodyTpl, response_mapping: parsedRespMap, credentials: creds }),
+        body: JSON.stringify({ name, method, url, headers: parsedHeaders, auth_type: authType, body_template: bodyTpl, response_mapping: parsedRespMap, credentials: creds, variable_namespace: varNamespace.trim() || null }),
       });
       if (r.ok) {
         const c = await r.json();
         setConnectors(cs => [c, ...cs]);
         setMsg({ text: `Connector "${name}" created (${c.id})`, ok: true });
-        setName(""); setUrl(""); setBodyTpl(""); setRespMap(""); setHeaders("");
+        setName(""); setUrl(""); setBodyTpl(""); setRespMap(""); setHeaders(""); setVarNamespace("");
       } else {
         const err = await r.json();
         setMsg({ text: err.detail || "Failed", ok: false });
@@ -153,6 +154,9 @@ function BuilderTab() {
           <div style={S.label}>Response Field Mapping (JSON: case_field → response.json.path)</div>
           <textarea style={{ ...S.input, fontFamily: "var(--font-mono)", fontSize: 11, resize: "vertical" }} rows={2}
             placeholder='{"external_id": "data.id"}' value={respMap} onChange={e => setRespMap(e.target.value)} />
+
+          <div style={S.label}>Variable Namespace (optional — case variables this connector writes)</div>
+          <input style={S.input} placeholder="e.g. payment_gw" value={varNamespace} onChange={e => setVarNamespace(e.target.value)} />
 
           {msg && <div style={{ fontSize: 12, padding: "8px 12px", borderRadius: 4, marginBottom: 12, background: msg.ok ? "#22c55e22" : "#ef444422", color: msg.ok ? "#22c55e" : "#ef4444" }}>{msg.text}</div>}
           <Button disabled={loading || !name || !url} onClick={handleBuild}>{loading ? "Creating…" : "Create Connector"}</Button>

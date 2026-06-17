@@ -3,6 +3,7 @@ import { useApi } from "@shared/hooks";
 import { getNLPStatus, generateCaseTypeFromText, generateFullCaseType } from "@shared/api/client";
 import { Card, Button, Spinner } from "@shared/components";
 import { useNavigate } from "react-router-dom";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 /* ═══════════════════════════════════════════════════════════════════
    NLP Builder — Describe a process in plain English, get a case type.
@@ -89,6 +90,8 @@ export default function NLPBuilder() {
 
   return (
     <div style={{ padding: "var(--space-xl) var(--space-2xl)", width: "100%", overflow: "auto", height: "100%", boxSizing: "border-box" }}>
+      <AiUnavailableBanner featureName="NLP case generation" />
+
 
       {/* Status bar */}
       {status && (

@@ -4,6 +4,7 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@shared/components";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/hxdocs";
 
@@ -114,6 +115,8 @@ function LiveDataBlock({ block, live, onUpdate }: { block: Block; live: any; onU
   if (configuring) {
     return (
       <div style={{ border: "2px solid var(--accent)", borderRadius: 8, padding: 16, background: "var(--accent-dim)" }}>
+      <AiUnavailableBanner featureName="AI article generation" />
+
         <div style={{ fontSize: 11, color: "#818cf8", fontWeight: 700, textTransform: "uppercase" as const, marginBottom: 12 }}>⚡ Configure Live Data Block</div>
 
         {/* Embed type selector */}

@@ -1,7 +1,7 @@
 """Auth API router — production credential-only login."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from case_service.auth.dependencies import get_current_user
@@ -16,13 +16,17 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     mfa_token: str | None = None
+    device_id: str | None = None   # Group J: reuse this browser's device row
 
 
 class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: dict
-    mfa_required: bool = False
+    access_token:  str
+    refresh_token: str = ""
+    token_type:    str = "bearer"
+    expires_in:    int = 0
+    user:          dict
+    mfa_required:  bool = False
+    device_id:     str = ""        # Group J
 
 
 class UserInfoResponse(BaseModel):
@@ -37,17 +41,22 @@ class UserInfoResponse(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(body: LoginRequest, session: AsyncSession = Depends(get_session)):
+async def login(request: Request, body: LoginRequest, session: AsyncSession = Depends(get_session)):
     from case_service.api.routers.auth_real import login_real
     from case_service.api.routers.auth_real import LoginRequest as RealLoginReq
     result = await login_real(
-        RealLoginReq(username=body.username, password=body.password, mfa_token=body.mfa_token),
+        request,
+        RealLoginReq(username=body.username, password=body.password,
+                     mfa_token=body.mfa_token, device_id=body.device_id),
         session,
     )
     return LoginResponse(
         access_token=result.access_token,
+        refresh_token=result.refresh_token,
+        expires_in=result.expires_in,
         user=result.user,
         mfa_required=result.mfa_required,
+        device_id=result.device_id,
     )
 
 

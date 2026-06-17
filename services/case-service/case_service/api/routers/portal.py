@@ -67,6 +67,15 @@ from case_service.db.session import get_session
 from case_service.storage import get_storage_backend
 from case_service.hxnexus.factory import get_llm_backend, check_ai_available
 from case_service.api.routers.payments import _encrypt_bank_ref
+from case_service.case_vars import service as case_vars
+
+
+async def _case_vars_for(
+    session: AsyncSession, case_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Case data via the case_vars façade (portal context: pii/secret masked)."""
+    ctx = case_vars.CallerContext(kind="portal", actor_id="portal")
+    return await case_vars.get_all_bulk(session, ctx, case_ids)
 
 # Two routers: one public, one admin-only
 public_router = APIRouter(prefix="/portal", tags=["portal"])
@@ -289,7 +298,8 @@ async def track_case(
         raise HTTPException(404, "Tracking token not found")
 
     ct = await session.get(CaseTypeModel, case.case_type_id)
-    subject = (case.data or {}).get("subject", "Your request")
+    cvars = (await _case_vars_for(session, [case.id]))[case.id]
+    subject = cvars.get("subject", "Your request")
 
     return PortalCaseStatus(
         case_id=str(case.id),
@@ -416,14 +426,16 @@ async def my_cases(
     )).scalars().all()
 
     result = []
+    vars_by_case = await _case_vars_for(session, [c.id for c in cases])
     for c in cases:
         ct = await session.get(CaseTypeModel, c.case_type_id)
+        cvars = vars_by_case.get(c.id, {})
         result.append({
             "case_id":          str(c.id),
             "case_number":      c.case_number,
             "tracking_token":   str(c.portal_tracking_token),
-            "subject":          (c.data or {}).get("subject", "Your request"),
-            "description":      (c.data or {}).get("description", ""),
+            "subject":          cvars.get("subject", "Your request"),
+            "description":      cvars.get("description", ""),
             "status":           c.status,
             "priority":         c.priority,
             "current_stage_id": c.current_stage_id,
@@ -499,10 +511,11 @@ async def case_timeline(
         ).order_by(PaymentDisbursementModel.created_at.desc()).limit(1)
     )).scalar_one_or_none()
 
+    cvars = (await _case_vars_for(session, [case.id]))[case.id]
     return {
         "case_id":             str(case.id),
         "case_number":         case.case_number,
-        "subject":             (case.data or {}).get("subject", "Your request"),
+        "subject":             cvars.get("subject", "Your request"),
         "status":              case.status,
         "priority":            case.priority,
         "case_type_name":      ct.name if ct else "Unknown",
@@ -768,8 +781,9 @@ async def portal_case_chat(
         for row in audit_rows if row.action in visible_actions
     ]
 
+    cvars = (await _case_vars_for(session, [case.id]))[case.id]
     case_context = (
-        f"Case subject: {(case.data or {}).get('subject', 'Support request')}\n"
+        f"Case subject: {cvars.get('subject', 'Support request')}\n"
         f"Case type: {ct.name if ct else 'Unknown'}\n"
         f"Current status: {case.status}\n"
         f"Priority: {case.priority}\n"
@@ -1040,6 +1054,7 @@ async def list_portal_submissions(
     cases = (await session.execute(q)).scalars().all()
 
     result = []
+    vars_by_case = await _case_vars_for(session, [c.id for c in cases])
     for c in cases:
         if slug and (c.extra_metadata or {}).get("portal_slug") != slug:
             continue
@@ -1049,7 +1064,7 @@ async def list_portal_submissions(
             "tracking_token": str(c.portal_tracking_token),
             "submitter_name": c.portal_submitter_name,
             "submitter_email": c.portal_submitter_email,
-            "subject": (c.data or {}).get("subject", ""),
+            "subject": vars_by_case.get(c.id, {}).get("subject", ""),
             "status": c.status,
             "priority": c.priority,
             "case_type_name": ct.name if ct else "Unknown",

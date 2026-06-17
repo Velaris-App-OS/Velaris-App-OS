@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -152,6 +152,7 @@ async def list_accounts(
 @router.patch("/accounts/{account_id}")
 async def update_account(
     account_id: uuid.UUID, body: AccountIn,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(require_role("admin")),
 ):
@@ -171,6 +172,10 @@ async def update_account(
         )).scalars().all():
             existing.is_default_outbound = False
     await session.flush()
+    # #27 Part B: email-account change can affect intake AI scenarios → flag
+    # generated suites' AI layer stale (manual regen).
+    from case_service.testsuite import regen
+    background_tasks.add_task(regen.bg_scenario_source_changed, None)
     return _account_to_dict(a)
 
 

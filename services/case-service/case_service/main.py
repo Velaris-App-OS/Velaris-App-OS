@@ -78,6 +78,8 @@ from case_service.api.routers.hxlogs   import router as hxlogs_router     # P63 
 from case_service.api.routers.auth_real import router as auth_real_router  # P64 Real Auth
 from case_service.api.routers.permissions import router as permissions_router
 from case_service.api.routers.marketplace import router as marketplace_router  # Marketplace
+from case_service.api.routers.platform_updates import router as platform_updates_router  # PUO Phase 1
+from case_service.api.routers.case_variables import router as case_variables_router  # Case Variables P1
 from case_service.api.routers.portal_customers import public_router as portal_customers_public_router, admin_router as portal_customers_admin_router  # P65
 from case_service.api.routers.releases import router as releases_router, release_cron  # P66
 from case_service.api.routers.hxdbmanager import router as hxdbmanager_router          # P67
@@ -87,6 +89,8 @@ from case_service.api.health import router as health_router
 from case_service.config import get_settings
 from case_service.middleware.rate_limit import RateLimitMiddleware
 from case_service.middleware.request_tracking import RequestTrackingMiddleware
+from case_service.middleware.security_headers import SecurityHeadersMiddleware
+from case_service.middleware.body_limit import BodyLimitMiddleware
 from case_service.middleware.audit import AuditMiddleware
 from case_service.middleware.superadmin_gate import SuperadminGateMiddleware
 
@@ -199,6 +203,48 @@ async def lifespan(app: FastAPI):
                         logger.info("Seeded built-in role: %s", role_def["name"])
     except Exception as _seed_err:
         logger.warning("Built-in role seed failed (non-fatal): %s", _seed_err)
+
+    # ── HxVault (#19): warm per-tenant DEK cache so sync decrypt stays sync ──────
+    try:
+        from case_service.db.session import get_session_factory
+        from case_service import hxvault
+
+        factory = get_session_factory()
+        async with factory() as _vault_session:
+            await hxvault.warm_cache(_vault_session)
+    except Exception as _vault_err:
+        # Fail LOUD: the sync decrypt path relies on the cache, so an un-warmed cache
+        # means hxv2 connector-credential reads on this worker raise until the periodic
+        # resync (below) repairs it. (Legacy hxv1 rows are unaffected.)
+        logger.error(
+            "HxVault DEK warm FAILED: %s — hxv2 connector-credential reads on this "
+            "worker will fail until the periodic resync repairs the cache. hxv1 rows unaffected.",
+            _vault_err,
+        )
+
+    # ── HxVault multi-worker coherence: periodic cache resync ───────────────────
+    # warm_cache only runs once at startup; under multiple workers a DEK created
+    # (or shredded) on another worker is invisible here until this loop reconciles.
+    _vault_resync_task = None
+    _vault_resync_interval = settings.vault_cache_resync_seconds
+    if _vault_resync_interval and _vault_resync_interval > 0:
+        import asyncio as _asyncio
+        from case_service.db.session import get_session_factory as _gsf_vault
+        from case_service import hxvault as _hxvault_loop
+
+        async def _vault_resync_loop():
+            while True:
+                await _asyncio.sleep(_vault_resync_interval)
+                try:
+                    async with _gsf_vault()() as _s:
+                        await _hxvault_loop.resync_cache(_s)
+                except _asyncio.CancelledError:
+                    raise
+                except Exception as _e:  # noqa: BLE001 — never let the loop die
+                    logger.warning("HxVault resync loop error (will retry): %s", _e)
+
+        _vault_resync_task = _asyncio.create_task(_vault_resync_loop())
+        logger.info("HxVault DEK cache resync loop started (every %ds)", _vault_resync_interval)
 
     # ── Migration 042: add v2 ownership columns to artifact_branches ─────────
     try:
@@ -358,7 +404,74 @@ async def lifespan(app: FastAPI):
         logger.warning("Credential expiry monitor unavailable: %s", _e)
     # <<< SD-6 credential expiry monitor
 
+    # >>> Group I: daily RFC-3161 anchoring of the audit chain
+    try:
+        if get_settings().audit_anchor_enabled:
+            from case_service.compliance.audit_anchor import audit_anchor_loop
+            _asyncio.create_task(audit_anchor_loop())
+            logger.info("Audit anchor loop started (TSA: %s)", get_settings().audit_tsa_url)
+    except Exception as _e:
+        logger.warning("Audit anchor loop unavailable: %s", _e)
+    # <<< Group I audit anchoring
+
+    # >>> C1 outbox relay
+    _outbox_relay = None
+    try:
+        from case_service.integrations.outbox_relay import OutboxRelay
+        from case_service.db.session import get_session_factory as _gsf
+        _outbox_relay = OutboxRelay(_gsf())
+        _outbox_relay.start()
+    except Exception as _e:
+        logger.warning("OutboxRelay unavailable: %s", _e)
+    # <<< C1 outbox relay
+
+    # >>> PUO Phase 2: platform update watcher (admin notifications)
+    _puo_watcher = None
+    try:
+        from case_service.integrations.platform_update_watcher import PlatformUpdateWatcher
+        from case_service.db.session import get_analytics_session_factory as _gasf
+        _puo_watcher = PlatformUpdateWatcher(_gasf())
+        _puo_watcher.start()
+    except Exception as _e:
+        logger.warning("PlatformUpdateWatcher unavailable: %s", _e)
+    # <<< PUO Phase 2
+
+    # >>> PUO Phase 3: rollout plan engine (rings, soak, supersede)
+    _puo_engine = None
+    try:
+        from case_service.integrations.platform_update_plan_engine import PlatformUpdatePlanEngine
+        from case_service.db.session import get_analytics_session_factory as _gasf2
+        _puo_engine = PlatformUpdatePlanEngine(_gasf2())
+        _puo_engine.start()
+    except Exception as _e:
+        logger.warning("PlatformUpdatePlanEngine unavailable: %s", _e)
+    # <<< PUO Phase 3
+
     yield
+
+    # >>> HxVault resync loop stop
+    if _vault_resync_task is not None:
+        _vault_resync_task.cancel()
+        try:
+            await _vault_resync_task
+        except (Exception, BaseException):
+            pass
+    # <<< HxVault resync loop stop
+
+    # >>> C1 outbox relay stop
+    if _outbox_relay is not None:
+        _outbox_relay.stop()
+    # <<< C1 outbox relay stop
+
+    # >>> PUO Phase 2 stop
+    if _puo_watcher is not None:
+        _puo_watcher.stop()
+    # <<< PUO Phase 2 stop
+
+    # >>> PUO Phase 3 stop
+    if _puo_engine is not None:
+        _puo_engine.stop()
+    # <<< PUO Phase 3 stop
 
     # >>> P25 email poll loop stop
     if email_loop is not None:
@@ -471,6 +584,12 @@ def create_app() -> FastAPI:
     app.include_router(auth_real_router, prefix=prefix)  # P64 Real Auth
     app.include_router(permissions_router, prefix=prefix)
     app.include_router(marketplace_router, prefix=prefix)  # Marketplace
+    app.include_router(platform_updates_router, prefix=prefix)  # PUO Phase 1
+    app.include_router(case_variables_router, prefix=prefix)  # Case Variables P1
+    from case_service.api.routers import testsuite as _testsuite
+    app.include_router(_testsuite.router, prefix=prefix)  # Test Suite core (#27)
+    from case_service.api.routers import hxtest as _hxtest
+    app.include_router(_hxtest.router, prefix=prefix)  # HxTest marketplace AI layer (#27)
 
 
     # Middleware (order matters — last added = first executed)
@@ -500,6 +619,17 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # >>> Group D: oversized bodies rejected before inner middleware/endpoints
+    # do work; SecurityHeaders outermost so headers land on every response,
+    # including 413/429 rejections
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_body_bytes=settings.max_body_bytes,
+        max_upload_bytes=settings.max_upload_bytes,
+        max_migrate_upload_bytes=settings.max_migrate_upload_bytes,
+    )
+    app.add_middleware(SecurityHeadersMiddleware)
+    # <<< Group D
 
     # Health endpoints (no prefix — /health and /ready at root)
     app.include_router(health_router)

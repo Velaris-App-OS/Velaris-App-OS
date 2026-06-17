@@ -29,7 +29,11 @@ from case_service.db.models import (
     CaseTypeModel,
     SavedReportModel,
 )
-from case_service.db.session import get_session
+from case_service.db.session import get_analytics_session as get_session
+# Group I: heavy read-only endpoints run on the replica dependency (falls
+# back to the analytics pool when no replica is configured). Saved-report
+# CRUD stays on get_session — it writes, and must always hit the primary.
+from case_service.db.session import get_replica_session as get_ro_session
 from case_service.auth.dependencies import get_current_user
 from case_service.auth.models import AuthenticatedUser
 
@@ -113,7 +117,7 @@ async def get_dashboard(
     days: int = Query(30, ge=1, le=365),
     case_type_id: uuid.UUID | None = None,
     tenant_id: uuid.UUID | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
 ):
     """Full analytics dashboard — all metrics in one call."""
     now = datetime.now(timezone.utc)
@@ -150,7 +154,7 @@ async def get_dashboard(
 @router.get("/overview", response_model=OverviewMetrics)
 async def get_overview_metrics(
     case_type_id: uuid.UUID | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
 ):
     base_filter = []
     if case_type_id:
@@ -163,7 +167,7 @@ async def get_overview_metrics(
 @router.get("/sla-compliance", response_model=SLAComplianceMetrics)
 async def get_sla_compliance(
     case_type_id: uuid.UUID | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
 ):
     return await _get_sla_compliance(session, case_type_id)
 
@@ -172,7 +176,7 @@ async def get_sla_compliance(
 async def get_cases_over_time(
     days: int = Query(30, ge=1, le=365),
     case_type_id: uuid.UUID | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
 ):
     since = datetime.now(timezone.utc) - timedelta(days=days)
     base_filter = []
@@ -184,7 +188,7 @@ async def get_cases_over_time(
 @router.get("/bottlenecks", response_model=list[StageBottleneck])
 async def get_bottlenecks(
     case_type_id: uuid.UUID | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
 ):
     """Identify stages where cases spend the most time."""
     # Look at audit log stage_transitioned events to compute avg duration per stage
@@ -501,7 +505,7 @@ class SaveReportRequest(BaseModel):
 
 @router.get("/metrics/snapshot")
 async def metrics_snapshot(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     """Full platform snapshot: case counts, SLA breach %, avg resolution, by-type."""
@@ -511,7 +515,7 @@ async def metrics_snapshot(
 @router.get("/metrics/time-series")
 async def metrics_time_series(
     days: int = Query(30, ge=1, le=365),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     return {"series": await cases_over_time(session, days=days), "period_days": days}
@@ -520,7 +524,7 @@ async def metrics_time_series(
 @router.get("/metrics/sla-performance")
 async def metrics_sla(
     days: int = Query(30, ge=1, le=365),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     return await sla_performance(session, days=days)
@@ -529,7 +533,7 @@ async def metrics_sla(
 @router.get("/metrics/funnel/{case_type_id}")
 async def metrics_funnel(
     case_type_id: str,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     ct = (await session.execute(
@@ -545,7 +549,7 @@ async def metrics_funnel(
 @router.post("/query")
 async def analytics_query(
     body: NLQueryRequest,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     """NL or structured query → chart-ready data."""
@@ -644,7 +648,7 @@ async def export_saved_report(
 async def odata_feed(
     top:  int = Query(1000, alias="$top",  le=10000),
     skip: int = Query(0,    alias="$skip", ge=0),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     """OData v4 compatible endpoint — connect PowerBI or Tableau directly to this URL."""

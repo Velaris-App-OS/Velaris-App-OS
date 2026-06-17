@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useApi } from "@shared/hooks";
 import {
   listCases,
+  listCaseShares,
+  shareCase,
+  unshareCase,
   getCase,
   getCaseType,
   createCase,
@@ -60,6 +63,9 @@ const PRIORITY_COLORS: Record<string, string> = {
 export default function CaseManager() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [priorityFilter, setPriorityFilter] = useState<string>("");
+  const [varFilterInput, setVarFilterInput] = useState<string>("");
+  const [varFilter, setVarFilter] = useState<string>("");      // applied "ns.name:value"
+  const [varFilterError, setVarFilterError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [detailWidth, setDetailWidth] = useState(500);
@@ -70,8 +76,10 @@ export default function CaseManager() {
   const dragStartW = useRef(0);
 
   const { data, loading, error, refetch } = useApi(
-    () => listCases({ status: statusFilter || undefined, priority: priorityFilter || undefined, page, page_size: PAGE_SIZE }),
-    [statusFilter, priorityFilter, page]
+    () => listCases({ status: statusFilter || undefined, priority: priorityFilter || undefined, vars: varFilter ? [varFilter] : undefined, page, page_size: PAGE_SIZE })
+      .then(r => { setVarFilterError(null); return r; })
+      .catch(e => { if (varFilter) setVarFilterError(e?.message || "Invalid variable filter"); throw e; }),
+    [statusFilter, priorityFilter, varFilter, page]
   );
 
   const cases = data?.items ?? [];
@@ -119,6 +127,27 @@ export default function CaseManager() {
             <FilterChip key={`p-${p}`} label={p || "Any"} active={priorityFilter === p} onClick={() => setPriorityFilterAndReset(p)}
               color={p ? PRIORITY_COLORS[p] : undefined} />
           ))}
+          <div style={{ width: 1, background: "var(--border-subtle)", margin: "0 var(--space-xs)" }} />
+          <form onSubmit={(e) => { e.preventDefault(); setVarFilter(varFilterInput.trim()); setPage(1); }}
+                style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input
+              value={varFilterInput}
+              onChange={(e) => setVarFilterInput(e.target.value)}
+              placeholder="variable filter — crm.account_status:active"
+              title="Filter by an indexed case variable (namespace.name:value)"
+              style={{
+                fontSize: 11, fontFamily: "var(--font-mono)", padding: "4px 8px",
+                background: "var(--bg-input)", color: "var(--text-primary)",
+                border: `1px solid ${varFilterError ? "var(--status-failed)" : "var(--border-subtle)"}`,
+                borderRadius: "var(--radius-sm)", width: 240,
+              }}
+            />
+            {varFilter && (
+              <button type="button" onClick={() => { setVarFilter(""); setVarFilterInput(""); setVarFilterError(null); setPage(1); }}
+                style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>✕</button>
+            )}
+          </form>
+          {varFilterError && <span style={{ fontSize: 11, color: "var(--status-failed)", alignSelf: "center" }}>{varFilterError}</span>}
         </div>
 
         {/* List */}
@@ -258,7 +287,7 @@ function CaseDetailPanel({
   const { data: slaData } = useApi(() => getCaseSLA(caseId), [caseId]);
   const { data: caseTypeData } = useApi(() => getCaseType(caseData?.case_type_id ?? ""), [caseData?.case_type_id]);
   const { data: myTask, refetch: refetchMyTask } = useApi(() => getMyTask(caseId), [caseId]);
-  const [tab, setTab] = useState<"my-task" | "stages" | "details" | "timeline" | "sla">("stages");
+  const [tab, setTab] = useState<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing">("stages");
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [actionBusy, setActionBusy] = useState(false);
 
@@ -388,8 +417,8 @@ function CaseDetailPanel({
       <div style={{ display: "flex", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0, overflowX: "auto" }}>
         {([
           myTask ? "my-task" : null,
-          "stages", "details", "timeline", "sla",
-        ].filter(Boolean) as Array<"my-task" | "stages" | "details" | "timeline" | "sla">).map((t) => (
+          "stages", "details", "timeline", "sla", "sharing",
+        ].filter(Boolean) as Array<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing">).map((t) => (
           <button key={t} onClick={() => setTab(t)} style={{
             flex: 1, padding: "10px 8px", fontSize: 11, fontWeight: 500, fontFamily: "var(--font-mono)",
             textTransform: "uppercase", letterSpacing: "0.04em", border: "none", cursor: "pointer",
@@ -442,7 +471,67 @@ function CaseDetailPanel({
         {tab === "details" && <DetailsTab case_={caseData} onPriorityChange={async (p) => { await changeCasePriority(caseId, p); refetch(); onUpdate(); }} />}
         {tab === "timeline" && <TimelineTab entries={history || []} />}
         {tab === "sla" && <SLATab slas={slaData || []} />}
+        {tab === "sharing" && <SharingTab caseId={caseId} />}
       </div>
+    </div>
+  );
+}
+
+/* ── Sharing Tab (HxGuard Phase B) ───────────────────────────── */
+
+function SharingTab({ caseId }: { caseId: string }) {
+  const [shares, setShares] = useState<{ user_id: string; relation: string; created_by: string | null; created_at: string | null }[]>([]);
+  const [userId, setUserId] = useState("");
+  const [relation, setRelation] = useState("viewer");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await listCaseShares(caseId);
+      setShares(r);
+      setMsg(null);
+    } catch (e: any) { setMsg(e?.message || "Could not load shares"); }
+  }, [caseId]);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    if (!userId.trim()) return;
+    setBusy(true);
+    try {
+      await shareCase(caseId, userId.trim(), relation);
+      setUserId(""); await load();
+    } catch (e: any) { setMsg(e?.message || "Share failed"); }
+    finally { setBusy(false); }
+  };
+
+  const inp: React.CSSProperties = { padding: "6px 10px", fontSize: 12, border: "1px solid var(--border-subtle)", borderRadius: 6, background: "var(--bg-input)", color: "var(--text-primary)" };
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
+        Direct access to this case. Assignees appear automatically; viewers/editors are explicit shares.
+      </div>
+      {shares.map((s, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border-subtle)", fontSize: 12 }}>
+          <code style={{ flex: 1 }}>{s.user_id}</code>
+          <span style={{ color: s.relation === "editor" ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{s.relation}</span>
+          {s.relation !== "assignee" && (
+            <button onClick={async () => { try { await unshareCase(caseId, s.user_id, s.relation); await load(); } catch (e: any) { setMsg(e?.message || "Remove failed"); } }}
+              style={{ background: "none", border: "none", color: "var(--status-failed)", cursor: "pointer", fontSize: 12 }}>✕</button>
+          )}
+        </div>
+      ))}
+      {shares.length === 0 && <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>No direct access entries.</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <input style={{ ...inp, flex: 1 }} placeholder="user id" value={userId} onChange={(e) => setUserId(e.target.value)} />
+        <select style={inp} value={relation} onChange={(e) => setRelation(e.target.value)}>
+          <option value="viewer">viewer</option>
+          <option value="editor">editor</option>
+        </select>
+        <button onClick={add} disabled={busy || !userId.trim()}
+          style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 700 }}>Share</button>
+      </div>
+      {msg && <div style={{ fontSize: 11, color: "var(--status-failed)", marginTop: 8 }}>{msg}</div>}
     </div>
   );
 }

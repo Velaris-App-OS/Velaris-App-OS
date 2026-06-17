@@ -103,12 +103,14 @@ async def _assert_case_access(
 class QARequest(BaseModel):
     question: str
     top_k: int = 5
+    use_cloud: bool = False  # Group H: explicit per-query opt-in to the external provider
 
 
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[uuid.UUID] = None
     case_id: Optional[uuid.UUID] = None
+    use_cloud: bool = False  # Group H: explicit per-query opt-in to the external provider
 
 
 class IndexRequest(BaseModel):
@@ -141,9 +143,14 @@ async def suggest(
 ):
     _check_global_rate(current_user)
     case = await _assert_case_access(case_id, current_user, session)
+    # case_vars façade read: typed pii/secret variables reach the AI
+    # provider masked — model egress is never a privileged reader.
+    from case_service.case_vars import service as case_vars
+    vars_ctx = case_vars.CallerContext(kind="platform", actor_id=current_user.user_id)
     case_data = {
         "id": str(case.id), "status": case.status,
-        "priority": case.priority, "data": case.data or {},
+        "priority": case.priority,
+        "data": await case_vars.get_all(session, vars_ctx, case.id),
     }
     suggestions = await next_best_action(case_data)
     return {"case_id": str(case_id), "suggestions": suggestions}
@@ -255,6 +262,8 @@ async def document_qa(
         session, case_id, body.question,
         tenant_id=getattr(case, "tenant_id", None),
         top_k=body.top_k,
+        use_cloud=body.use_cloud,
+        user_id=str(current_user.user_id),
     )
     return {"case_id": str(case_id), **result}
 
@@ -297,6 +306,7 @@ async def hxnexus_chat(
         case_id=body.case_id,
         message=body.message,
         tenant_id=getattr(current_user, "tenant_id", None),
+        use_cloud=body.use_cloud,
     )
     return result
 

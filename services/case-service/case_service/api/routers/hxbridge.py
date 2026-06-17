@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +36,7 @@ from case_service.db.models import (
 from case_service.db.session import get_session
 from case_service.hxbridge.encryption import encrypt_credentials, decrypt_credentials, mask_credentials
 from case_service.hxbridge.executor import execute_connector, form_lookup_connector, retry_dlq_item
+from case_service import hxvault
 from case_service.hxbridge.protocol import list_connector_types, get_connector
 import case_service.hxbridge.connectors  # noqa: F401 — triggers self-registration
 
@@ -51,6 +52,10 @@ class ConnectorCreate(BaseModel):
     description:    Optional[str] = None
     config:         dict = {}
     credentials:    dict = {}
+    # Phase 2 (case variables): operator-chosen namespace this connector
+    # writes case variables into. Optional — connectors without one cannot
+    # write variables (case_vars rejects unregistered writers).
+    variable_namespace: Optional[str] = None
 
 class ConnectorUpdate(BaseModel):
     name:        Optional[str]  = None
@@ -58,6 +63,7 @@ class ConnectorUpdate(BaseModel):
     config:      Optional[dict] = None
     credentials: Optional[dict] = None
     enabled:     Optional[bool] = None
+    variable_namespace: Optional[str] = None
 
 class SandboxRequest(BaseModel):
     input_data: dict = {}
@@ -78,6 +84,17 @@ async def get_connector_types(_: AuthenticatedUser = Depends(get_current_user)):
     return {"connector_types": list_connector_types()}
 
 
+async def _require_namespace_role(session: AsyncSession, user: AuthenticatedUser) -> None:
+    """Namespace registration is an admin-grade act (mirrors the role gate on
+    POST /variables/namespaces) — plain connector CRUD must not be a path to
+    squatting a namespace name another integration expects to own.
+    Decided by HxGuard (action: connector.namespace.register, fail-closed)."""
+    from case_service import hxguard
+    await hxguard.require(
+        session, hxguard.subject_from_user(user), "connector.namespace.register",
+    )
+
+
 # ── Connector CRUD ────────────────────────────────────────────────────────────
 
 @router.post("/connectors", status_code=201)
@@ -96,18 +113,34 @@ async def create_connector(
     if existing:
         raise HTTPException(409, f"Connector '{body.name}' already exists")
 
+    await hxvault.ensure_dek(session, user.tenant_id)
     connector = ConnectorRegistryModel(
         name=body.name,
         connector_type=body.connector_type,
         description=body.description,
         config=body.config,
-        credentials=encrypt_credentials(body.credentials),
+        credentials=encrypt_credentials(body.credentials, tenant_id=user.tenant_id, vault=True),
         created_by=user.user_id,
     )
     session.add(connector)
     try:
+        await session.flush()
+        if body.variable_namespace:
+            await _require_namespace_role(session, user)
+            from case_service.case_vars import service as case_vars
+            try:
+                await case_vars.register_connector_namespace(
+                    session, name=body.variable_namespace,
+                    owner_type="connector", owner_ref=connector.id,
+                    created_by=user.user_id,
+                )
+            except case_vars.VariableError as ve:
+                await session.rollback()
+                raise HTTPException(400, str(ve))
         await session.commit()
         await session.refresh(connector)
+    except HTTPException:
+        raise
     except Exception as e:
         if "uq_connector" in str(e).lower() or "unique" in str(e).lower():
             raise HTTPException(409, f"Connector '{body.name}' already exists")
@@ -150,24 +183,53 @@ async def get_connector_detail(
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     connector = await _get_or_404(session, connector_id)
-    return _connector_out(connector, include_config=True)
+    out = _connector_out(connector, include_config=True)
+    from case_service.db.models import VariableNamespaceModel
+    ns = (await session.execute(
+        select(VariableNamespaceModel)
+        .where(VariableNamespaceModel.owner_type.in_(("connector", "devconn")))
+        .where(VariableNamespaceModel.owner_ref == connector.id)
+        .limit(1)
+    )).scalar_one_or_none()
+    out["variable_namespace"] = ns.name if ns else None
+    out["variable_namespace_status"] = ns.status if ns else None
+    return out
 
 
 @router.put("/connectors/{connector_id}")
 async def update_connector(
     connector_id: uuid.UUID,
     body: ConnectorUpdate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
-    _: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     connector = await _get_or_404(session, connector_id)
     if body.name        is not None: connector.name        = body.name
     if body.description is not None: connector.description = body.description
     if body.config      is not None: connector.config      = body.config
-    if body.credentials is not None: connector.credentials = encrypt_credentials(body.credentials)
+    if body.credentials is not None:
+        await hxvault.ensure_dek(session, user.tenant_id)
+        connector.credentials = encrypt_credentials(body.credentials, tenant_id=user.tenant_id, vault=True)
     if body.enabled     is not None: connector.enabled     = body.enabled
+    if body.variable_namespace:
+        await _require_namespace_role(session, user)
+        from case_service.case_vars import service as case_vars
+        try:
+            await case_vars.register_connector_namespace(
+                session, name=body.variable_namespace,
+                owner_type="connector", owner_ref=connector.id,
+                created_by=user.user_id,
+            )
+        except case_vars.VariableError as ve:
+            await session.rollback()
+            raise HTTPException(400, str(ve))
     connector.updated_at = datetime.now(timezone.utc)
     await session.commit()
+    # #27 Part B: an integration change can affect AI scenarios across case types →
+    # flag generated suites' AI layer stale (manual regen).
+    from case_service.testsuite import regen
+    background_tasks.add_task(regen.bg_scenario_source_changed, None)
     return _connector_out(connector, include_config=True)
 
 
@@ -178,8 +240,19 @@ async def delete_connector(
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     connector = await _get_or_404(session, connector_id)
+    # Retire (never delete) the connector's variable namespace — written
+    # variables and their lineage stay readable; writes are closed.
+    from case_service.case_vars import service as case_vars
+    await case_vars.retire_connector_namespaces(
+        session, owner_type="connector", owner_ref=connector.id,
+    )
+    await case_vars.retire_connector_namespaces(
+        session, owner_type="devconn", owner_ref=connector.id,
+    )
     await session.delete(connector)
     await session.commit()
+    from case_service import hxguard
+    hxguard.invalidate_cache()
 
 
 # ── Test & sandbox ────────────────────────────────────────────────────────────

@@ -51,15 +51,22 @@ def resolve_path(context: dict[str, Any], path: str) -> Any:
     Example: ``resolve_path({"case": {"data": {"amount": 500}}}, "case.data.amount")``
     returns ``500``.
 
+    Case variables are flat dotted keys ("crm.account_status") inside the
+    dict the case_vars façade returns — at every level the remaining path is
+    first tried as ONE flat key before descending, so both
+    ``case.data.crm.account_status`` and bare ``crm.account_status`` resolve.
+
     Returns ``None`` if the path doesn't exist.
     """
     parts = path.split(".")
     current = context
-    for part in parts:
-        if isinstance(current, dict):
-            current = current.get(part)
-        else:
+    for i, part in enumerate(parts):
+        if not isinstance(current, dict):
             return None
+        remainder = ".".join(parts[i:])
+        if remainder != part and remainder in current:
+            return current[remainder]
+        current = current.get(part)
         if current is None:
             return None
     return current
@@ -277,22 +284,6 @@ def evaluate_decision_table(
 # ─── Expression evaluation ────────────────────────────────────────
 
 # Allowed builtins for safe expression evaluation
-_SAFE_BUILTINS = {
-    "abs": abs,
-    "min": min,
-    "max": max,
-    "round": round,
-    "len": len,
-    "str": str,
-    "int": int,
-    "float": float,
-    "bool": bool,
-    "sum": sum,
-    "any": any,
-    "all": all,
-}
-
-
 def evaluate_expression(
     expression: str, context: dict[str, Any]
 ) -> Any:
@@ -308,22 +299,37 @@ def evaluate_expression(
 
         evaluate_expression("priority_value + sla_factor", {...})
     """
-    # Flatten context for eval: "case.data.amount" → "case_data_amount"
+    # Flatten context: "case.data.amount" → "case_data_amount"
     flat = {}
     _flatten_dict(context, "", flat)
 
-    try:
-        return eval(expression, {"__builtins__": _SAFE_BUILTINS}, flat)  # noqa: S307
-    except Exception as e:
-        logger.warning("Expression eval error: %s → %s", expression, e)
-        return None
+    # HxSandbox #17 Phase 1: customer-authored expressions no longer hit a
+    # restricted ``eval`` directly. safe_expression classifies the AST,
+    # forbids attribute/dunder access (the sandbox-escape vector), and runs
+    # CONFORMING expressions on a pure-Python walker. See safe_expression.py.
+    from case_service.core.safe_expression import evaluate as _safe_evaluate
+    return _safe_evaluate(expression, flat)
 
 
 def _flatten_dict(
     d: dict[str, Any], prefix: str, out: dict[str, Any]
 ) -> None:
-    """Flatten a nested dict: {"a": {"b": 1}} → {"a_b": 1}."""
-    for k, v in d.items():
+    """Flatten a nested dict: {"a": {"b": 1}} → {"a_b": 1}.
+
+    Dotted keys (flat namespaced case variables like "crm.account_status")
+    are emitted with dots mapped to underscores so expressions can reference
+    them as valid identifiers: ``crm_account_status`` /
+    ``case_data_crm_account_status``.
+
+    Collision rule: dotted keys are emitted LAST, so a typed namespaced
+    variable always wins over a same-named bare key ("crm_account_status"
+    in the blob is caller-controlled; "crm.account_status" is provenance-
+    tracked — the trusted one must not be shadowable).
+    """
+    plain = [(k, v) for k, v in d.items() if "." not in k]
+    dotted = [(k, v) for k, v in d.items() if "." in k]
+    for k, v in plain + dotted:
+        k = k.replace(".", "_")
         key = f"{prefix}{k}" if not prefix else f"{prefix}_{k}"
         if isinstance(v, dict):
             _flatten_dict(v, key, out)

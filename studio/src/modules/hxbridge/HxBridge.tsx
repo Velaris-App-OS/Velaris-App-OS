@@ -19,7 +19,7 @@ function authFetch(url: string, opts: RequestInit = {}): Promise<Response> {
 }
 
 type ConnectorType = { connector_type: string; display_name: string; description: string; config_schema: any; credential_schema: any };
-type Connector = { id: string; name: string; connector_type: string; description: string | null; enabled: boolean; last_tested_at: string | null; last_test_ok: boolean | null; created_by: string | null; created_at: string | null; config?: any; credentials?: any; credential_expires_at: string | null; credentials_updated_at: string | null };
+type Connector = { id: string; name: string; connector_type: string; description: string | null; enabled: boolean; last_tested_at: string | null; last_test_ok: boolean | null; created_by: string | null; created_at: string | null; config?: any; credentials?: any; credential_expires_at: string | null; credentials_updated_at: string | null; variable_namespace?: string | null; variable_namespace_status?: string | null };
 type Call = { id: string; connector_id: string | null; case_id: string | null; step_id: string | null; status: string; latency_ms: number | null; error: string | null; retry_count: number; created_at: string | null };
 type DLQItem = { id: string; connector_id: string | null; error: string | null; retry_count: number; max_retries: number; next_retry_at: string | null; resolution: string | null; created_at: string | null };
 
@@ -59,7 +59,7 @@ function ConnectorsTab() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [selected, setSelected] = useState<Connector | null>(null);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: "", connector_type: "http", description: "", config: "{}", credentials: "{}" });
+  const [form, setForm] = useState({ name: "", connector_type: "http", description: "", config: "{}", credentials: "{}", variable_namespace: "" });
   const [sandboxInput, setSandboxInput] = useState("{}");
   const [sandboxResult, setSandboxResult] = useState<any>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
@@ -133,10 +133,10 @@ function ConnectorsTab() {
       const credentials = JSON.parse(form.credentials);
       const r = await authFetch(`${API}/connectors`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: form.name, connector_type: form.connector_type, description: form.description, config, credentials }),
+        body: JSON.stringify({ name: form.name, connector_type: form.connector_type, description: form.description, config, credentials, variable_namespace: form.variable_namespace.trim() || null }),
       });
       if (!r.ok) { setErr((await r.json()).detail || "Error"); return; }
-      setCreating(false); setForm({ name: "", connector_type: "http", description: "", config: "{}", credentials: "{}" });
+      setCreating(false); setForm({ name: "", connector_type: "http", description: "", config: "{}", credentials: "{}", variable_namespace: "" });
       await load();
     } catch (ex: any) { setErr(ex.message); }
     finally { setLoading(false); }
@@ -248,10 +248,16 @@ function ConnectorsTab() {
               <textarea style={{ ...S.input, height: 70, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
                         value={form.config} onChange={e => setForm(f => ({ ...f, config: e.target.value }))} />
             </div>
-            <div style={{ marginBottom: 10 }}>
+            <div style={{ marginBottom: 8 }}>
               <span style={S.label}>Credentials (JSON — encrypted at rest)</span>
               <textarea style={{ ...S.input, height: 50, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
                         value={form.credentials} onChange={e => setForm(f => ({ ...f, credentials: e.target.value }))} />
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <span style={S.label}>Variable namespace (optional)</span>
+              <input style={S.input} value={form.variable_namespace}
+                     onChange={e => setForm(f => ({ ...f, variable_namespace: e.target.value }))}
+                     placeholder="e.g. crm — case variables this connector writes" pattern="[a-z][a-z0-9_]*" />
             </div>
             {selectedType && (
               <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 8 }}>{selectedType.description}</div>
@@ -359,6 +365,14 @@ function ConnectorsTab() {
                   )}
                 </div>
                 <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>{selected.connector_type} · created {selected.created_at ? new Date(selected.created_at).toLocaleDateString() : "—"}</div>
+                {selected.variable_namespace && (
+                  <div style={{ fontSize: 12, marginTop: 4 }}>
+                    Variable namespace: <code style={{ fontSize: 11 }}>{selected.variable_namespace}</code>
+                    {selected.variable_namespace_status !== "active" && (
+                      <span style={{ ...S.badge, marginLeft: 6, background: "#fee2e2", color: "#991b1b", border: "1px solid #fecaca", fontSize: 10 }}>{selected.variable_namespace_status}</span>
+                    )}
+                  </div>
+                )}
                 {selected.description && <div style={{ fontSize: 13, marginTop: 6 }}>{selected.description}</div>}
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>

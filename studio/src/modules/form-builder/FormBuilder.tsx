@@ -37,6 +37,9 @@ export interface FormFieldDef {
   default_value?: any;
   null_policy?:  "skip" | "error" | "default";
   source?:       ConnectorSourceDef;
+  /** Case variable to pre-fill from (e.g. "crm.account_status" or "subject").
+   *  Falls back to matching the field_key against case variables. */
+  variable?: string;
 }
 
 export interface FormSectionDef {
@@ -471,6 +474,10 @@ function FieldPropertyEditor({ field, onUpdate, onClose }: {
 
       <PropField label="Description">
         <PropInput value={field.description || ""} onChange={v => onUpdate({ description: v })} />
+      </PropField>
+
+      <PropField label="Variable Source (pre-fill, e.g. crm.account_status)">
+        <PropInput value={field.variable || ""} onChange={v => onUpdate({ variable: v })} mono />
       </PropField>
 
       <label style={{

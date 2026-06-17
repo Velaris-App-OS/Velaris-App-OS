@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -787,6 +788,89 @@ class TenantMembershipModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class TenantDekModel(Base):
+    """HxVault (#19) — per-tenant Data Encryption Key (envelope encryption).
+
+    Holds a random 256-bit DEK wrapped (AES-256-GCM) under the master KEK.
+    tenant_id NULL = the platform DEK (tenantless/HxFusion case data).
+    Crypto-shredding: status='shredded' + wrapped_dek cleared → data encrypted
+    under this DEK is permanently unrecoverable (GDPR Art-17).
+    """
+    __tablename__ = "tenant_deks"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True, unique=True)
+    key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    wrapped_dek: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class TestSuiteModel(Base):
+    """Test Suite (#27) — a named collection of test-case definitions (DSL)."""
+    __test__ = False  # not a pytest test class
+    __tablename__ = "hxtest_suites"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # platform | component | security | conformance | generated
+    suite_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # builtin | ai_generated | developer | structural
+    source: Mapped[str] = mapped_column(String(20), default="builtin", nullable=False)
+    case_type_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    definition: Mapped[list] = mapped_column(PortableJSON(), default=list)
+    version: Mapped[str] = mapped_column(String(40), default="1.0.0", nullable=False)
+    # AI scenarios are stale vs the current case-type definition/rules/integrations
+    # (set by the regen hooks; cleared when AI scenarios are regenerated). #27 Part B.
+    ai_stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class TestRunModel(Base):
+    """Test Suite (#27) — one execution of a suite (or 'all')."""
+    __test__ = False  # not a pytest test class
+    __tablename__ = "hxtest_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    suite_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    suite_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    triggered_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # running | passed | failed | partial | error
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    app_package_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    ephemeral_tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TestResultModel(Base):
+    """Test Suite (#27) — per-test result within a run."""
+    __test__ = False  # not a pytest test class
+    __tablename__ = "hxtest_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    run_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    test_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    test_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # passed | failed | skipped | error
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    step_results: Mapped[list] = mapped_column(PortableJSON(), default=list)
+    ran_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class ArtifactAnalysisModel(Base):
     """AI-generated analysis of a migration artifact (Phase 19)."""
     __tablename__ = "artifact_analyses"
@@ -1092,6 +1176,30 @@ class AuditChainModel(Base):
     prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     sealed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False, index=True,
+    )
+
+
+class AuditAnchorModel(Base):
+    """RFC-3161 timestamp receipt over an audit-chain tip (Group I).
+
+    A timestamp authority signed sha256(tip_hash) at anchored_at, proving the
+    chain existed in this state at that time — even a DB admin who rewrites
+    the whole chain cannot forge history older than the latest anchor.
+    tsr_der holds the raw TimeStampResp; verify offline with
+    `openssl ts -verify`.
+    """
+    __tablename__ = "audit_anchors"
+    __table_args__ = (
+        Index("idx_audit_anchors_tip_seq", "tip_sequence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tip_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    tip_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    tsa_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    tsr_der: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    anchored_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False, index=True,
     )
 
@@ -3446,6 +3554,10 @@ class MarketplaceWorkspaceModel(Base):
     expires_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), nullable=False)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Conformance gate (#27 Phase C): none|legacy_unverified|unverified|structural_passed|full_passed
+    conformance_status:     Mapped[str]              = mapped_column(String(30), default="none", nullable=False)
+    conformance_run_id:     Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    conformance_checked_at: Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MarketplaceWorkspaceItemModel(Base):
@@ -3680,6 +3792,175 @@ class RevokedSessionModel(Base):
     expires_at: Mapped[datetime]       = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class RefreshTokenModel(Base):
+    """Opaque refresh tokens — stored hashed, rotated on every use."""
+    __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        Index("ix_refresh_tokens_user",    "user_id"),
+        Index("ix_refresh_tokens_expires", "expires_at"),
+        Index("ix_refresh_tokens_device",  "device_id"),
+    )
+
+    token_hash:  Mapped[str]           = mapped_column(String(64), primary_key=True)
+    user_id:     Mapped[str]           = mapped_column(String(255), nullable=False)
+    jti:         Mapped[str]           = mapped_column(String(36), nullable=False)
+    expires_at:  Mapped[datetime]      = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at:  Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by:  Mapped[str|None]      = mapped_column(String(255), nullable=True)
+    created_at:  Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Group J: binds the token chain to the auth_devices row it was issued on
+    device_id:   Mapped[uuid.UUID|None] = mapped_column(GUID(), nullable=True)
+
+
+# >>> Group J: device-bound sessions + WebAuthn passkeys
+class AuthDeviceModel(Base):
+    """One row per browser/machine a user signs in from.
+
+    Refresh tokens carry this row's id; revoking the device revokes the
+    whole chain. user_agent_hash covers browser family + OS only (not the
+    version), so routine browser updates don't invalidate sessions, but a
+    refresh token replayed from different software dies on first use.
+    """
+    __tablename__ = "auth_devices"
+    __table_args__ = (
+        Index("ix_auth_devices_user", "user_id"),
+    )
+
+    id:              Mapped[uuid.UUID]     = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    user_id:         Mapped[str]           = mapped_column(String(255), nullable=False)
+    device_name:     Mapped[str]           = mapped_column(String(255), default="Unknown device")
+    user_agent_hash: Mapped[str]           = mapped_column(String(64), nullable=False)
+    first_ip:        Mapped[str|None]      = mapped_column(String(64), nullable=True)
+    last_ip:         Mapped[str|None]      = mapped_column(String(64), nullable=True)
+    created_at:      Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen_at:    Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+    revoked_at:      Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by:      Mapped[str|None]      = mapped_column(String(255), nullable=True)
+
+
+class WebAuthnCredentialModel(Base):
+    """FIDO2 passkey public keys. Private keys never leave the authenticator."""
+    __tablename__ = "webauthn_credentials"
+    __table_args__ = (
+        Index("ix_webauthn_creds_user", "user_id"),
+    )
+
+    id:            Mapped[uuid.UUID]     = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    user_id:       Mapped[str]           = mapped_column(String(255), nullable=False)
+    credential_id: Mapped[bytes]         = mapped_column(LargeBinary, nullable=False, unique=True)
+    public_key:    Mapped[bytes]         = mapped_column(LargeBinary, nullable=False)
+    sign_count:    Mapped[int]           = mapped_column(BigInteger, default=0, nullable=False)
+    transports:    Mapped[list]          = mapped_column(PortableJSON(), default=list)
+    aaguid:        Mapped[str|None]      = mapped_column(String(64), nullable=True)
+    device_name:   Mapped[str]           = mapped_column(String(255), default="Passkey")
+    created_at:    Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_used_at:  Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at:    Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# >>> Case Variables Phase 1 (spec v2 — docs/Future/case_variables.md)
+class VariableNamespaceModel(Base):
+    """Registered variable namespace — the trust boundary left of the dot.
+
+    Namespaces are rows, not strings: a write to an unregistered namespace is
+    rejected, and the namespace a caller writes to is derived from its
+    authenticated identity (owner_type + owner_ref), never from a parameter.
+    """
+    __tablename__ = "variable_namespaces"
+
+    id:          Mapped[uuid.UUID]     = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    name:        Mapped[str]           = mapped_column(String(100), unique=True, nullable=False)
+    owner_type:  Mapped[str]           = mapped_column(String(20), nullable=False)
+    owner_ref:   Mapped[uuid.UUID|None] = mapped_column(GUID(), nullable=True)
+    sensitivity: Mapped[str]           = mapped_column(String(10), default="internal", nullable=False)
+    status:      Mapped[str]           = mapped_column(String(10), default="active", nullable=False)
+    created_by:  Mapped[str|None]      = mapped_column(String(255), nullable=True)
+    created_at:  Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class NamespaceGrantModel(Base):
+    """Explicit cross-namespace capability — owner-only access is the default."""
+    __tablename__ = "namespace_grants"
+    __table_args__ = (
+        UniqueConstraint("namespace_id", "grantee_type", "grantee_ref", "capability"),
+    )
+
+    id:           Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    namespace_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("variable_namespaces.id", ondelete="CASCADE"), nullable=False)
+    grantee_type: Mapped[str]       = mapped_column(String(20), nullable=False)
+    grantee_ref:  Mapped[str]       = mapped_column(String(255), nullable=False)
+    capability:   Mapped[str]       = mapped_column(String(10), nullable=False)
+    granted_by:   Mapped[str|None]  = mapped_column(String(255), nullable=True)
+    granted_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseTypeVariableModel(Base):
+    """Variable definition scoped to one case type (spec v2)."""
+    __tablename__ = "case_type_variables"
+    __table_args__ = (
+        UniqueConstraint("case_type_id", "full_key"),
+        Index("ix_ctv_case_type", "case_type_id"),
+        Index("ix_ctv_status", "case_type_id", "definition_status"),
+    )
+
+    id:                   Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    case_type_id:         Mapped[uuid.UUID]  = mapped_column(GUID(), ForeignKey("case_types.id", ondelete="CASCADE"), nullable=False)
+    namespace_id:         Mapped[uuid.UUID]  = mapped_column(GUID(), ForeignKey("variable_namespaces.id"), nullable=False)
+    name:                 Mapped[str]        = mapped_column(String(100), nullable=False)
+    full_key:             Mapped[str]        = mapped_column(String(201), nullable=False)
+    var_type:             Mapped[str]        = mapped_column(String(20), default="any", nullable=False)
+    definition_status:    Mapped[str]        = mapped_column(String(12), default="defined", nullable=False)
+    sensitivity_override: Mapped[str|None]   = mapped_column(String(10), nullable=True)
+    label:                Mapped[str|None]   = mapped_column(String(255), nullable=True)
+    description:          Mapped[str|None]   = mapped_column(Text, nullable=True)
+    default_value:        Mapped[str|None]   = mapped_column(Text, nullable=True)
+    required:             Mapped[bool]       = mapped_column(Boolean, default=False)
+    indexed:              Mapped[bool]       = mapped_column(Boolean, default=False)  # UI filter flag ONLY — never DDL
+    promoted_source:      Mapped[str|None]   = mapped_column(String(255), nullable=True)  # blob key this was promoted from (088)
+    created_at:           Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseInstanceVariableModel(Base):
+    """One value per (case, full_key) — upserted; history lives in lineage events."""
+    __tablename__ = "case_instance_variables"
+    __table_args__ = (
+        UniqueConstraint("case_id", "full_key"),
+        Index("ix_civ_key_num", "full_key", "value_num"),
+        Index("ix_civ_key_text", "full_key", "value_text"),
+    )
+
+    id:         Mapped[uuid.UUID]   = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    case_id:    Mapped[uuid.UUID]   = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), nullable=False)
+    full_key:   Mapped[str]         = mapped_column(String(201), nullable=False)
+    value_text: Mapped[str|None]    = mapped_column(Text, nullable=True)
+    value_num:  Mapped[float|None]  = mapped_column(Float, nullable=True)
+    value_bool: Mapped[bool|None]   = mapped_column(Boolean, nullable=True)
+    value_json: Mapped[dict|list|None] = mapped_column(PortableJSON(), nullable=True)
+    written_by: Mapped[str]         = mapped_column(String(255), nullable=False)
+    written_at: Mapped[datetime]    = mapped_column(DateTime(timezone=True), default=_utcnow)
+# <<< Case Variables Phase 1
+
+
+class WebAuthnChallengeModel(Base):
+    """Short-lived server-side WebAuthn challenges (5-minute expiry).
+
+    DB-backed (not in-memory) so verification works across worker processes;
+    rows are deleted on use and swept on expiry.
+    """
+    __tablename__ = "webauthn_challenges"
+    __table_args__ = (
+        Index("ix_webauthn_chal_expires", "expires_at"),
+    )
+
+    id:         Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    user_id:    Mapped[str|None]   = mapped_column(String(255), nullable=True)
+    challenge:  Mapped[bytes]      = mapped_column(LargeBinary, nullable=False)
+    purpose:    Mapped[str]        = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), nullable=False)
+# <<< Group J
+
+
 class DmlBeforeImageModel(Base):
     """Before-image snapshots for HxDBManager DML rollback."""
     __tablename__ = "dml_before_image"
@@ -3758,3 +4039,105 @@ class PortalCustomerCaseLinkModel(Base):
     customer_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("portal_customers.id", ondelete="CASCADE"), primary_key=True)
     case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id",   ondelete="CASCADE"), primary_key=True)
     linked_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HxGuardTupleModel(Base):
+    """HxGuard Phase B relationship tuple (Zanzibar shape, migration 089).
+
+    Written in the SAME transaction as the source mutation (assignment
+    lifecycle, case shares) — authz state cannot diverge from case state.
+    """
+    __tablename__ = "hxguard_tuples"
+    __table_args__ = (
+        UniqueConstraint("object_type", "object_id", "relation",
+                         "subject_type", "subject_id", name="uq_hxguard_tuple"),
+        Index("ix_hxg_tuples_object", "object_type", "object_id"),
+        Index("ix_hxg_tuples_subject", "subject_type", "subject_id"),
+    )
+
+    id:           Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    object_type:  Mapped[str]       = mapped_column(String(30), nullable=False)
+    object_id:    Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    relation:     Mapped[str]       = mapped_column(String(30), nullable=False)
+    subject_type: Mapped[str]       = mapped_column(String(30), nullable=False)
+    subject_id:   Mapped[str]       = mapped_column(String(255), nullable=False)
+    created_by:   Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class OutboxEventModel(Base):
+    """Transactional outbox for reliable webhook delivery (C1 / migration 083).
+
+    Written in the same DB transaction as the triggering case mutation.
+    OutboxRelay reads pending rows, delivers HTTP calls, marks delivered_at.
+    Crash-safe: claimed_at is reset after 5 min so stuck rows are re-tried.
+    """
+    __tablename__ = "outbox"
+    __table_args__ = (
+        Index("ix_outbox_pending", "created_at",
+              postgresql_where="delivered_at IS NULL"),
+    )
+
+    id:              Mapped[uuid.UUID]       = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    event_type:      Mapped[str]             = mapped_column(Text, nullable=False)
+    payload:         Mapped[dict]            = mapped_column(PortableJSON(), nullable=False, default=dict)
+    case_type_id:    Mapped[uuid.UUID | None]= mapped_column(GUID(), ForeignKey("case_types.id", ondelete="SET NULL"), nullable=True)
+    created_at:      Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow)
+    claimed_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts:        Mapped[int]             = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# >>> PUO Phase 3 — platform update rollout plans (migration 084)
+# Sibling of HxDeploy's DeploymentRunModel: these orchestrate PLATFORM CODE
+# updates across registered environments; deployment_runs promote Studio
+# artifacts. Deliberately separate entities.
+
+class PlatformUpdatePlanModel(Base):
+    """One fleet rollout of a platform version across registered environments."""
+    __tablename__ = "platform_update_plans"
+    __table_args__ = (Index("ix_puo_plans_state", "state"),)
+
+    id:               Mapped[uuid.UUID]       = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    resolved_version: Mapped[str]             = mapped_column(Text, nullable=False)
+    channel:          Mapped[str]             = mapped_column(Text, nullable=False, default="stable")
+    soak_hours:       Mapped[int]             = mapped_column(Integer, nullable=False, default=48)
+    state:            Mapped[str]             = mapped_column(Text, nullable=False, default="draft")
+    halted_reason:    Mapped[str | None]      = mapped_column(Text, nullable=True)
+    approved_by:      Mapped[str | None]      = mapped_column(Text, nullable=True)
+    approved_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prod_approved_by: Mapped[str | None]      = mapped_column(Text, nullable=True)
+    prod_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    soak_started_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at:       Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:       Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class PlatformUpdateRunModel(Base):
+    """One environment's update inside a rollout plan (a ring)."""
+    __tablename__ = "platform_update_runs"
+    __table_args__ = (Index("ix_puo_runs_plan", "plan_id"),)
+
+    id:             Mapped[uuid.UUID]       = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    plan_id:        Mapped[uuid.UUID]       = mapped_column(GUID(), ForeignKey("platform_update_plans.id", ondelete="CASCADE"), nullable=False)
+    environment_id: Mapped[uuid.UUID]       = mapped_column(GUID(), ForeignKey("environment_registry.id", ondelete="CASCADE"), nullable=False)
+    ring_order:     Mapped[int]             = mapped_column(Integer, nullable=False, default=0)
+    is_final_ring:  Mapped[bool]            = mapped_column(Boolean, nullable=False, default=False)
+    state:          Mapped[str]             = mapped_column(Text, nullable=False, default="pending")
+    detail:         Mapped[str | None]      = mapped_column(Text, nullable=True)
+    triggered_at:   Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at:     Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PlatformUpdateSettingsModel(Base):
+    """Single-row PUO settings (mode, default soak, calendar)."""
+    __tablename__ = "platform_update_settings"
+
+    id:                 Mapped[int]             = mapped_column(Integer, primary_key=True, default=1)
+    mode:               Mapped[str]             = mapped_column(Text, nullable=False, default="auto-soak")
+    default_soak_hours: Mapped[int]             = mapped_column(Integer, nullable=False, default=48)
+    calendar_id:        Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    updated_at:         Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+# <<< PUO Phase 3

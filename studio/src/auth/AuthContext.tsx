@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { hxStream } from "@shared/realtime/hxstream-singleton";
+import { getAccessToken, getRefreshToken, setTokens, clearTokens, attemptRefresh, getDeviceId, setDeviceId } from "./tokenManager";
 
 /* ═══════════════════════════════════════════════════════════════════
    Auth Context — manages authentication state across the app
@@ -40,17 +41,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Restore session from localStorage on reload
+  // Restore session from localStorage on reload.
+  // If the access token is expired, attempt a silent refresh before giving up.
   useEffect(() => {
-    const saved = localStorage.getItem("helix_token");
-    if (saved) {
-      fetchMe(saved)
-        .then(u => { setToken(saved); setUser(u); hxStream.init(u.user_id); })
-        .catch(() => { localStorage.removeItem("helix_token"); })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    const saved = getAccessToken();
+    if (!saved) { setLoading(false); return; }
+
+    (async () => {
+      try {
+        const u = await fetchMe(saved);
+        setToken(saved); setUser(u); hxStream.init(u.user_id);
+      } catch {
+        const newToken = await attemptRefresh();
+        if (newToken) {
+          try {
+            const u = await fetchMe(newToken);
+            setToken(newToken); setUser(u); hxStream.init(u.user_id);
+            return;
+          } catch { /* fall through to clearTokens */ }
+        }
+        clearTokens();
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
   // Listen for the global 401 event dispatched by the fetch interceptor.
@@ -59,11 +73,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // while the user is mid-login on the login page.
   useEffect(() => {
     const handle = () => {
-      if (!localStorage.getItem("helix_token")) return; // no session → ignore
+      if (!getAccessToken()) return; // no session → ignore
       hxStream.destroy();
       setUser(null);
       setToken(null);
-      localStorage.removeItem("helix_token");
+      clearTokens();
       setError("Your session has expired. Please log in again.");
     };
     window.addEventListener("velaris:unauthorized", handle);
@@ -79,13 +93,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const login = useCallback(async (username: string, password?: string) => {
-    setError(null);   // always wipe any stale "session expired" message
+    setError(null);
     setLoading(true);
     try {
       const resp = await fetch("/api/v1/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password: password || "" }),
+        body: JSON.stringify({ username, password: password || "", device_id: getDeviceId() }),
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: "Login failed" }));
@@ -94,8 +108,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await resp.json();
       setToken(data.access_token);
       setUser(data.user);
-      localStorage.setItem("helix_token", data.access_token);
-      hxStream.init(data.user.user_id);
+      // Only persist tokens when login is complete; MFA challenge returns access_token=""
+      if (!data.mfa_required && data.access_token) {
+        setTokens(data.access_token, data.refresh_token ?? "");
+        if (data.device_id) setDeviceId(data.device_id);
+      }
+      if (!data.mfa_required) {
+        hxStream.init(data.user.user_id);
+      }
     } catch (e: any) {
       setError(e.message);
       throw e;
@@ -106,9 +126,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => {
     hxStream.destroy();
+    const currentToken  = getAccessToken();
+    const refreshToken  = getRefreshToken();
+    // Fire-and-forget server-side revocation — never block the UI
+    if (refreshToken || currentToken) {
+      fetch("/api/v1/auth/real/logout", {
+        method:  "POST",
+        headers: {
+          "Content-Type":  "application/json",
+          ...(currentToken ? { Authorization: `Bearer ${currentToken}` } : {}),
+        },
+        body: JSON.stringify({ refresh_token: refreshToken ?? "" }),
+      }).catch(() => {});
+    }
     setUser(null);
     setToken(null);
-    localStorage.removeItem("helix_token");
+    clearTokens();
   }, []);
 
   const hasRole = useCallback((role: string) => {

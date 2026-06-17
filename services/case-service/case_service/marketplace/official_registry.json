@@ -1,0 +1,8 @@
+{
+  "schema_version": "1",
+  "description": "AUTHORITATIVE allowlist of Official marketplace package ids. This file ships inside the Velaris image and is the trust anchor for the Official badge: a package renders `official` ONLY IF (its source URL org is in marketplace_official_orgs) AND (its id appears below). Manifests cannot self-tag. Because official module code already ships in-image (release-coupled), adding an app here is a platform-release change — a third-party contributor can never append a line, so they can never earn the Official tag. To publish a new official app: add its package id on its own line in `official_packages`, then drop its package artifacts under `marketplace/official/<app>/`.",
+  "updated_at": "2026-06-16",
+  "official_packages": [
+    "velaris/hxtest"
+  ]
+}

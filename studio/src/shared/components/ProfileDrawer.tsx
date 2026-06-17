@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import QRCode from "qrcode";
 import { useAuth } from "@/auth";
+import { b64uToBuf, bufToB64u } from "@/auth/webauthn";
 import { BRAND } from "@/branding";
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -35,6 +36,24 @@ interface Props {
   open: boolean;
   onClose: () => void;
 }
+
+// Group J: a device session row from GET /auth/real/devices
+interface DeviceRow {
+  id: string;
+  device_name: string;
+  last_ip: string | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+}
+
+// Group J: a passkey row from GET /auth/real/webauthn/credentials
+interface PasskeyRow {
+  id: string;
+  device_name: string;
+  created_at: string | null;
+  last_used_at: string | null;
+}
+
 
 // MFA enrol step: idle → loading → scan → verify → done | error
 type MfaStep = "idle" | "loading" | "scan" | "verify" | "done" | "disabling" | "confirm_disable";
@@ -82,6 +101,16 @@ export default function ProfileDrawer({ open, onClose }: Props) {
   const [pwMsg, setPwMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [pwSaving, setPwSaving] = useState(false);
 
+  // Devices (Group J)
+  const [devices, setDevices] = useState<DeviceRow[]>([]);
+  const [devMsg, setDevMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [devBusy, setDevBusy] = useState<string | null>(null); // device id being revoked
+
+  // Passkeys (Group J)
+  const [passkeys, setPasskeys] = useState<PasskeyRow[]>([]);
+  const [pkMsg, setPkMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pkBusy, setPkBusy] = useState(false);
+
   // MFA
   const [mfaStep, setMfaStep] = useState<MfaStep>("idle");
   const [mfaUri, setMfaUri] = useState("");
@@ -104,14 +133,119 @@ export default function ProfileDrawer({ open, onClose }: Props) {
     } finally { setLoading(false); }
   }, []);
 
+  const loadDevices = useCallback(async () => {
+    try {
+      const r = await fetch("/api/v1/auth/real/devices", { headers: authHdr() });
+      if (r.ok) setDevices(await r.json());
+    } catch { /* devices list is non-critical */ }
+  }, []);
+
+  const loadPasskeys = useCallback(async () => {
+    try {
+      const r = await fetch("/api/v1/auth/real/webauthn/credentials", { headers: authHdr() });
+      if (r.ok) setPasskeys(await r.json());
+    } catch { /* passkey list is non-critical */ }
+  }, []);
+
+  async function addPasskey() {
+    if (!window.PublicKeyCredential) {
+      setPkMsg({ text: "This browser does not support passkeys.", ok: false });
+      return;
+    }
+    setPkBusy(true); setPkMsg(null);
+    try {
+      const optR = await fetch("/api/v1/auth/real/webauthn/register/options", {
+        method: "POST", headers: authHdr(),
+      });
+      const opt = await optR.json();
+      if (!optR.ok) throw new Error(opt.detail ?? "Could not start enrollment");
+
+      // base64url → ArrayBuffer for the browser API
+      const publicKey: PublicKeyCredentialCreationOptions = {
+        ...opt,
+        challenge: b64uToBuf(opt.challenge),
+        user: { ...opt.user, id: b64uToBuf(opt.user.id) },
+        excludeCredentials: (opt.excludeCredentials ?? []).map((c: any) => ({
+          ...c, id: b64uToBuf(c.id),
+        })),
+      };
+      const cred = (await navigator.credentials.create({ publicKey })) as PublicKeyCredential;
+      if (!cred) throw new Error("Passkey creation was cancelled.");
+      const att = cred.response as AuthenticatorAttestationResponse;
+
+      const verR = await fetch("/api/v1/auth/real/webauthn/register/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHdr() },
+        body: JSON.stringify({
+          device_name: `Passkey · ${new Date().toLocaleDateString()}`,
+          credential: {
+            id: cred.id,
+            rawId: bufToB64u(cred.rawId),
+            type: cred.type,
+            response: {
+              clientDataJSON: bufToB64u(att.clientDataJSON),
+              attestationObject: bufToB64u(att.attestationObject),
+              transports: att.getTransports?.() ?? [],
+            },
+            clientExtensionResults: cred.getClientExtensionResults(),
+            authenticatorAttachment: (cred as any).authenticatorAttachment ?? null,
+          },
+        }),
+      });
+      const ver = await verR.json();
+      if (!verR.ok) throw new Error(ver.detail ?? "Verification failed");
+      setPkMsg({ text: "Passkey added.", ok: true });
+      loadPasskeys();
+    } catch (err: any) {
+      // NotAllowedError = user dismissed the browser prompt — not an error worth alarming over
+      const cancelled = err?.name === "NotAllowedError";
+      setPkMsg({ text: cancelled ? "Passkey prompt was dismissed." : (err.message || "Passkey enrollment failed"), ok: false });
+    } finally { setPkBusy(false); }
+  }
+
+  async function removePasskey(id: string) {
+    setPkMsg(null);
+    try {
+      const r = await fetch(`/api/v1/auth/real/webauthn/credentials/${id}`, {
+        method: "DELETE", headers: authHdr(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail ?? "Remove failed");
+      setPasskeys(prev => prev.filter(p => p.id !== id));
+      setPkMsg({ text: "Passkey removed.", ok: true });
+    } catch (err: any) { setPkMsg({ text: err.message, ok: false }); }
+  }
+
+  async function revokeDevice(id: string) {
+    setDevBusy(id); setDevMsg(null);
+    try {
+      const r = await fetch(`/api/v1/auth/real/devices/${id}`, {
+        method: "DELETE", headers: authHdr(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail ?? "Revoke failed");
+      setDevices(prev => prev.filter(x => x.id !== id));
+      const isThis = id === localStorage.getItem("helix_device_id");
+      setDevMsg({
+        text: isThis
+          ? "This device was signed out — your session will end shortly."
+          : "Device signed out.",
+        ok: true,
+      });
+    } catch (err: any) { setDevMsg({ text: err.message, ok: false }); }
+    finally { setDevBusy(null); }
+  }
+
   useEffect(() => {
     if (open) {
       load();
-      setInfoMsg(null); setPwMsg(null); setMfaMsg(null);
+      loadDevices();
+      loadPasskeys();
+      setInfoMsg(null); setPwMsg(null); setMfaMsg(null); setDevMsg(null); setPkMsg(null);
       setCurPw(""); setNewPw(""); setConfirmPw("");
       setMfaStep("idle"); setMfaToken(""); setShowSecret(false);
     }
-  }, [open, load]);
+  }, [open, load, loadDevices, loadPasskeys]);
 
   // Render QR code to canvas when URI is available and step = "scan"
   useEffect(() => {
@@ -250,14 +384,14 @@ export default function ProfileDrawer({ open, onClose }: Props) {
         borderLeft: "1px solid var(--border)",
         display: "flex", flexDirection: "column",
         boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-        overflowY: "auto",
+        overflow: "hidden",
       }}>
 
         {/* Header */}
         <div style={{
           padding: "20px 24px", borderBottom: "1px solid var(--border)",
           display: "flex", alignItems: "center", gap: 14, flexShrink: 0,
-          background: "var(--bg-surface)", position: "sticky", top: 0, zIndex: 1,
+          background: "var(--bg-card)", zIndex: 1,
         }}>
           <div style={{
             width: 52, height: 52, borderRadius: "50%", flexShrink: 0,
@@ -287,6 +421,9 @@ export default function ProfileDrawer({ open, onClose }: Props) {
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 18, padding: 4, flexShrink: 0 }}>✕</button>
         </div>
+
+        {/* Scrollable body — header above stays fixed */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
 
         {loading && (
           <div style={{ padding: 32, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>Loading profile…</div>
@@ -370,6 +507,36 @@ export default function ProfileDrawer({ open, onClose }: Props) {
                 onCancelDisable={() => { setMfaStep("idle"); setMfaMsg(null); setMfaToken(""); }}
               />
 
+              {/* Passkeys (Group J) */}
+              <div style={{ marginTop: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, paddingTop: 16, borderTop: "1px solid var(--border-subtle)" }}>
+                  Passkeys
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+                  Sign in with your fingerprint, face, or security key — phishing-resistant
+                  and no password to steal.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {passkeys.map(p => (
+                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "var(--bg-elevated)", borderRadius: 8 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{p.device_name}</div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                          Added {fmt(p.created_at)}{p.last_used_at ? ` · last used ${fmt(p.last_used_at)}` : " · never used"}
+                        </div>
+                      </div>
+                      <button onClick={() => removePasskey(p.id)} style={{ ...ghostBtn, padding: "6px 12px", fontSize: 12, color: "#dc2626", flexShrink: 0 }}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={addPasskey} disabled={pkBusy} style={{ ...primaryBtn, marginTop: passkeys.length ? 10 : 0 }}>
+                  {pkBusy ? "Waiting for your authenticator…" : "+ Add Passkey"}
+                </button>
+                {pkMsg && <div style={{ marginTop: 10 }}><Msg msg={pkMsg} /></div>}
+              </div>
+
               {/* Password change */}
               {!(profile.is_sso && !profile.password_change_required) && (
                 <div style={{ marginTop: 20 }}>
@@ -405,6 +572,45 @@ export default function ProfileDrawer({ open, onClose }: Props) {
               )}
             </Section>
 
+            {/* ── Active Devices (Group J) ─────────────────────────── */}
+            <Section title="Active Devices">
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+                Browsers and machines currently signed in to your account. Signing
+                a device out revokes its session everywhere.
+              </div>
+              {devices.length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "10px 12px", background: "var(--bg-elevated)", borderRadius: 8 }}>
+                  No device sessions yet — devices appear here after your next login.
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {devices.map(d => {
+                  const isThis = d.id === localStorage.getItem("helix_device_id");
+                  return (
+                    <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "var(--bg-elevated)", borderRadius: 8 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                          {d.device_name}
+                          {isThis && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: "#16a34a", textTransform: "uppercase", letterSpacing: "0.05em" }}>This device</span>}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                          Last active {fmt(d.last_seen_at)}{d.last_ip ? ` · ${d.last_ip}` : ""}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => revokeDevice(d.id)}
+                        disabled={devBusy === d.id}
+                        style={{ ...ghostBtn, padding: "6px 12px", fontSize: 12, color: "#dc2626", flexShrink: 0 }}
+                      >
+                        {devBusy === d.id ? "Signing out…" : "Sign out"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {devMsg && <div style={{ marginTop: 10 }}><Msg msg={devMsg} /></div>}
+            </Section>
+
             {/* ── Account Details ──────────────────────────────────── */}
             <Section title="Account">
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -427,6 +633,7 @@ export default function ProfileDrawer({ open, onClose }: Props) {
 
           </div>
         )}
+        </div>{/* /Scrollable body */}
       </div>
     </>
   );

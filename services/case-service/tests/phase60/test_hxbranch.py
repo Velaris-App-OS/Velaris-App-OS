@@ -30,25 +30,31 @@ from case_service.middleware.rate_limit import RateLimitMiddleware
 
 # ── Auth + DB setup ──────────────────────────────────────────────────────────
 
-_AUTH_SECRET = "helix-dev-secret-change-in-production"
+# Sign tokens with the SAME settings the app decodes with, so they validate
+# whether the env configures RS256 (RSA keys) or HS256 (shared secret).
+from case_service.config import get_settings as _get_settings
 
 def _admin_token() -> str:
+    s = _get_settings()
     return create_dev_token(
         user_id="test-admin",
         username="testadmin",
         roles=["admin"],
-        secret=_AUTH_SECRET,
+        secret=s.auth_secret,
+        private_key=s.auth_rsa_private_key or "",
     )
 
 def _auth() -> dict:
     return {"Authorization": f"Bearer {_admin_token()}"}
 
 def _user_token(user_id: str, username: str, roles: list[str] | None = None) -> str:
+    s = _get_settings()
     return create_dev_token(
         user_id=user_id,
         username=username,
         roles=roles or ["designer"],
-        secret=_AUTH_SECRET,
+        secret=s.auth_secret,
+        private_key=s.auth_rsa_private_key or "",
     )
 
 def _user_auth(user_id: str, username: str, roles: list[str] | None = None) -> dict:
@@ -73,16 +79,24 @@ async def _override_session():
             raise
 
 
-app.dependency_overrides[get_session] = _override_session
-
-
 @pytest_asyncio.fixture(autouse=True)
 async def _db():
+    # Scope this module's private-engine override to its own tests and restore
+    # the previous one afterwards. Setting it at module level would clobber the
+    # shared conftest override for every file collected after this one (all
+    # modules are imported before any test runs), routing their get_session at
+    # this module's engine whose tables get dropped here → "no such table".
+    _prev = app.dependency_overrides.get(get_session)
+    app.dependency_overrides[get_session] = _override_session
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+    if _prev is not None:
+        app.dependency_overrides[get_session] = _prev
+    else:
+        app.dependency_overrides.pop(get_session, None)
 
 
 @pytest_asyncio.fixture

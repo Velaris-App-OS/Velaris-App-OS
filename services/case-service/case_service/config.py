@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -25,8 +25,21 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://helix:helix_dev_password@localhost:5432/helix"
     )
     db_echo: bool = False
-    db_pool_size: int = 10
+    db_pool_size: int = 10           # operations pool (case CRUD, forms, etc.)
     db_max_overflow: int = 5
+    db_auth_pool_size: int = 3       # dedicated auth pool — never starved by analytics
+    db_analytics_pool_size: int = 3  # analytics / compliance / sync pool
+    # Optional READ-ONLY replica (hot standby) for heavy analytics queries.
+    # Empty = those queries share the analytics pool on the primary. Served
+    # via get_replica_session only — the analytics pool itself stays on the
+    # primary because compliance seals, hxsync, PUO, and saved-report CRUD
+    # write through it and would fail on a standby.
+    db_analytics_url: str = ""
+
+    # D2: request body size limits (three tiers)
+    max_body_bytes: int = 10 * 1024 * 1024             # JSON payloads
+    max_upload_bytes: int = 25 * 1024 * 1024           # multipart uploads (docs, portal, etc.)
+    max_migrate_upload_bytes: int = 200 * 1024 * 1024  # hxmigrate BPM exports only
 
     # Temporal
     temporal_host: str = "localhost:7233"
@@ -47,7 +60,8 @@ class Settings(BaseSettings):
     auth_secret: str = "helix-dev-secret-change-in-production"
     auth_issuer: str = "helix"
     auth_audience: str = "helix-api"
-    token_expiry_days: int = 60       # default; overridden by helix_settings DB table
+    token_expiry_days: int = 60             # refresh token lifetime; overridden by helix_settings DB table
+    access_token_expiry_minutes: int = 15   # short-lived access token (override via HELIX_CASE_ACCESS_TOKEN_EXPIRY_MINUTES)
     oidc_discovery_url: str = ""
     oidc_client_id: str = "helix-studio"
 
@@ -58,6 +72,18 @@ class Settings(BaseSettings):
     # Newlines in env vars must be encoded as literal \n  (most .env loaders handle this).
     auth_rsa_private_key: str = ""  # PEM-encoded RSA-2048 private key (signing only)
     auth_rsa_public_key: str = ""   # PEM-encoded RSA-2048 public key  (verification only)
+
+    # HxVault (#19) — master Key-Encryption-Key that wraps per-tenant DEKs.
+    # 32 bytes, hex (64 chars) or base64. MUST be set via VELARIS_CASE_KEK in
+    # production (rendered from OpenBao). New env vars use the VELARIS_CASE_ prefix
+    # (field-level alias; the class default prefix is still HELIX_CASE_ for legacy
+    # vars). When empty, a dev KEK is derived from auth_secret (round-trips fine;
+    # crypto-shred still works since DEKs are random+stored) + startup warning.
+    kek: str = Field(default="", validation_alias="VELARIS_CASE_KEK")
+    # HxVault multi-worker coherence: how often each worker reconciles its in-process
+    # DEK cache with the DB (picks up DEKs created on other workers, evicts shredded
+    # ones). Lower = faster cross-worker propagation, more DB reads. 0 disables.
+    vault_cache_resync_seconds: int = Field(default=30, validation_alias="VELARIS_CASE_VAULT_RESYNC_SECONDS")
 
     # >>> P24 document storage
     storage_backend: str = "local"  # "local" | "minio"
@@ -77,6 +103,13 @@ class Settings(BaseSettings):
     storage_master_key: str = ""
     # <<< P24 document storage
 
+    # >>> HxGuard Phase B (env: HELIX_CASE_HXGUARD_CASE_ENFORCEMENT)
+    # off    = case-level ReBAC checks skipped entirely
+    # shadow = evaluated + would-be denials audited, requests pass (default)
+    # enforce = denials return 403
+    hxguard_case_enforcement: str = "shadow"
+    # <<< HxGuard Phase B
+
     # >>> P32 scaling
     redis_enabled: bool = False
     redis_url: str = "redis://localhost:6379/0"
@@ -95,6 +128,21 @@ class Settings(BaseSettings):
     #
     # LEGACY (still supported) — existing vars keep working as before.
     #
+    # Group E: AI egress policy — local_only | minimized | full
+    #   local_only — external AI providers refused; local Ollama used instead
+    #   minimized  — external completions allowed, embeddings always stay local
+    #   full       — external provider used as-is (explicit opt-in)
+    ai_egress_policy: str = "minimized"
+
+    # Group H: chunk minimization when completions go to an external provider
+    ai_egress_top_k: int = 3                    # retrieved chunks sent externally (local uses 5)
+    ai_egress_min_score: float = 0.25           # relevance floor for external context
+    ai_egress_max_context_chars: int = 6000     # total context cap per external call
+
+    # §5.3 LLM hardening: model-DoS guard — max chars (prompt + system) per LLM
+    # call, enforced at the universal choke point. ~50k tokens. Configurable.
+    ai_max_prompt_chars: int = 200_000
+
     ai_provider: str = ""                   # universal provider name (overrides ai_backend when set)
     ai_api_key: str = ""                    # universal API key
     ai_model: str = ""                      # universal model name
@@ -128,14 +176,25 @@ class Settings(BaseSettings):
     # Max concurrent sandbox workspaces per developer (raise based on available RAM/CPU).
     marketplace_max_workspaces_per_user: int = 2
     # URL of the official Velaris index file (sources.json) — override to self-host.
+    # Lives in the official/ folder of the Velaris-App-OS/Marketplace repo (write-
+    # protected; only the Velaris org can publish there).
     marketplace_index_url: str = (
-        "https://raw.githubusercontent.com/velaris-marketplace/index/main/sources.json"
+        "https://raw.githubusercontent.com/Velaris-App-OS/Marketplace/main/official/sources.json"
+    )
+    # URL of the community index (community/ folder — fork + PR; anyone contributes).
+    # Seeded as a Community-tier source. Empty string disables community seeding.
+    marketplace_community_index_url: str = (
+        "https://raw.githubusercontent.com/Velaris-App-OS/Marketplace/main/community/sources.json"
     )
     # GitHub org (or orgs) whose source URLs are treated as Official tier.
     # Comma-separated. Any source URL not matching these is always Community.
     # GitHub org names (comma-separated) whose source URLs are Official.
     # Just the org name — works for both github.com and raw.githubusercontent.com URLs.
-    marketplace_official_orgs: str = "velaris-marketplace"
+    # NOTE: org membership is necessary but NOT sufficient — a package is Official
+    # only if it is ALSO listed in case_service/marketplace/official_registry.json.
+    # (Official and Community share this org, split by folder, so the registry is
+    # the real disambiguator.)
+    marketplace_official_orgs: str = "velaris-app-os"
     # Optional Velaris security report webhook — opt-in only, no customer data sent.
     marketplace_report_webhook: str = ""
     marketplace_report_webhook_secret: str = ""
@@ -156,6 +215,26 @@ class Settings(BaseSettings):
     # HxDBManager Security is now version-gated via the Release Scheduler.
     # Use is_feature_enabled("hxdbmanager_security", "v1.0.0") in code.
     # <<< HxDBManager Security
+
+    # >>> Group I: thin webhook events + external audit anchoring
+    # Webhook payloads carry IDs + status only; consumers fetch fresh case
+    # variables via the API (which enforces auth). True embeds full variables
+    # in outbox rows — legacy consumers only.
+    webhook_full_payloads: bool = False
+    # RFC-3161 anchoring: a TSA signs the audit-chain tip daily, making the
+    # chain externally provable, not just internally tamper-evident.
+    audit_anchor_enabled: bool = True
+    audit_tsa_url: str = "https://freetsa.org/tsr"
+    audit_anchor_interval_hours: int = 24
+    # <<< Group I
+
+    # >>> Group J: WebAuthn / passkeys
+    # rp_id must be the registrable domain the app is served from; origin must
+    # match the browser's origin exactly or every ceremony fails verification.
+    webauthn_rp_id: str = "localhost"
+    webauthn_rp_name: str = "Velaris"
+    webauthn_origin: str = "http://localhost:5173"
+    # <<< Group J
 
     @model_validator(mode="after")
     def _fix_rsa_newlines(self) -> "Settings":

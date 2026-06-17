@@ -5,6 +5,7 @@
  * "Analyse →" to get HxNexus root-cause analysis on any error or traceback.
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API  = "/api/v1/hxlogs";
 const AUTH = () => ({ Authorization: `Bearer ${localStorage.getItem("helix_token") ?? ""}` });
@@ -133,6 +134,8 @@ export default function HxLogs() {
 
   return (
     <div style={{ display: "flex", height: "100%", fontFamily: "var(--font-mono, monospace)", fontSize: 12, background: "var(--bg-main)", color: "var(--text-primary)" }}>
+      <AiUnavailableBanner featureName="AI root-cause analysis" />
+
 
       {/* ── Left: log feed ── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>

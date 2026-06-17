@@ -18,8 +18,10 @@ const _EXCLUDED_401 = [
   "/auth/real/sso",       // SSO provider discovery — called from login page
   "/auth/real/forgot-password",
   "/auth/real/reset-password",
+  "/auth/real/webauthn/", // Group J: passkey ceremonies 401 on failed assertions, not expired sessions
   "/auth/me",             // session-restore probe on page load
   "/portal/",            // portal endpoints — public, may return 401
+  "/platform/update/",   // PUO step-up: a wrong password/passkey is 401 but the session is fine
 ];
 const _origFetch = window.fetch.bind(window);
 window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
@@ -83,6 +85,7 @@ import HxFusion from "@modules/hxfusion/HxFusion";
 import Marketplace from "@modules/marketplace/Marketplace";
 import HxConnect from "@modules/hxconnect/HxConnect";
 import DevConn from "@modules/devconn/DevConn";
+import HxTest from "@modules/hxtest/HxTest";
 import HxMigrate from "@modules/hxmigrate/HxMigrate";
 import HxDeploy from "@modules/hxdeploy/HxDeploy";
 import HxWork from "@modules/hxwork/HxWork";
@@ -143,6 +146,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="/hxconnect" element={<PermRoute path="/hxconnect" pageName="HxConnect">      <HxConnect /> </PermRoute>} />
           <Route path="/hxbridge"  element={<PermRoute path="/hxbridge"  pageName="HxBridge">       <HxBridge />  </PermRoute>} />
           <Route path="/devconn"   element={<PermRoute path="/devconn"   pageName="Dev Connectors">  <DevConn />   </PermRoute>} />
+          <Route path="/testsuite" element={<PermRoute path="/testsuite" pageName="Test Suite">       <HxTest />   </PermRoute>} />
           <Route path="/hxsync"    element={<PermRoute path="/hxsync"    pageName="HxSync">          <HxSync />    </PermRoute>} />
           <Route path="/hxfusion"  element={<PermRoute path="/hxfusion"  pageName="HxFusion">        <HxFusion />  </PermRoute>} />
 

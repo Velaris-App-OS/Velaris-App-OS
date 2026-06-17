@@ -10,6 +10,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { CommitHistory } from "@shared/components";
 import { useAuth } from "@/auth";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/hxwork";
 const AUTH = () => ({ Authorization: `Bearer ${localStorage.getItem("helix_token") ?? ""}` });
@@ -161,6 +162,8 @@ function ArtifactPicker({ artifactType, setArtifactType, artifactId, setArtifact
 
   return (
     <div style={compact ? {} : { padding: "var(--space-md)", background: "var(--bg-elevated)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+      <AiUnavailableBanner featureName="AI board analysis" />
+
       {!compact && (
         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "var(--space-sm)" }}>
           🔗 Artifact Link <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>(optional)</span>

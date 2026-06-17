@@ -104,9 +104,14 @@ async def get_board_cards(
     for col in board.column_config:
         columns[col["stage_id"]] = []
 
+    # case_vars façade read (blob fallback included) — one bulk call, no N+1
+    from case_service.case_vars import service as case_vars
+    vars_ctx = case_vars.CallerContext(kind="platform", actor_id="hxwork")
+    vars_by_case = await case_vars.get_all_bulk(session, vars_ctx, [c.id for c in cases])
+
     backlog: list[dict] = []
     for case in cases:
-        card = _case_to_card(case, points_map)
+        card = _case_to_card(case, points_map, vars_by_case.get(case.id, {}))
         stage = case.current_stage_id
         if stage and stage in columns:
             columns[stage].append(card)
@@ -118,8 +123,8 @@ async def get_board_cards(
     return columns
 
 
-def _case_to_card(case: CaseInstanceModel, points_map: dict = {}) -> dict:
-    data = case.data or {}
+def _case_to_card(case: CaseInstanceModel, points_map: dict = {}, data: dict | None = None) -> dict:
+    data = data if data is not None else {}
     title = (data.get("title") or data.get("subject") or data.get("name")
              or (f"#{case.case_number}" if case.case_number else f"Case {str(case.id)[:8]}"))
     return {

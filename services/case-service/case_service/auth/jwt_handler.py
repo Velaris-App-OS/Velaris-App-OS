@@ -98,27 +98,32 @@ def create_dev_token(
     roles: list[str] | None = None,
     secret: str = "",
     expire_days: int = 60,
+    expire_minutes: int = 0,
     private_key: str = "",
+    jti: str = "",
 ) -> str:
     """Create a signed JWT token.
 
     Args:
-        private_key: PEM-encoded RSA private key.  When provided the token is
-                     signed with RS256.  When absent, HS256 is used (dev only).
-        roles:       Explicit role list.  Defaults to [] (no roles) — NOT admin.
-                     Callers must pass roles explicitly; there is no fallback.
+        private_key:     PEM-encoded RSA private key. When provided, RS256 is used.
+                         When absent, HS256 is used (dev only).
+        roles:           Explicit role list. Defaults to [] (fail closed, never admin).
+        expire_minutes:  When non-zero, overrides expire_days for short-lived tokens.
+        jti:             JWT ID for revocation tracking. Auto-generated if not provided.
     """
     jwt = _get_jwt()
     if jwt is None:
         raise RuntimeError("PyJWT not installed")
 
     import os
+    from uuid import uuid4
     email_domain = os.getenv("HELIX_AUTH_EMAIL_DOMAIN", "local")
     now = int(time.time())
 
     # SECURITY FIX: roles default is [] (fail closed), never ["admin"].
-    # A token with no roles grants no access.  Callers must pass roles explicitly.
     effective_roles: list[str] = roles if roles is not None else []
+
+    exp = now + (expire_minutes * 60 if expire_minutes else expire_days * 86400)
 
     payload = {
         "sub": user_id,
@@ -126,9 +131,10 @@ def create_dev_token(
         "email": f"{username}@{email_domain}",
         "realm_access": {"roles": effective_roles},
         "iat": now,
-        "exp": now + expire_days * 86400,
+        "exp": exp,
         "iss": "helix",
         "aud": "helix-api",
+        "jti": jti or str(uuid4()),
     }
 
     if private_key:

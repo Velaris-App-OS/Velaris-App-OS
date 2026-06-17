@@ -19,7 +19,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-REGISTER_URL = os.environ.get("VELARIS_REGISTER_URL", "https://register.velaris.io")
+REGISTER_URL = os.environ.get("VELARIS_REGISTER_URL", "https://velaris-app-os.duckdns.org")
 HELIX_DIR    = Path(__file__).parent.parent
 KEY_CACHE    = HELIX_DIR / ".velaris-key"
 GRACE_DAYS   = int(os.environ.get("KEY_GRACE_DAYS", "7"))
@@ -65,7 +65,7 @@ def call_verify(key_id: str, mac: str) -> dict | None:
     """Call the registration server. Returns response dict or None if unreachable."""
     try:
         import urllib.request, urllib.error
-        url = f"{REGISTER_URL}/verify/{key_id}?mac={mac}&version=1.0.0"
+        url = f"{REGISTER_URL}/api/verify?key_id={key_id}&mac={mac}&version=1.0.0"
         req = urllib.request.Request(url, headers={"User-Agent": "velaris-startup/1.0"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             return json.loads(resp.read())
@@ -98,7 +98,25 @@ def main() -> int:
         print(red("     Contact support: velaris.app.os@gmail.com"))
         return 1
 
-    # ── 4. Call registration server ───────────────────────────────────
+    # ── 4. Determine if a server check is due (every 7 days) ──────────
+    CHECK_INTERVAL = 7
+    last_verified_str = cache.get("last_verified")
+    grace = int(cache.get("grace_days", GRACE_DAYS))
+
+    if last_verified_str:
+        last_verified = datetime.fromisoformat(last_verified_str)
+        if last_verified.tzinfo is None:
+            last_verified = last_verified.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - last_verified).days
+    else:
+        age_days = 999  # force a check if never verified
+
+    if last_verified_str and age_days < CHECK_INTERVAL:
+        next_check = CHECK_INTERVAL - age_days
+        print(green(f"  ✓  Key {key_id} valid (next check in {next_check} day(s))."))
+        return 0
+
+    # ── 5. Call registration server ───────────────────────────────────
     mac    = get_mac()
     result = call_verify(key_id, mac)
 
@@ -106,7 +124,6 @@ def main() -> int:
         status = result.get("status", "")
 
         if status == "revoked":
-            # Write revoked status to local cache — permanently blocks offline too
             cache["status"] = "revoked"
             write_cache(cache)
             print(red(f"  ✗  Key {key_id} has been revoked."))
@@ -116,8 +133,8 @@ def main() -> int:
         if status == "mac_mismatch":
             cache["status"] = "revoked"
             write_cache(cache)
-            print(red("  ✗  Key is registered to a different machine."))
-            print(red("     Contact support to transfer your key."))
+            print(red("  ✗  Key is registered to a different machine (MAC address changed)."))
+            print(red("     Contact support: velaris.app.os@gmail.com"))
             return 1
 
         if status == "not_found":
@@ -126,7 +143,6 @@ def main() -> int:
             return 1
 
         if status == "active":
-            # Update cache timestamp
             cache["status"]        = "active"
             cache["last_verified"] = datetime.now(timezone.utc).isoformat()
             cache["mac"]           = mac
@@ -134,33 +150,23 @@ def main() -> int:
             print(green(f"  ✓  Key {key_id} verified (active)."))
             return 0
 
-        # Unknown status — treat as error, apply grace period
         print(yellow(f"  ⚠  Unexpected status from server: {status}. Applying grace period."))
 
-    # ── 5. Server unreachable — grace period logic ────────────────────
-    last_verified_str = cache.get("last_verified")
-    grace = int(cache.get("grace_days", GRACE_DAYS))
-
+    # ── 6. Server unreachable — grace period logic ────────────────────
     if not last_verified_str:
-        # Never successfully verified online — hard block on first run
         print(red("  ✗  Could not reach registration server and key has never been verified online."))
         print(red(f"     Ensure {REGISTER_URL} is reachable and re-run."))
         return 1
 
-    last_verified = datetime.fromisoformat(last_verified_str)
-    if last_verified.tzinfo is None:
-        last_verified = last_verified.replace(tzinfo=timezone.utc)
-
-    age_days = (datetime.now(timezone.utc) - last_verified).days
-
-    if age_days <= grace:
-        remaining = grace - age_days
+    days_overdue = age_days - CHECK_INTERVAL
+    if days_overdue <= grace:
+        remaining = grace - days_overdue
         print(yellow(f"  ⚠  Registration server unreachable. Grace period: {remaining} day(s) remaining."))
         print(yellow(f"     Last verified: {last_verified.strftime('%Y-%m-%d %H:%M UTC')}"))
         return 0
     else:
-        print(red(f"  ✗  Registration server unreachable and grace period expired ({age_days} days since last check)."))
-        print(red(f"     Ensure {REGISTER_URL} is reachable, then restart."))
+        print(red(f"  ✗  Registration server unreachable and grace period expired ({age_days} day(s) since last check)."))
+        print(red("     Contact support: velaris.app.os@gmail.com"))
         return 1
 
 

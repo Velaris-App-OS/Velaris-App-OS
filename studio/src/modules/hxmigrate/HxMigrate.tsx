@@ -4,6 +4,7 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@shared/components";
+import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
 
 const API = "/api/v1/hxmigrate";
 function _authHdr(): Record<string, string> {
@@ -46,6 +47,8 @@ function StageBar({ stages, currentStage }: { stages: any[]; currentStage: numbe
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 0, margin: "20px 0" }}>
+      <AiUnavailableBanner featureName="AI migration analysis" />
+
       {[1, 2, 3, 4, 5].map((n, i) => {
         const s = stageMap[n];
         const status = s?.status ?? "pending";

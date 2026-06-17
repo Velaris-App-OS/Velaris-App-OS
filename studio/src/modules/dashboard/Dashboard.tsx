@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useApi } from "@shared/hooks";
 import { getAnalyticsDashboard } from "@shared/api/client";
 import { Card, Button, Spinner, Stat } from "@shared/components";
+import { PlatformUpdateBanner } from "@shared/components/PlatformUpdateBanner";
 import type { AnalyticsDashboard } from "@shared/api/client";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -178,6 +179,7 @@ export default function Dashboard() {
 
   return (
     <div style={{ padding: "var(--space-xl) var(--space-2xl)", width: "100%", overflow: "auto", height: "100%", boxSizing: "border-box" }}>
+      <PlatformUpdateBanner />
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-xl)" }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

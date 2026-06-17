@@ -59,6 +59,7 @@ from case_service.db.models import (
 logger = logging.getLogger(__name__)
 
 BUNDLE_SCHEMA_VERSION = "2"   # bumped from v1 to reflect full scope
+SUPPORTED_BUNDLE_SCHEMA_VERSIONS = {"1", "2"}   # what apply_bundle can interpret (#14)
 
 _NEEDS_CREDS = "__NEEDS_CONFIGURATION__"
 
@@ -446,6 +447,18 @@ async def apply_bundle(
 
     Returns: {"imported": N, "skipped": M, "errors": [...], "needs_configuration": [...]}
     """
+    # Schema-skew guard (#14): a bundle built by a newer platform (e.g. a
+    # future ReBAC-era format) must fail loudly at the receiving end, not
+    # import permission objects this version cannot correctly interpret.
+    # Missing field = legacy v1 bundle (grandfathered).
+    declared = str(bundle.get("bundle_schema_version", "1"))
+    if declared not in SUPPORTED_BUNDLE_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"This environment supports bundle_schema_version "
+            f"{sorted(SUPPORTED_BUNDLE_SCHEMA_VERSIONS)}; the bundle declares "
+            f"{declared!r}. Upgrade this environment before promoting to it."
+        )
+
     imported = 0
     skipped  = 0
     errors:  list[str] = []

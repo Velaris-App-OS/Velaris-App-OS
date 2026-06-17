@@ -20,8 +20,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Postgres advisory lock key for seal serialization — b"HELIXCHA" as big-endian int64.
+# Held for the duration of the sealing transaction; auto-released on commit/rollback.
+_SEAL_LOCK_KEY = int.from_bytes(b"HELIXCHA", "big")
 
 from case_service.db.models import AuditChainModel, CaseAuditLogModel
 
@@ -73,7 +77,16 @@ async def _unsealed_audit_rows(
 
 
 async def seal_new_entries(session: AsyncSession, max_rows: int = 10000) -> dict:
-    """Seal up to max_rows new audit entries. Returns count + new tip hash."""
+    """Seal up to max_rows new audit entries. Returns count + new tip hash.
+
+    Acquires a Postgres transaction-level advisory lock before reading the
+    chain tip, so concurrent seal calls queue up rather than racing to insert
+    duplicate sequence numbers.
+    """
+    try:
+        await session.execute(text(f"SELECT pg_advisory_xact_lock({_SEAL_LOCK_KEY})"))
+    except Exception:
+        pass  # Non-Postgres (e.g. SQLite in tests) — unique constraint is the fallback guard
     last = await _last_chain_row(session)
     last_seq = last.sequence if last else 0
     last_hash = last.content_hash if last else GENESIS_HASH

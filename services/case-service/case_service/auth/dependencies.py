@@ -224,15 +224,7 @@ async def _security_check(
     raw_token: str,
     session: AsyncSession,
 ) -> None:
-    """Verify account is active and token has not been revoked.
-
-    No-op when hxdbmanager_security_enabled is False — skips so the
-    revoked_sessions table (migration 079) does not need to exist yet.
-    """
-    from case_service.api.routers.releases import is_feature_enabled
-    if not is_feature_enabled("hxdbmanager_security"):
-        return
-
+    """Verify the token has not been revoked and the account is still active."""
     from case_service.db.models import HelixUserModel
 
     # Refresh revoked-token cache if stale

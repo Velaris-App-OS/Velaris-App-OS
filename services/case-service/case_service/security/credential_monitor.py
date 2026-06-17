@@ -28,12 +28,12 @@ async def credential_expiry_monitor() -> None:
 
 
 async def _check_expiring_credentials() -> None:
-    from case_service.db.session import AsyncSessionLocal
+    from case_service.db.session import get_analytics_session_factory
     from case_service.db.models import ConnectorRegistryModel
 
     cutoff = datetime.now(timezone.utc) + timedelta(days=WARN_DAYS)
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_analytics_session_factory()() as session:
             rows = (await session.execute(
                 select(ConnectorRegistryModel).where(
                     ConnectorRegistryModel.credential_expires_at.isnot(None),

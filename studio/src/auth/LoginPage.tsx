@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { useAuth } from "./AuthContext";
+import { setTokens, getDeviceId, setDeviceId } from "./tokenManager";
+import { passkeysSupported, getAssertion } from "./webauthn";
 import { Button, Spinner } from "@shared/components";
 import { BRAND, THEME_STORAGE_KEY } from "@/branding";
 
@@ -275,12 +277,15 @@ export default function LoginPage() {
     try {
       const r = await fetch("/api/v1/auth/login", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim(), password }),
+        body: JSON.stringify({ username: username.trim(), password, device_id: getDeviceId() }),
       });
       const d = await r.json();
       if (!r.ok) {
         throw new Error(d.detail ?? "Login failed");
       }
+      // Persist the device id now so the context login() below reuses the
+      // same device row instead of creating a second one
+      if (d.device_id) setDeviceId(d.device_id);
       // MFA must be resolved first — token is empty until MFA is verified
       if (d.mfa_required) {
         setStage("mfa");
@@ -330,7 +335,7 @@ export default function LoginPage() {
     try {
       const r = await fetch("/api/v1/auth/login", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password, mfa_token: mfaToken }),
+        body: JSON.stringify({ username, password, mfa_token: mfaToken, device_id: getDeviceId() }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail ?? "Invalid MFA code.");
@@ -341,7 +346,10 @@ export default function LoginPage() {
         setStage("change_required");
         return;
       }
-      localStorage.setItem("helix_token", d.access_token);
+      // Store the full pair (access + refresh) and the device binding —
+      // access-token-only storage left MFA sessions unable to refresh
+      setTokens(d.access_token, d.refresh_token ?? "");
+      if (d.device_id) setDeviceId(d.device_id);
       window.location.reload();
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
     finally { setBusy(false); }
@@ -378,6 +386,40 @@ export default function LoginPage() {
       setPassword("");
     } catch (e: any) { setMsg({ text: e.message, ok: false }); }
     finally { setBusy(false); }
+  };
+
+  // Group J: passkey sign-in. Username is optional — with one we get an
+  // allow-list, without one the browser offers discoverable credentials.
+  const handlePasskey = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const optR = await fetch("/api/v1/auth/real/webauthn/login/options", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim() || null }),
+      });
+      const opt = await optR.json();
+      if (!optR.ok) throw new Error(opt.detail ?? "Could not start passkey sign-in");
+
+      const credential = await getAssertion(opt);
+
+      const verR = await fetch("/api/v1/auth/real/webauthn/login/verify", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential, device_id: getDeviceId() }),
+      });
+      const d = await verR.json();
+      if (!verR.ok) throw new Error(d.detail ?? "Passkey sign-in failed");
+      if (d.user?.password_change_required) {
+        pendingTokenRef.current = d.access_token;
+        setStage("change_required");
+        return;
+      }
+      setTokens(d.access_token, d.refresh_token ?? "");
+      if (d.device_id) setDeviceId(d.device_id);
+      window.location.reload();
+    } catch (e: any) {
+      const cancelled = e?.name === "NotAllowedError";
+      setMsg({ text: cancelled ? "Passkey prompt was dismissed." : (e.message || "Passkey sign-in failed"), ok: false });
+    } finally { setBusy(false); }
   };
 
   const handleSso = async (provider: SsoProvider) => {
@@ -525,9 +567,17 @@ export default function LoginPage() {
         <Msg msg={{ text: msg?.text ?? authError ?? "", ok: msg?.ok ?? false }} />
       )}
 
-      <Button onClick={handleLogin} disabled={busy || !username.trim() || !password.trim()} style={{ width: "100%", justifyContent: "center", marginBottom: "var(--space-lg)" }}>
+      <Button onClick={handleLogin} disabled={busy || !username.trim() || !password.trim()} style={{ width: "100%", justifyContent: "center", marginBottom: 10 }}>
         {busy ? "Signing in…" : "Sign In"}
       </Button>
+
+      {/* Passkey sign-in (Group J) */}
+      {passkeysSupported() && (
+        <button onClick={handlePasskey} disabled={busy}
+          style={{ width: "100%", padding: "10px 16px", marginBottom: "var(--space-lg)", border: "1px solid var(--border-default)", borderRadius: "var(--radius-sm)", background: "var(--bg-elevated)", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "var(--text-primary)" }}>
+          <span style={{ fontSize: 15 }}>🔑</span> Sign in with a passkey
+        </button>
+      )}
 
       {/* Dev mode quick buttons — hidden */}
     </Box>

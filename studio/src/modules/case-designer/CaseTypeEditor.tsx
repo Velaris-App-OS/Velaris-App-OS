@@ -126,6 +126,7 @@ export default function CaseTypeEditor({ caseTypeId, onBack, readOnly = false, o
   const [formEditorOpen, setFormEditorOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
+  const [variablesOpen, setVariablesOpen] = useState(false);
   const [historyTab, setHistoryTab]   = useState<"commits" | "migrations">("commits");
   const [initialized, setInitialized] = useState(false);
   const [restorePrefilledMsg, setRestorePrefilledMsg] = useState<string | undefined>(undefined);
@@ -432,6 +433,9 @@ export default function CaseTypeEditor({ caseTypeId, onBack, readOnly = false, o
             <Button variant="secondary" size="sm" onClick={() => setFormEditorOpen(!formEditorOpen)}>
               {formEditorOpen ? "← Pipeline" : "📋 Forms"}
             </Button>
+            <Button variant="secondary" size="sm" onClick={() => setVariablesOpen(!variablesOpen)}>
+              {variablesOpen ? "← Pipeline" : "🔣 Variables"}
+            </Button>
             <Button variant="secondary" size="sm" onClick={() => setIntakeOpen(!intakeOpen)}>
               {intakeOpen ? "← Close" : "⚡ Intake"}
             </Button>
@@ -499,6 +503,8 @@ export default function CaseTypeEditor({ caseTypeId, onBack, readOnly = false, o
         <div style={{ flex: 1, overflow: "auto", padding: "var(--space-lg) var(--space-xl)" }}>
           {intakeOpen ? (
             <IntakeTriggerPanel caseType={caseType} caseTypeId={caseTypeId} />
+          ) : variablesOpen ? (
+            <VariablesPanel caseTypeId={caseTypeId} readOnly={readOnly} />
           ) : formEditorOpen ? (
             <FormEditorPanel caseTypeId={caseTypeId} />
           ) : (<>
@@ -1075,6 +1081,265 @@ function IntakeTriggerPanel({ caseType, caseTypeId }: { caseType: any; caseTypeI
       <button onClick={save} disabled={saving} style={{ padding: "8px 20px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: saving ? 0.6 : 1 }}>
         {saving ? "Saving…" : "Save Intake Config"}
       </button>
+    </div>
+  );
+}
+
+
+// ── Variables Panel (Case Variables Phase 1 — spec v2) ──────────────────────────
+interface VarNamespace {
+  id: string; name: string; owner_type: string; sensitivity: string;
+  status: string; reserved: boolean;
+}
+interface VarDef {
+  id: string; namespace: string | null; name: string; full_key: string;
+  var_type: string; definition_status: string; sensitivity_override: string | null;
+  label: string | null; required: boolean; indexed: boolean;
+}
+
+const VAR_TYPES = ["str", "int", "float", "bool", "date", "datetime", "list", "dict", "any"];
+
+function vhdr(): Record<string, string> {
+  const t = localStorage.getItem("helix_token");
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+function VariablesPanel({ caseTypeId, readOnly }: { caseTypeId: string; readOnly: boolean }) {
+  const [namespaces, setNamespaces] = useState<VarNamespace[]>([]);
+  const [defs, setDefs] = useState<VarDef[]>([]);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // new-variable form
+  const [nsId, setNsId] = useState("");
+  const [vName, setVName] = useState("");
+  const [vType, setVType] = useState("str");
+  const [vLabel, setVLabel] = useState("");
+  const [vRequired, setVRequired] = useState(false);
+  const [vIndexed, setVIndexed] = useState(false);
+
+  // migration wizard (Phase 4)
+  const [blobKeys, setBlobKeys] = useState<{
+    key: string; count: number; inferred_type: string;
+    valid_name: boolean; pii_hint: boolean; promoted_to: string | null;
+  }[]>([]);
+  const [promoteTarget, setPromoteTarget] = useState<Record<string, string>>({});
+
+  const load = React.useCallback(async () => {
+    try {
+      const [nsR, defR, scanR] = await Promise.all([
+        fetch("/api/v1/variables/namespaces", { headers: vhdr() }),
+        fetch(`/api/v1/variables/case-types/${caseTypeId}`, { headers: vhdr() }),
+        fetch(`/api/v1/variables/case-types/${caseTypeId}/blob-keys`, { headers: vhdr() }),
+      ]);
+      if (nsR.ok) setNamespaces(await nsR.json());
+      if (defR.ok) setDefs(await defR.json());
+      if (scanR.ok) setBlobKeys((await scanR.json()).keys ?? []);
+    } catch { /* non-critical */ }
+  }, [caseTypeId]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  // velaris is virtual — not a definable target
+  const definableNs = namespaces.filter(n => n.name !== "velaris" && n.status === "active");
+
+  async function addVariable() {
+    if (!nsId || !vName.trim()) { setMsg({ text: "Pick a namespace and enter a name.", ok: false }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/v1/variables/case-types/${caseTypeId}`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...vhdr() },
+        body: JSON.stringify({
+          namespace_id: nsId, name: vName.trim().toLowerCase(), var_type: vType,
+          label: vLabel || null, required: vRequired, indexed: vIndexed,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail ?? "Could not add variable");
+      setVName(""); setVLabel(""); setVRequired(false); setVIndexed(false);
+      setMsg({ text: `Added ${d.full_key}`, ok: true });
+      load();
+    } catch (e: any) { setMsg({ text: e.message, ok: false }); }
+    finally { setBusy(false); }
+  }
+
+  async function patchDef(id: string, body: Record<string, unknown>) {
+    const r = await fetch(`/api/v1/variables/case-types/${caseTypeId}/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json", ...vhdr() },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) load();
+    else { const d = await r.json().catch(() => ({})); setMsg({ text: d.detail ?? "Update failed", ok: false }); }
+  }
+
+  async function removeDef(id: string) {
+    const r = await fetch(`/api/v1/variables/case-types/${caseTypeId}/${id}`, { method: "DELETE", headers: vhdr() });
+    if (r.ok) load();
+  }
+
+  async function promoteKey(key: string) {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/v1/variables/case-types/${caseTypeId}/promote`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...vhdr() },
+        body: JSON.stringify({ key, target_namespace: promoteTarget[key] || "legacy" }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail ?? "Promotion failed");
+      setMsg({ text: `Promoted ${key} → ${d.full_key} (${d.promoted} case(s)${d.pii_forced ? ", pii enforced" : ""})`, ok: true });
+      load();
+    } catch (e: any) { setMsg({ text: e.message, ok: false }); }
+    finally { setBusy(false); }
+  }
+
+  const undeclared = defs.filter(d => d.definition_status === "undeclared");
+  const declared = defs.filter(d => d.definition_status !== "undeclared");
+
+  const cell: React.CSSProperties = { padding: "6px 10px", fontSize: 12, borderBottom: "1px solid var(--border-subtle)" };
+  const inp: React.CSSProperties = { padding: "6px 10px", fontSize: 12, border: "1px solid var(--border-default)", borderRadius: 6, background: "var(--bg-input, var(--bg-elevated))", color: "var(--text-primary)" };
+  const sensColor = (s: string) => s === "secret" ? "#dc2626" : s === "pii" ? "#d97706" : "var(--text-muted)";
+
+  return (
+    <div style={{ maxWidth: 920 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Variables</div>
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+        Typed, namespaced case data. A variable belongs to one namespace (the owning
+        integration or platform pipeline) and one case type. <code>velaris.*</code> natives
+        (subject, priority, status) are the case's own fields and are not defined here.
+      </div>
+
+      {/* Undeclared — needs operator attention */}
+      {undeclared.length > 0 && (
+        <div style={{ marginBottom: 20, border: "1px solid #d97706", borderRadius: 8, padding: 12, background: "#d9770611" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#b45309", marginBottom: 8 }}>
+            ⚠ {undeclared.length} undeclared variable(s) received from integrations — classify them
+          </div>
+          {undeclared.map(d => (
+            <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <code style={{ flex: 1, fontSize: 12 }}>{d.full_key}</code>
+              {!readOnly && <>
+                <select defaultValue="any" onChange={e => patchDef(d.id, { var_type: e.target.value, definition_status: "defined" })} style={inp}>
+                  {VAR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <button onClick={() => patchDef(d.id, { definition_status: "defined" })} style={{ ...inp, cursor: "pointer", color: "#16a34a" }}>Define</button>
+                <button onClick={() => patchDef(d.id, { definition_status: "ignored" })} style={{ ...inp, cursor: "pointer", color: "var(--text-muted)" }}>Ignore</button>
+              </>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Declared variables table */}
+      <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 20 }}>
+        <thead>
+          <tr style={{ textAlign: "left", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+            <th style={cell}>Full Key</th><th style={cell}>Type</th><th style={cell}>Label</th>
+            <th style={cell}>Sensitivity</th><th style={cell}>Req</th><th style={cell}>Idx</th><th style={cell}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {declared.length === 0 && (
+            <tr><td colSpan={7} style={{ ...cell, color: "var(--text-muted)", fontStyle: "italic" }}>No variables defined yet.</td></tr>
+          )}
+          {declared.map(d => {
+            const ns = namespaces.find(n => n.name === d.namespace);
+            const sens = d.sensitivity_override ?? ns?.sensitivity ?? "internal";
+            return (
+              <tr key={d.id}>
+                <td style={cell}><code>{d.full_key}</code>{d.definition_status === "ignored" && <span style={{ color: "var(--text-muted)" }}> (ignored)</span>}</td>
+                <td style={cell}>{d.var_type}</td>
+                <td style={cell}>{d.label}</td>
+                <td style={{ ...cell, color: sensColor(sens), fontWeight: 600 }}>{sens}</td>
+                <td style={cell}>{d.required ? "✓" : ""}</td>
+                <td style={cell}>{d.indexed ? "✓" : ""}</td>
+                <td style={cell}>{!readOnly && d.definition_status !== "undeclared" && <button onClick={() => removeDef(d.id)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 12 }}>Remove</button>}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {/* Add variable */}
+      {!readOnly && (
+        <div style={{ border: "1px solid var(--border-default)", borderRadius: 8, padding: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Add Variable</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <select value={nsId} onChange={e => setNsId(e.target.value)} style={inp}>
+              <option value="">namespace…</option>
+              {definableNs.map(n => (
+                <option key={n.id} value={n.id}>{n.name}{n.sensitivity !== "internal" ? ` (${n.sensitivity})` : ""}</option>
+              ))}
+            </select>
+            <input placeholder="variable_name" value={vName} onChange={e => setVName(e.target.value)} style={{ ...inp, width: 160 }} />
+            <select value={vType} onChange={e => setVType(e.target.value)} style={inp}>
+              {VAR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <input placeholder="Label" value={vLabel} onChange={e => setVLabel(e.target.value)} style={{ ...inp, width: 140 }} />
+            <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={vRequired} onChange={e => setVRequired(e.target.checked)} />required</label>
+            <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={vIndexed} onChange={e => setVIndexed(e.target.checked)} />indexed</label>
+            <button onClick={addVariable} disabled={busy} style={{ padding: "6px 16px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontWeight: 700, fontSize: 12, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>Add</button>
+          </div>
+          {definableNs.length === 0 && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
+              No integration namespaces registered yet — an admin registers them when connecting integrations.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Migrate case.data (Phase 4 wizard) */}
+      {blobKeys.length > 0 && (
+        <div style={{ border: "1px solid var(--border-default)", borderRadius: 8, padding: 14, marginTop: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Migrate case.data</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+            Promote legacy <code>case.data</code> keys into typed variables. The blob is never modified —
+            promoted keys are served from the typed store instead. Keys HxSync classifies as pii get
+            pii sensitivity enforced automatically.
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                <th style={cell}>Key</th><th style={cell}>Cases</th><th style={cell}>Type</th>
+                <th style={cell}></th><th style={cell}>Target</th><th style={cell}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {blobKeys.map(bk => (
+                <tr key={bk.key}>
+                  <td style={cell}><code>{bk.key}</code></td>
+                  <td style={cell}>{bk.count}</td>
+                  <td style={cell}>{bk.inferred_type}</td>
+                  <td style={cell}>
+                    {bk.pii_hint && <span style={{ color: "#d97706", fontWeight: 700, fontSize: 11 }}>pii</span>}
+                    {!bk.valid_name && <span style={{ color: "var(--text-muted)", fontSize: 11 }} title="Key needs a valid target name (lowercase, a-z0-9_)"> rename req.</span>}
+                  </td>
+                  <td style={cell}>
+                    {bk.promoted_to
+                      ? <code style={{ color: "#16a34a" }}>{bk.promoted_to}</code>
+                      : !readOnly && bk.valid_name && (
+                        <select value={promoteTarget[bk.key] || "legacy"}
+                                onChange={e => setPromoteTarget(t => ({ ...t, [bk.key]: e.target.value }))} style={inp}>
+                          <option value="legacy">legacy</option>
+                          {definableNs.filter(n => n.name !== "legacy" && !["form", "portal"].includes(n.name)).map(n => (
+                            <option key={n.id} value={n.name}>{n.name}</option>
+                          ))}
+                        </select>
+                      )}
+                  </td>
+                  <td style={cell}>
+                    {!bk.promoted_to && !readOnly && bk.valid_name && (
+                      <button onClick={() => promoteKey(bk.key)} disabled={busy}
+                        style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 700 }}>Promote</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {msg && <div style={{ fontSize: 12, marginTop: 12, color: msg.ok ? "#22c55e" : "#ef4444" }}>{msg.text}</div>}
     </div>
   );
 }

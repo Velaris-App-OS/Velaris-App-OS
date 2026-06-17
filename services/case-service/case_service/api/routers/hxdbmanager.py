@@ -16,6 +16,7 @@ Safety rules (non-negotiable):
 from __future__ import annotations
 
 import asyncio
+import bcrypt
 import collections
 import hashlib
 import logging
@@ -33,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from case_service.auth.dependencies import get_current_user
 from case_service.auth.models import AuthenticatedUser
 from case_service.db.models import (
-    DbManagerQueryLogModel, DmlBeforeImageModel, RevokedSessionModel,
+    DbManagerQueryLogModel, DmlBeforeImageModel, HelixUserModel, RevokedSessionModel,
 )
 from case_service.db.session import get_session
 
@@ -60,7 +61,11 @@ _SERVICE_USER_IDS = {"hxsync-service", "hxdeploy-service", "system"}
 
 
 def _is_service_account(user: AuthenticatedUser) -> bool:
-    return user.user_id in _SERVICE_USER_IDS or user.has_role("service")
+    # Match the "service" role LITERALLY, not via has_role(): has_role() returns
+    # True for any role when the user is admin, and /execute is admin-only — so
+    # has_role("service") would classify every admin as a service account and
+    # silently disable the per-user rate limit (DoS protection) for everyone.
+    return user.user_id in _SERVICE_USER_IDS or "service" in (user.roles or [])
 
 # ── Abuse patterns blocked before any DB round-trip ──────────────────────────
 _ABUSE_PATTERNS = [
@@ -193,7 +198,15 @@ def _table_allowed(user: AuthenticatedUser, table_name: str) -> bool:
     return False
 
 
+_VALID_TABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _require_table_access(user: AuthenticatedUser, table_name: str) -> None:
+    # A name that isn't a valid SQL identifier can never be a real table — reject it
+    # as 404 BEFORE any DB query. Without this, e.g. a NUL byte reaches the
+    # information_schema lookup and Postgres raises an encoding error (500), not 404.
+    if not _VALID_TABLE_NAME.match(table_name or "") or len(table_name) > 63:
+        raise HTTPException(404, f"Table '{table_name}' not found")
     if not _table_allowed(user, table_name):
         if table_name in _HIDDEN_TABLES:
             raise HTTPException(404, f"Table '{table_name}' not found")
@@ -217,6 +230,20 @@ _SHA256_RE   = re.compile(r'^[a-f0-9]{64}$', re.I)
 
 _MASKED_SENTINEL = "••••••••"
 
+# Tier 2 — masked by default, visible only to holders of db_manager.view_sensitive
+# who have completed re-authentication ("DBView", see _has_active_elevation).
+_TIER2_COLUMN_NAMES = {
+    "account_number", "card_number", "sort_code", "bank_ref", "iban",
+    "ssn", "tax_id", "passport",
+}
+_TIER2_SUFFIXES = ("_encrypted", "_cipher")
+
+# PAN: 13-19 digits (with optional spaces/dashes), IBAN: 2 letters + 2 digits + up to 30
+# alphanumerics, UK sort code: NN-NN-NN.
+_PAN_RE        = re.compile(r'^(?:\d[ -]?){12,18}\d$')
+_IBAN_RE       = re.compile(r'^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$')
+_SORT_CODE_RE  = re.compile(r'^\d{2}-\d{2}-\d{2}$')
+
 
 def _is_tier1_col(col: str) -> bool:
     c = col.lower()
@@ -231,32 +258,70 @@ def _is_tier1_val(val: Any) -> bool:
     )
 
 
-def _mask_rows(rows: list[dict], always: bool = False, exclude: bool = False) -> tuple[list[dict], bool]:
-    """Mask or exclude Tier 1 sensitive columns. Returns (result_rows, had_sensitive_cols).
+def _is_tier2_col(col: str) -> bool:
+    c = col.lower()
+    return c in _TIER2_COLUMN_NAMES or any(c.endswith(s) for s in _TIER2_SUFFIXES)
+
+
+def _is_tier2_val(val: Any) -> bool:
+    if not isinstance(val, str):
+        return False
+    v = val.strip()
+    return bool(_PAN_RE.match(v) or _IBAN_RE.match(v.upper()) or _SORT_CODE_RE.match(v))
+
+
+def _mask_rows(
+    rows: list[dict],
+    always: bool = False,
+    exclude: bool = False,
+    user_has_dbview: bool = False,
+) -> tuple[list[dict], bool, bool]:
+    """Mask or exclude sensitive columns.
+
+    Returns (result_rows, had_sensitive_cols, revealed_tier2):
+      had_sensitive_cols — True if any Tier 1 or Tier 2 column/value was found
+                           (regardless of whether it ended up masked or shown).
+      revealed_tier2     — True if Tier 2 data was actually shown unmasked
+                           (i.e. user_has_dbview was honoured) — used to fire
+                           the DBVIEW_TIER2_REVEAL audit event precisely.
+
+    Tier 1 (credentials, secrets, hashes) is always masked — no permission overrides it.
+    Tier 2 (account numbers, IBANs, card numbers, etc.) is masked unless the caller
+    passes user_has_dbview=True, meaning the user holds db_manager.view_sensitive
+    AND has an active re-auth elevation (see _has_active_elevation).
 
     always=True  — bypasses the feature flag (used for exports).
     exclude=True — drops the column entirely instead of replacing with ••••••••.
                    Used for file exports so neither the value nor the column name
-                   appears in the downloaded file.
+                   appears in the downloaded file. Tier 2 is always excluded too —
+                   DBView only applies to in-browser viewing, never to exports.
     """
     from case_service.api.routers.releases import is_feature_enabled
     if not rows or (not always and not is_feature_enabled("hxdbmanager_security")):
-        return rows, False
+        return rows, False, False
     had_sensitive = False
+    revealed_tier2 = False
     out = []
     for row in rows:
         result: dict[str, Any] = {}
         for col, val in row.items():
             if _is_tier1_col(col) or _is_tier1_val(val):
                 had_sensitive = True
+                result[col] = "[REDACTED]" if exclude else _MASKED_SENTINEL
+            elif _is_tier2_col(col) or _is_tier2_val(val):
+                had_sensitive = True
                 if exclude:
-                    result[col] = "[REDACTED]"   # column present in export but value never exposed
+                    result[col] = "[REDACTED]"
+                elif user_has_dbview:
+                    result[col] = val
+                    revealed_tier2 = True
                 else:
-                    result[col] = _MASKED_SENTINEL  # show ••••••••  in UI
+                    prefix = col[:4] if len(col) >= 4 else col
+                    result[col] = f"[MASKED — {prefix}••••]"
             else:
                 result[col] = val
         out.append(result)
-    return out, had_sensitive
+    return out, had_sensitive, revealed_tier2
 
 
 # ── Breach detection — in-memory tracking, auto-disable on CRITICAL ───────────
@@ -268,6 +333,13 @@ _BREACH_HIGH_WINDOW_S    = 600  # 10 minutes
 _BREACH_HIGH_FOR_CRITICAL = 3   # 3 HIGH events in window → CRITICAL
 _BREACH_REJECT_WINDOW_S  = 60   # 1 minute
 _BREACH_REJECT_FOR_CRITICAL = 5 # 5 rejections in window → CRITICAL
+
+# ── DBView re-auth elevation ("sudo mode" for Tier 2 data) ───────────────────
+# Re-proving the user's own password unlocks Tier 2 visibility for 15 minutes —
+# mirrors `sudo` on Linux rather than issuing a new login token.
+_DBVIEW_ELEVATIONS: dict[str, float] = {}   # user_id → expiry (monotonic seconds)
+_DBVIEW_ELEVATION_LOCK = asyncio.Lock()
+_DBVIEW_ELEVATION_TTL_S = 15 * 60   # 15 minutes
 
 # DML preview cache (TTL 5 minutes)
 _DML_PREVIEWS: dict[str, dict] = {}
@@ -391,6 +463,43 @@ def _require_write(user: AuthenticatedUser):
     """DDL and sensitive-data expose — superadmin only."""
     if not _is_superadmin(user):
         raise HTTPException(403, "DB Manager write access requires superadmin role")
+
+
+def _has_active_elevation(user_id: str) -> bool:
+    expiry = _DBVIEW_ELEVATIONS.get(user_id)
+    return expiry is not None and time.monotonic() < expiry
+
+
+def _user_has_dbview(user: AuthenticatedUser) -> bool:
+    """True only when the user holds db_manager.view_sensitive AND has an active
+    re-auth elevation. Superadmins use the separate, broader `expose` flow
+    (_require_write) — DBView exists to grant Tier 2 visibility to non-superadmin
+    admins without handing them the keys to Tier 1 / DDL as well."""
+    if not user.has_privilege("db_manager", "view_sensitive"):
+        return False
+    return _has_active_elevation(user.user_id)
+
+
+async def _log_dbview_reveal(session: AsyncSession, user: AuthenticatedUser, where: str) -> None:
+    """Audit-log a Tier 2 reveal via DBView. Sanctioned activity (privilege +
+    re-auth already verified) — logged for the trail, but kept out of the
+    breach-event counter that _fire_breach_event feeds (that would punish
+    legitimate, granted use of the feature)."""
+    from case_service.enterprise.security_events import log_security_event
+    await log_security_event(
+        session,
+        event_type="DBMGR_DBVIEW_TIER2_REVEAL",
+        severity="info",
+        user_id=user.user_id,
+        resource_type="hxdbmanager",
+        action="dbview_reveal",
+        outcome="success",
+        details={"detail": f"Tier 2 sensitive data viewed via DBView — {where}"},
+    )
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
 
 
 async def _fire_breach_event(
@@ -748,6 +857,77 @@ async def get_table_schema(
     }
 
 
+# ── DBView re-auth ("sudo mode" — unlocks Tier 2 data for 15 minutes) ────────
+
+class ReauthBody(BaseModel):
+    password: str
+
+
+@router.post("/reauth")
+async def dbview_reauth(
+    body: ReauthBody,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-prove identity to unlock Tier 2 (account numbers, IBANs, etc.) for 15
+    minutes — like `sudo` on Linux. Requires the db_manager.view_sensitive
+    privilege; verifies the caller's own current password.
+    """
+    from case_service.api.routers.releases import is_feature_enabled
+    if not is_feature_enabled("hxdbmanager"):
+        raise HTTPException(404, "HxDB Manager is not available on this instance")
+    if not current_user.has_privilege("db_manager", "view_sensitive"):
+        raise HTTPException(403, "DBView requires the 'DB Manager / View masked account data' privilege")
+
+    hu = await session.get(HelixUserModel, uuid.UUID(current_user.user_id))
+    if not hu or not hu.password_hash:
+        raise HTTPException(401, "Password re-authentication is not available for this account")
+    try:
+        ok = bcrypt.checkpw(body.password.encode(), hu.password_hash.encode())
+    except Exception:
+        ok = False
+    if not ok:
+        raise HTTPException(401, "Incorrect password")
+
+    expiry = time.monotonic() + _DBVIEW_ELEVATION_TTL_S
+    async with _DBVIEW_ELEVATION_LOCK:
+        _DBVIEW_ELEVATIONS[current_user.user_id] = expiry
+
+    from case_service.enterprise.security_events import log_security_event
+    await log_security_event(
+        session,
+        event_type="DBMGR_DBVIEW_REAUTH",
+        severity="info",
+        user_id=current_user.user_id,
+        resource_type="hxdbmanager",
+        action="reauth",
+        outcome="success",
+        details={"detail": "DBView elevation granted", "expires_in_seconds": _DBVIEW_ELEVATION_TTL_S},
+    )
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+
+    return {"elevated": True, "expires_in_seconds": _DBVIEW_ELEVATION_TTL_S}
+
+
+@router.get("/reauth/status")
+async def dbview_reauth_status(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Return whether the caller currently holds an active DBView elevation,
+    and how many seconds remain before it expires."""
+    has_privilege = current_user.has_privilege("db_manager", "view_sensitive")
+    expiry = _DBVIEW_ELEVATIONS.get(current_user.user_id)
+    remaining = max(0, int(expiry - time.monotonic())) if expiry else 0
+    return {
+        "has_dbview_privilege": has_privilege,
+        "elevated": has_privilege and remaining > 0,
+        "expires_in_seconds": remaining,
+    }
+
+
 # ── Phase 1: Table viewer ─────────────────────────────────────────────────────
 
 @router.get("/tables/{table_name}/rows")
@@ -820,7 +1000,10 @@ async def get_table_rows(
             "expose_mode":         True,
         }
 
-    masked_rows, had_sensitive = _mask_rows(raw_rows)
+    dbview = _user_has_dbview(current_user)
+    masked_rows, had_sensitive, revealed_tier2 = _mask_rows(raw_rows, user_has_dbview=dbview)
+    if revealed_tier2:
+        await _log_dbview_reveal(session, current_user, f"table viewer — {table_name}")
     return {
         "table":          table_name,
         "page":           page,
@@ -829,6 +1012,7 @@ async def get_table_rows(
         "rows":           masked_rows,
         "sensitive_cols_masked": had_sensitive,
         "expose_mode":    False,
+        "dbview_active":  dbview,
     }
 
 
@@ -936,7 +1120,10 @@ async def execute_query(
     if status != "success":
         raise HTTPException(400, error_detail or "Query failed")
 
-    masked_rows, had_sensitive = _mask_rows(rows)
+    dbview = _user_has_dbview(current_user)
+    masked_rows, had_sensitive, revealed_tier2 = _mask_rows(rows, user_has_dbview=dbview)
+    if revealed_tier2:
+        await _log_dbview_reveal(session, current_user, "/execute query result")
     return {
         "status":              status,
         "rows":                masked_rows,
@@ -945,6 +1132,7 @@ async def execute_query(
         "duration_ms":         duration_ms,
         "truncated":           len(rows) == row_limit,
         "sensitive_cols_masked": had_sensitive,
+        "dbview_active":       dbview,
     }
 
 
@@ -1022,7 +1210,7 @@ async def export_table(
     raw_rows = [dict(r) for r in result.mappings().all()]
     # always=True + exclude=True: sensitive columns are completely removed from
     # exports — column name and value both absent from the downloaded file.
-    masked_rows, _ = _mask_rows(raw_rows, always=True, exclude=True)
+    masked_rows, _, _ = _mask_rows(raw_rows, always=True, exclude=True)
 
     await _log_query(session, str(getattr(current_user, "tenant_id", "system")),
                      current_user.user_id, f"EXPORT {table_name} AS {fmt}", "success", None, len(masked_rows))
@@ -1363,12 +1551,16 @@ async def dml_preview(
         "expires_at": now + _DML_PREVIEW_TTL,
     }
 
-    masked_preview, had_sensitive = _mask_rows(preview_rows[:50])
+    dbview = _user_has_dbview(current_user)
+    masked_preview, had_sensitive, revealed_tier2 = _mask_rows(preview_rows[:50], user_has_dbview=dbview)
+    if revealed_tier2:
+        await _log_dbview_reveal(session, current_user, "DML preview")
     return {
         "preview_id":          preview_id,
         "row_count":           row_count,
         "preview_rows":        masked_preview,
         "sensitive_cols_masked": had_sensitive,
+        "dbview_active":       dbview,
         "expires_in_seconds":  int(_DML_PREVIEW_TTL),
         "note": (
             "Nothing has been committed. Call POST /dml/confirm/{preview_id} to execute. "
@@ -1445,11 +1637,15 @@ async def dml_confirm(
     if status != "success":
         raise HTTPException(400, error_detail or "DML execution failed")
 
-    masked_rows, had_sensitive = _mask_rows(result_rows)
+    dbview = _user_has_dbview(current_user)
+    masked_rows, had_sensitive, revealed_tier2 = _mask_rows(result_rows, user_has_dbview=dbview)
+    if revealed_tier2:
+        await _log_dbview_reveal(session, current_user, "DML confirm result")
     return {
         "status":              "committed",
         "rows_affected":       rows_affected,
         "duration_ms":         duration_ms,
+        "dbview_active":       dbview,
         "before_image_captured": capture_method != "partial",
         "capture_method":      capture_method,
         "returning_rows":      masked_rows,

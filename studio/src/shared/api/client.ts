@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════
    API Client — typed wrapper around the Helix Engine REST API
-   
+
    All calls go through /api which Vite proxies to localhost:8100.
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -10,12 +10,13 @@ import type {
   InstanceListResponse,
   ProcessListResponse,
 } from "@shared/types";
+import { getAccessToken, attemptRefresh } from "../../auth/tokenManager";
 
 const BASE = "/api";
 
-function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem("helix_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+function authHeaders(token?: string): Record<string, string> {
+  const t = token ?? getAccessToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -23,6 +24,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
     ...options,
   });
+
+  if (res.status === 401) {
+    const newToken = await attemptRefresh();
+    if (newToken) {
+      const retry = await fetch(`${BASE}${path}`, {
+        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
+        ...options,
+      });
+      if (retry.status === 401) {
+        window.dispatchEvent(new Event("velaris:unauthorized"));
+        throw new ApiError(401, "Session expired. Please log in again.");
+      }
+      if (!retry.ok) {
+        const body = await retry.json().catch(() => ({ detail: retry.statusText }));
+        throw new ApiError(retry.status, typeof body.detail === "object" ? JSON.stringify(body.detail) : (body.detail || retry.statusText));
+      }
+      return retry.json();
+    }
+    window.dispatchEvent(new Event("velaris:unauthorized"));
+    throw new ApiError(401, "Session expired. Please log in again.");
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
@@ -164,6 +186,27 @@ async function caseRequest<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   });
 
+  if (res.status === 401) {
+    const newToken = await attemptRefresh();
+    if (newToken) {
+      const retry = await fetch(`${CASE_BASE}${path}`, {
+        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
+        ...options,
+      });
+      if (retry.status === 401) {
+        window.dispatchEvent(new Event("velaris:unauthorized"));
+        throw new ApiError(401, "Session expired. Please log in again.");
+      }
+      if (!retry.ok) {
+        const body = await retry.json().catch(() => ({ detail: retry.statusText }));
+        throw new ApiError(retry.status, body.detail || retry.statusText);
+      }
+      return retry.json();
+    }
+    window.dispatchEvent(new Event("velaris:unauthorized"));
+    throw new ApiError(401, "Session expired. Please log in again.");
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(res.status, body.detail || res.statusText);
@@ -235,6 +278,8 @@ export async function listCases(params?: {
   status?: string;
   priority?: string;
   case_type_id?: string;
+  /** Indexed-variable filters, each "namespace.name:value" (AND semantics) */
+  vars?: string[];
   page?: number;
   page_size?: number;
 }): Promise<CaseListResponse> {
@@ -242,6 +287,7 @@ export async function listCases(params?: {
   if (params?.status) qs.set("status", params.status);
   if (params?.priority) qs.set("priority", params.priority);
   if (params?.case_type_id) qs.set("case_type_id", params.case_type_id);
+  for (const v of params?.vars ?? []) qs.append("var", v);
   if (params?.page) qs.set("page", String(params.page));
   if (params?.page_size) qs.set("page_size", String(params.page_size));
   const q = qs.toString();
@@ -515,6 +561,33 @@ export async function getAssignmentForm(assignmentId: string): Promise<{
   form: { id: string; name: string; version: string; definition_json: Record<string, any> } | null;
 }> {
   return caseRequest(`/form-submissions/${assignmentId}/form`);
+}
+
+export async function getCaseVariables(caseId: string): Promise<{
+  case_id: string;
+  variables: Record<string, any>;
+}> {
+  return caseRequest(`/variables/cases/${caseId}`);
+}
+
+export async function listCaseShares(caseId: string): Promise<
+  { user_id: string; relation: string; created_by: string | null; created_at: string | null }[]
+> {
+  return caseRequest(`/cases/${caseId}/shares`);
+}
+
+export async function shareCase(caseId: string, userId: string, relation: string): Promise<void> {
+  await caseRequest(`/cases/${caseId}/shares`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, relation }),
+  });
+}
+
+export async function unshareCase(caseId: string, userId: string, relation: string): Promise<void> {
+  await caseRequest(`/cases/${caseId}/shares?user_id=${encodeURIComponent(userId)}&relation=${encodeURIComponent(relation)}`, {
+    method: "DELETE",
+  });
 }
 
 export async function submitForm(assignmentId: string, body: {
@@ -1294,4 +1367,30 @@ export async function searchUsers(q: string, accessGroupId?: string, limit = 20)
 
 export async function getMyDirectoryEntry(userId: string): Promise<UserDirectoryEntry & { access_group_ids: string[] }> {
   return caseRequest(`/user-directory/${encodeURIComponent(userId)}`);
+}
+
+/**
+ * Authenticated fetch against the case-service base (/api/v1).
+ * Handles 401 refresh and re-auth the same way as all other case endpoints.
+ * Use this instead of raw fetch() so auth headers are always included.
+ */
+export async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...authHeaders(),
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+  const res = await fetch(`${CASE_BASE}${path}`, { ...options, headers });
+  if (res.status === 401) {
+    const newToken = await attemptRefresh();
+    if (newToken) {
+      const retry = await fetch(`${CASE_BASE}${path}`, {
+        ...options,
+        headers: { ...headers, ...authHeaders(newToken) },
+      });
+      return retry;
+    }
+    window.dispatchEvent(new Event("velaris:unauthorized"));
+  }
+  return res;
 }
