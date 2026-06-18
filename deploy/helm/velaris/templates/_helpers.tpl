@@ -23,8 +23,8 @@ postgresql+asyncpg://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresq
 {{- end -}}
 
 {{- define "helix.redisUrl" -}}
-{{- if .Values.redis.enabled -}}
-redis://{{ .Release.Name }}-redis-master:6379/0
+{{- if .Values.valkey.enabled -}}
+redis://{{ .Release.Name }}-valkey-primary:6379/0
 {{- else -}}
 {{ .Values.externalRedisUrl }}
 {{- end -}}

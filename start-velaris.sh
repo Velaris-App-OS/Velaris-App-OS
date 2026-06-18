@@ -14,6 +14,46 @@ DB_CONTAINER="docker-compose-helix-db-1"
 DB_USER="helix"
 DB_NAME="helix"
 
+# ── Step 0: OpenBao secrets (Group K, opt-in) ─────────────────────
+# Enabled by the sentinel file deploy/openbao/enabled. When active, .env is
+# RENDERED from OpenBao before anything reads it. Render is fail-closed: on
+# any problem the existing .env stays untouched and we continue on the
+# last-known-good secrets (warning printed). No sentinel = no change at all.
+if [ -f "$HELIX_DIR/deploy/openbao/enabled" ]; then
+  echo "▶ Step 0: OpenBao secrets..."
+  [ -f "$HELIX_DIR/.env" ] || touch "$HELIX_DIR/.env"   # compose interpolation needs the file to exist
+  # Every failure below degrades to "continue on the existing .env" — Step 0
+  # must never be the reason the platform fails to start (set -e is active).
+  if ! docker compose -f "$COMPOSE_FILE" --env-file "$HELIX_DIR/.env" up -d openbao 2>/dev/null; then
+    echo -e "  \033[0;33m⚠ Could not start the OpenBao container\033[0m"
+  fi
+  BAO_HEALTH="000"
+  for i in $(seq 1 15); do
+    BAO_HEALTH=$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:8300/v1/sys/health?sealedcode=472&uninitcode=471" || echo "000")
+    [ "$BAO_HEALTH" != "000" ] && break
+    sleep 1
+  done
+  if [ "$BAO_HEALTH" = "472" ]; then
+    echo "  Unsealing OpenBao from local keyfile..."
+    if "$HELIX_DIR/scripts/secrets-unseal.sh" >/dev/null 2>&1; then
+      BAO_HEALTH=200
+    else
+      echo -e "  \033[0;33m⚠ Unseal failed (bad or unreadable keyfile)\033[0m"
+    fi
+  fi
+  if [ "$BAO_HEALTH" = "200" ] || [ "$BAO_HEALTH" = "429" ]; then
+    if "$HELIX_DIR/scripts/secrets-render.sh"; then
+      echo -e "  \033[0;32m✓ .env rendered from OpenBao\033[0m"
+    else
+      echo -e "  \033[0;33m⚠ Render failed — continuing on the existing .env\033[0m"
+    fi
+  else
+    echo -e "  \033[0;33m⚠ OpenBao unavailable (health=$BAO_HEALTH) — continuing on the existing .env\033[0m"
+  fi
+  echo ""
+fi
+
 # Load .env early so VELARIS_DB_PASSWORD is available for docker compose
 if [ -f "$HELIX_DIR/.env" ]; then
   set -o allexport; source "$HELIX_DIR/.env"; set +o allexport
@@ -80,7 +120,7 @@ fi
 echo "▶ Preparing ports..."
 docker compose -f "$COMPOSE_FILE" --env-file "$HELIX_DIR/.env" down 2>/dev/null || true
 sudo systemctl stop postgresql 2>/dev/null || true
-for port in 5432 8100 8200 5173; do
+for port in 5432 8100 8201 5173; do
   fuser -k "${port}/tcp" 2>/dev/null || true
 done
 sleep 2
@@ -92,6 +132,15 @@ echo "▶ Starting Docker infrastructure..."
 docker compose -f "$COMPOSE_FILE" --env-file "$HELIX_DIR/.env" up -d
 echo "  Waiting for services to initialise..."
 sleep 10
+
+# Group K: the global down/up above restarted OpenBao sealed. .env is already
+# rendered (Step 0); re-unseal so day-2 secret operations work without manual
+# intervention. Failure is non-fatal — the platform runs fine sealed.
+if [ -f "$HELIX_DIR/deploy/openbao/enabled" ]; then
+  "$HELIX_DIR/scripts/secrets-unseal.sh" 2>/dev/null \
+    && green "  ✓ OpenBao unsealed" \
+    || yellow "  ⚠ OpenBao still sealed — run ./scripts/secrets-unseal.sh before pushing secrets"
+fi
 
 echo ""
 echo "  Checking containers:"
@@ -235,15 +284,15 @@ done
 echo ""
 
 # ── Step 7: Start Case Service ────────────────────────────────────
-echo "▶ Starting Case Service (port 8200)..."
+echo "▶ Starting Case Service (loopback 127.0.0.1:8201, only reachable via API gateway on 8200)..."
 nohup uv run uvicorn case_service.main:app \
-  --host 0.0.0.0 --port 8200 --reload \
+  --host 127.0.0.1 --port 8201 --reload \
   --app-dir services/case-service \
   > /tmp/velaris-case-service.log 2>&1 &
 echo "  PID: $! | Logs: tail -f /tmp/velaris-case-service.log"
 for i in $(seq 1 20); do
-  if curl -s http://localhost:8200/health > /dev/null 2>&1; then
-    green "  ✓ Case Service ready on port 8200"; break
+  if curl -s http://localhost:8201/health > /dev/null 2>&1; then
+    green "  ✓ Case Service ready on port 8201"; break
   fi
   [ "$i" -eq 20 ] && yellow "  ⚠ Case Service not ready after 20s"
   sleep 1

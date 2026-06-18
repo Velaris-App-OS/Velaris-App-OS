@@ -143,9 +143,9 @@ echo ""
 yellow "  ⚠  This deletes ALL Velaris data:"
 yellow "     • Main database     (helix-db)"
 yellow "     • Temporal database (temporal-db)"
-yellow "     • Redis cache       (cache-data)"
+yellow "     • Valkey cache      (cache-data)"
 yellow "     • Redpanda events   (events-data)"
-yellow "     • OpenSearch index  (search-data)"
+yellow "     • OpenBao secrets   (openbao-data)"
 yellow "     • Ollama models     (ollama-data)  ← may be several GB"
 yellow "     • MinIO documents   (helix-minio-data)"
 yellow "     • Prometheus data   (helix-prometheus-data)"
@@ -171,11 +171,11 @@ if confirm "Delete all Docker containers and volumes?"; then
     helix-db
     cache-data
     events-data
-    search-data
     ollama-data
     helix-minio-data
     helix-prometheus-data
     helix-mailpit-data
+    openbao-data
   )
   for vol in "${VOLUMES[@]}"; do
     # docker-compose prefixes volumes with the compose project name
@@ -200,16 +200,16 @@ if $PURGE; then
     "postgres:16-alpine"
     "temporalio/auto-setup:1.25"
     "temporalio/ui:2.31.2"
-    "redis:7-alpine"
+    "valkey/valkey:8-alpine"
     "redpandadata/redpanda:latest"
-    "opensearchproject/opensearch:2.17.0"
-    "quay.io/keycloak/keycloak:26.0"
     "ollama/ollama:latest"
+    "nginx:1.27-alpine"
     "prom/prometheus:v2.54.1"
     "otel/opentelemetry-collector-contrib:0.105.0"
     "minio/minio:RELEASE.2024-10-02T17-50-41Z"
     "minio/mc:RELEASE.2024-10-02T08-27-28Z"
     "axllent/mailpit:latest"
+    "openbao/openbao:2"
   )
 
   echo ""
@@ -307,8 +307,14 @@ echo ""
 yellow "  ⚠  The following files contain secrets (passwords, JWT keys, licence key):"
 CREDENTIAL_FILES=(
   "$HELIX_DIR/.env"
+  "$HELIX_DIR/.env.pre-openbao"
   "$HELIX_DIR/.velaris-key"
   "$HELIX_DIR/.velaris-setup-complete"
+  # OpenBao (Group K) generated secrets — NOT the committed server.hcl/agent.hcl
+  "$HELIX_DIR/deploy/openbao/.bao-init.json"
+  "$HELIX_DIR/deploy/openbao/agent/role_id"
+  "$HELIX_DIR/deploy/openbao/agent/secret_id"
+  "$HELIX_DIR/deploy/openbao/enabled"
 )
 for f in "${CREDENTIAL_FILES[@]}"; do
   [ -f "$f" ] && dim "    • $f"
@@ -323,6 +329,11 @@ if confirm "Delete credential and marker files?"; then
       green "  ✓ Removed: $(basename "$f")"
     fi
   done
+  # OpenBao agent renders short-lived secrets into agent/out/ — remove the whole dir
+  if [ -d "$HELIX_DIR/deploy/openbao/agent/out" ]; then
+    rm -rf "$HELIX_DIR/deploy/openbao/agent/out"
+    green "  ✓ Removed: deploy/openbao/agent/out/"
+  fi
 else
   yellow "  Skipped — credential files kept"
 fi

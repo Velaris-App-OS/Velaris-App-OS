@@ -30,40 +30,46 @@
 --    'released', 'v1.0.0', NOW(), NOW(), NOW())
 -- ON CONFLICT (feature_key) DO NOTHING;
 
--- ── Pending future releases (uncomment when shipping) ────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+-- v2.0.0 — feature flags shipped with the Velaris 2.0.0 platform release.
+-- Versions match releases.txt. Only is_feature_enabled() keys appear here;
+-- the platform itself ("velaris") and marketplace apps ("hxtest", install-gated
+-- via marketplace_installs) are NOT feature flags and are documented in
+-- releases/notes/v2.0.0.md, not inserted below.
+-- ══════════════════════════════════════════════════════════════════════════════
 
--- v1.2.0 — Marketplace
--- INSERT INTO scheduled_releases
---   (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
--- VALUES
---   (gen_random_uuid(), 'marketplace', 'v1.2.0',
---    'Marketplace', 'Velaris App Store — browse, sandbox, and install platform extensions',
---    'released', 'v1.2.0', NOW(), NOW(), NOW())
--- ON CONFLICT (feature_key) DO NOTHING;
+-- Marketplace
+INSERT INTO scheduled_releases
+  (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
+VALUES
+  (gen_random_uuid(), 'marketplace', 'v1.0.0',
+   'Marketplace', 'Velaris App Store — browse, sandbox, and install platform extensions (official + community tiers)',
+   'released', 'v1.0.0', NOW(), NOW(), NOW())
+ON CONFLICT (feature_key) DO NOTHING;
 
--- v1.2.1 — Customer Accounts
--- INSERT INTO scheduled_releases
---   (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
--- VALUES
---   (gen_random_uuid(), 'customer_accounts', 'v1.2.1',
---    'Customer Accounts', 'Persistent portal identity — OTP login, case history, GDPR erasure',
---    'released', 'v1.2.1', NOW(), NOW(), NOW())
--- ON CONFLICT (feature_key) DO NOTHING;
+-- Customer Accounts
+INSERT INTO scheduled_releases
+  (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
+VALUES
+  (gen_random_uuid(), 'customer_accounts', 'v1.0.1',
+   'Customer Accounts', 'Persistent portal identity — OTP login, case history, GDPR erasure',
+   'released', 'v1.0.1', NOW(), NOW(), NOW())
+ON CONFLICT (feature_key) DO NOTHING;
 
--- v1.3.0 — HxDB Manager
--- INSERT INTO scheduled_releases
---   (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
--- VALUES
---   (gen_random_uuid(), 'hxdbmanager', 'v1.3.0',
---    'HxDB Manager', 'AI-powered database operations panel inside Studio',
---    'released', 'v1.3.0', NOW(), NOW(), NOW())
--- ON CONFLICT (feature_key) DO NOTHING;
+-- HxDB Manager
+INSERT INTO scheduled_releases
+  (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
+VALUES
+  (gen_random_uuid(), 'hxdbmanager', 'v1.0.0',
+   'HxDB Manager', 'AI-powered database operations panel inside Studio',
+   'released', 'v1.0.0', NOW(), NOW(), NOW())
+ON CONFLICT (feature_key) DO NOTHING;
 
--- v1.3.1 — HxDB Manager Security
--- INSERT INTO scheduled_releases
---   (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
--- VALUES
---   (gen_random_uuid(), 'hxdbmanager_security', 'v1.3.1',
---    'HxDB Manager Security', 'Credential masking, breach detection, account auto-disable, DML before-image log',
---    'released', 'v1.3.1', NOW(), NOW(), NOW())
--- ON CONFLICT (feature_key) DO NOTHING;
+-- HxDB Manager Security
+INSERT INTO scheduled_releases
+  (id, feature_key, version, title, description, status, enabled, released_at, created_at, updated_at)
+VALUES
+  (gen_random_uuid(), 'hxdbmanager_security', 'v1.0.1',
+   'HxDB Manager Security', 'Credential masking, breach detection, account auto-disable, DML before-image log',
+   'released', 'v1.0.1', NOW(), NOW(), NOW())
+ON CONFLICT (feature_key) DO NOTHING;

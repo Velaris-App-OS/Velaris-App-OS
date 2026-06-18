@@ -1,86 +1,143 @@
-# Velaris
+<div align="center">
 
-**Enterprise case management and process automation platform.**
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d9488,100:4ecdc4&height=120&section=header" width="100%" alt="" />
 
-Velaris is a production-grade BPM and case management platform built for operations teams that need structured workflows, real-time case tracking, AI-assisted triage, and deep integration capabilities — without SaaS lock-in.
+<img src="studio/public/velaris.png" width="140" alt="Velaris" />
+
+<h1>Velaris</h1>
+
+<h3><i>Your infra. Your choice. Zero SaaS lock-in.</i></h3>
+
+<a href="https://github.com/Velaris-App-OS/Velaris-App-OS">
+  <img src="https://readme-typing-svg.demolab.com?font=DM+Sans&weight=600&size=22&pause=900&color=0D9488&center=true&vCenter=true&width=780&lines=Structured+workflows+%26+real-time+case+tracking;AI-assisted+triage+with+HxNexus;A+live+semantic+knowledge+graph+%E2%80%94+HxGraph;Per-tenant+encryption+%26+secrets+via+OpenBao" alt="Velaris" />
+</a>
+
+<p>
+  <img src="https://img.shields.io/badge/License-BSL%201.1%20%E2%86%92%20Apache%202.0-0d9488?style=for-the-badge" alt="License" />
+  <img src="https://img.shields.io/badge/Deploy-Self--hosted-4ecdc4?style=for-the-badge" alt="Self-hosted" />
+  <img src="https://img.shields.io/badge/Use-Free-26de81?style=for-the-badge" alt="Free to use" />
+</p>
+
+</div>
+
+<h3 align="center">Tech Stack</h3>
+
+<div align="center">
+
+![Ollama](https://img.shields.io/badge/Ollama-000000?logo=ollama&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude-D97757?logo=anthropic&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white)
+![Gemini](https://img.shields.io/badge/Google_Gemini-8E75B2?logo=googlegemini&logoColor=white)
+![Groq](https://img.shields.io/badge/Groq-F55036?logoColor=white)
+![Mistral](https://img.shields.io/badge/Mistral-FA520F?logo=mistralai&logoColor=white)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-4D6BFE?logo=deepseek&logoColor=white)
+
+![React](https://img.shields.io/badge/React-20232A?logo=react&logoColor=61DAFB)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06B6D4?logo=tailwindcss&logoColor=white)
+![D3.js](https://img.shields.io/badge/D3.js-F9A03C?logo=d3dotjs&logoColor=white)
+
+![Python](https://img.shields.io/badge/Python_3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-D71F00?logo=sqlalchemy&logoColor=white)
+![Pydantic](https://img.shields.io/badge/Pydantic-E92063?logo=pydantic&logoColor=white)
+
+![Temporal](https://img.shields.io/badge/Temporal-000000?logo=temporal&logoColor=white)
+![BPMN 2.0](https://img.shields.io/badge/BPMN-2.0-FF6F00)
+
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)
+![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)
+![Valkey](https://img.shields.io/badge/Valkey-2A6DB2?logo=valkey&logoColor=white)
+![MinIO](https://img.shields.io/badge/MinIO-C72E49?logo=minio&logoColor=white)
+
+![OpenBao](https://img.shields.io/badge/OpenBao-secrets-FFCF25?logo=openbao&logoColor=black)
+![JWT](https://img.shields.io/badge/JWT_RS256-000000?logo=jsonwebtokens&logoColor=white)
+![WebAuthn](https://img.shields.io/badge/WebAuthn_Passkeys-3423A6?logo=webauthn&logoColor=white)
+
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![nginx](https://img.shields.io/badge/nginx-009639?logo=nginx&logoColor=white)
+![uv](https://img.shields.io/badge/uv-DE5FE9?logo=python&logoColor=white)
+![npm](https://img.shields.io/badge/npm-CB3837?logo=npm&logoColor=white)
+![Locust](https://img.shields.io/badge/Locust-2EAE4E?logo=locust&logoColor=white)
+
+</div>
+
+<p align="center">
+  <b>Enterprise case management and process automation platform.</b><br/>
+  Velaris is a production-grade BPM and case management platform built for operations teams that need
+  structured workflows, real-time case tracking, AI-assisted triage, and deep integration capabilities
+  &mdash; without SaaS lock-in.
+</p>
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Studio (Vite + React)           :5173                      │
-│  ├── Case Designer / Stage Builder                          │
-│  ├── Form Builder                                           │
-│  ├── Work Center                                            │
-│  ├── HxGraph Visualiser (D3.js force graph)                 │
-│  ├── HxNexus AI Assistant                                   │
-│  ├── HxWork (tasks / stories / sprints)                     │
-│  ├── HxBranch (config version control)                      │
-│  ├── HxCanvas (freeform case whiteboard)                    │
-│  ├── HxDocs (in-platform documentation)                     │
-│  ├── HxMigrate (data migration)                             │
-│  ├── HxDeploy (CI/CD governance)                            │
-│  ├── HxConnect (integrations hub)                           │
-│  ├── HxShield (security)                                    │
-│  ├── Portal Admin                                           │
-│  └── Analytics, Compliance, Observability                   │
-└────────────────────────┬────────────────────────────────────┘
-                         │ REST / WebSocket
-┌────────────────────────▼────────────────────────────────────┐
-│  Case Service (FastAPI + SQLAlchemy)   :8200                │
-│  ├── Cases, stages, steps, assignments                      │
-│  ├── Auth (JWT, bcrypt, MFA, RBAC, ABAC, SSO)               │
-│  ├── HxNexus (Ollama-backed AI)                             │
-│  ├── HxGraph (live knowledge graph)                         │
-│  ├── HxBridge (connector execution engine)                  │
-│  ├── HxShield (security audit + breach detection)           │
-│  ├── HxDeploy (promotion governance)                        │
-│  ├── HxWork (tasks + sprints)                               │
-│  ├── HxStream (event tracing)                               │
-│  ├── HxFusion (cross-case automation)                       │
-│  ├── HxConnect (payments, KYC, e-sign, CRM, SMS, OCR)       │
-│  ├── HxAnalytics / HxSync / HxGlobal                        │
-│  ├── HxMigrate / HxBranch / HxDocs / HxCanvas               │
-│  ├── Customer Portal + multi-tenant                         │
-│  └── SLA engine, queues, notifications, compliance          │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│  Engine (FastAPI + Temporal)           :8100                │
-│  └── BPMN 2.0 process orchestration                         │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│  Infrastructure (Docker Compose)                            │
-│  ├── PostgreSQL 16          :5432                           │
-│  ├── Temporal               :7233  (UI :8233)               │
-│  ├── Redis                  :6379                           │
-│  ├── Redpanda (Kafka)       :9092                           │
-│  ├── OpenSearch             :9200                           │
-│  ├── MinIO                  :9000  (console :9001)          │
-│  └── Mailpit (SMTP dev)     :1025  (UI :8025)               │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Studio (Vite + React)                          :5173          │
+│  Case designer · HxGraph visualiser · HxNexus AI · Marketplace │
+│  Test Suite · portals · analytics · HxDeploy · HxWork          │
+└───────────────────────────┬──────────────────────────────────┘
+                            │  HTTPS
+┌───────────────────────────▼──────────────────────────────────┐
+│  API Gateway (nginx)                            :8200          │
+│  The single public door — routes /api/v1/* to case-service     │
+└───────────────────────────┬──────────────────────────────────┘
+                            │  loopback
+┌───────────────────────────▼──────────────────────────────────┐
+│  Case Service (FastAPI + SQLAlchemy)            :8201          │
+│  ├── Cases, stages, steps, assignments, SLA, queues            │
+│  ├── Auth (JWT RS256, bcrypt, MFA, passkeys, RBAC + ABAC, SSO)  │
+│  ├── HxNexus (multi-provider AI)                               │
+│  ├── HxGraph (in-process knowledge graph)                      │
+│  ├── HxVault (per-tenant encryption, crypto-shredding)         │
+│  ├── HxDbManager (guarded DB operations)                       │
+│  ├── Marketplace + Test Suite / HxTest                         │
+│  ├── Customer Accounts (portal identity)                       │
+│  ├── HxDeploy · HxWork · HxStream · HxShield                   │
+│  ├── HxFusion / HxConnect (integrations)                       │
+│  ├── HxAnalytics / HxSync / HxGlobal                           │
+│  └── Customer portal + multi-tenant + compliance               │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+┌───────────────────────────▼──────────────────────────────────┐
+│  Flow Engine (FastAPI + Temporal)               :8100          │
+│  └── BPMN 2.0 process orchestration + durable workers          │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+┌───────────────────────────▼──────────────────────────────────┐
+│  Infrastructure (Docker Compose)                               │
+│  ├── PostgreSQL 16 (+ pgvector)  :5432                         │
+│  ├── Temporal                    :7233  (UI :8233)             │
+│  ├── Valkey                      :6379                         │
+│  ├── MinIO                       :9000  (console :9001)        │
+│  ├── OpenBao (secrets manager)                                 │
+│  ├── Ollama (local AI backend)   :11434                        │
+│  └── Mailpit (SMTP dev)          :1025  (UI :8025)             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, Shadcn/ui, ReactFlow, D3.js |
-| Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2 |
+| Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Pydantic v2, Alembic |
+| API gateway | nginx — single `/api/v1` entrypoint; case-service runs loopback-only behind it |
 | Process engine | Temporal, BPMN 2.0 |
-| Database | PostgreSQL 16 |
-| Cache | Redis 7 |
-| Event streaming | Redpanda (Kafka-compatible) |
-| Full-text search | OpenSearch 2.17 |
+| Database | PostgreSQL 16 (+ pgvector) |
+| Cache / realtime | Valkey 8 (Redis-compatible) |
 | Object storage | MinIO (S3-compatible) |
-| AI | Ollama (local LLMs), Anthropic Claude API |
-| Auth | JWT (HS256), bcrypt, TOTP MFA, RBAC + ABAC, SSO |
-| Package management | uv (Python), npm (Node) |
+| AI (HxNexus) | Ollama (local default), Anthropic Claude, OpenAI, Google Gemini, Groq, Mistral, DeepSeek, Azure — or any OpenAI-compatible endpoint |
+| Auth | JWT RS256 (RSA-2048), bcrypt, TOTP MFA, WebAuthn passkeys, RBAC + ABAC, SSO (SAML / OIDC) |
+| Secrets | OpenBao — envelope-encrypted, rendered into the app at startup |
+| Encryption at rest | HxVault per-tenant DEK (AES-256-GCM, crypto-shredding) |
+| Package management | uv (Python), npm workspaces (Node) |
+| Load testing | Locust |
 
 ---
 
@@ -92,12 +149,13 @@ Velaris is a production-grade BPM and case management platform built for operati
 | Docker + Compose | 24+ | `docker compose` v2 plugin |
 | uv | 0.4+ | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js | 20+ | LTS recommended |
+| npm | 10+ | Ships with Node |
 | Python | 3.12 | Managed by uv — no manual install needed |
-| Ollama | any | Optional — enables HxNexus AI features |
+| Ollama | any | Optional — enables local HxNexus AI features |
 
 ---
 
-## Quick Start
+## Quick start
 
 ### 1. First-time setup (run once)
 
@@ -107,10 +165,11 @@ chmod +x setup-velaris.sh
 ```
 
 This script:
-- Installs all Python dependencies via `uv sync`
+- Installs all Python dependencies into `.venv/` via `uv sync`
 - Installs Studio npm dependencies
 - Pulls required Docker images
-- Runs all 80 database migrations
+- Runs all database migrations
+- Generates infrastructure secrets (managed by OpenBao)
 - Validates your Velaris product key
 - Creates the superadmin account interactively
 
@@ -125,124 +184,140 @@ This script:
 | Interface | URL |
 |-----------|-----|
 | Studio (main UI) | http://localhost:5173 |
-| Case Service API | http://localhost:8200/docs |
-| Engine API | http://localhost:8100/docs |
+| API + docs (via gateway) | http://localhost:8200/docs |
+| Engine API + docs | http://localhost:8100/docs |
 | Temporal UI | http://localhost:8233 |
 | MinIO console | http://localhost:9001 |
 | Mailpit (dev email) | http://localhost:8025 |
 
-### 4. Stop services
+### 4. Update
+
+```bash
+./update-velaris.sh
+```
+
+Pulls the channel-pinned release, applies any new migrations, and restarts the stack.
+
+### 5. Stop services
 
 ```bash
 ./stop-velaris.sh          # stops Python services + Studio
 ./stop-velaris.sh --all    # also tears down Docker (DB, Temporal, etc.)
 ```
 
-> Stop and start scripts require your system password to prevent accidental or unauthorised shutdowns.
+> Stop scripts require your system password. This prevents accidental or unauthorised shutdowns.
 
----
-
-## Update
+### 6. Uninstall
 
 ```bash
-./update-velaris.sh
+./uninstall-velaris.sh              # interactive — removes containers, volumes, venv, secrets
+./uninstall-velaris.sh --purge      # also remove Docker images and uv
+./uninstall-velaris.sh --delete-dir # also remove the project directory (irreversible)
 ```
-
-Automatically: checks for new version → backs up database → pulls latest code → runs new migrations → restarts services.
 
 ---
 
-## Service Map
+## Marketplace — build &amp; use apps
+
+The Velaris Marketplace is an in-app store for extending the platform — connectors, case-type templates, dashboards, prompt packs, portal themes, and full Studio modules — packaged as content-addressed `.hxapp` bundles.
+
+**Using apps.** Browse the catalogue in Studio, review a package's README, screenshots, and declared outbound domains, then install it per tenant in one click. Every install verifies the bundle checksum and validates the manifest first, and you can exercise any app against disposable data in an isolated **sandbox** before it touches production. Uninstall either revokes access (keeping data) or revokes and deletes the app's data.
+
+**Creating apps.** Package your artifacts as an `.hxapp` with a manifest (id, semver `version`, `type`, and the exact `outbound_domains` it is allowed to call). There are two publishing lanes:
+
+- **Official** — published by the Velaris team; a package earns the Official badge only when the source org, the `official/` folder, **and** the built-in registry all agree, so a package can never self-declare its own tier.
+- **Community** — open to anyone, via fork + pull request to the marketplace repository.
+
+Either way, a package must pass the **Test Suite conformance gate** — deterministic structural checks (valid manifest, resolvable stage transitions, typed form fields, an acyclic rules graph, no hardcoded tenant/user ids) — before it can be submitted. Third-party code runs **out-of-process only**: installed packages extend Velaris through Studio artifacts and out-of-process connectors, never in-process platform code.
+
+> Marketplace repo: `Velaris-App-OS/Marketplace` (`official/` + `community/` folders). Manage everything from the in-app **Marketplace**; see the docs for publishing details.
+
+---
+
+## Service map
 
 ```
 services/
-├── case-service/          # Core platform — cases, auth, AI, all modules
-│   └── case_service/
-│       ├── api/routers/   # 40+ FastAPI routers
-│       ├── auth/          # JWT, RBAC, ABAC, MFA, SSO
-│       ├── db/            # SQLAlchemy models + repository
-│       ├── hxnexus/       # AI assistant (Ollama)
-│       ├── hxgraph/       # Live knowledge graph
-│       ├── hxbridge/      # Connector execution engine
-│       ├── hxshield/      # Security audit + breach detection
-│       ├── hxdeploy/      # CI/CD promotion governance
-│       ├── hxwork/        # Tasks + stories + sprints
-│       ├── hxstream/      # Real-time event tracing
-│       └── middleware/    # Auth, rate limiting, audit, CORS
-├── ai-service/
-├── analytics-service/
-├── audit-service/
-├── connect-service/
-├── form-service/
-├── notification-service/
-├── rules-service/
-├── user-service/
-└── vcs-service/
+├── case-service/          # Active monolith — cases, auth, AI, and all modules
+│   ├── case_service/
+│   │   ├── api/routers/   # 40+ FastAPI routers
+│   │   ├── auth/          # JWT (RS256), RBAC, ABAC, MFA, passkeys
+│   │   ├── db/            # SQLAlchemy models + repository
+│   │   ├── hxnexus/       # AI assistant (multi-provider)
+│   │   ├── hxgraph/       # Knowledge graph
+│   │   ├── hxvault/       # Per-tenant encryption (envelope / crypto-shred)
+│   │   ├── marketplace/   # App store + trust model + conformance gate
+│   │   ├── testsuite/     # Core deterministic test engine
+│   │   ├── hxtest/        # AI test generation (marketplace add-on)
+│   │   ├── hxdeploy/      # Promotion governance
+│   │   ├── middleware/    # Auth, rate limiting, audit, CORS
+│   │   └── temporal/      # Workflow activities + workers
+│   └── tests/             # Extensive phase_* test suite
+├── ai-service/  analytics-service/  audit-service/  connect-service/
+├── form-service/  notification-service/  rules-service/
+├── user-service/  vcs-service/        # modular-split targets the gateway is pre-wired for
+└── …
 
 engine/                    # BPMN process engine (Temporal-backed)
 studio/                    # React frontend (Vite)
-migrations/                # 80 ordered SQL migrations
-releases/
-├── manifest.sql           # Feature flag activation (auto-applied on start)
-└── notes/                 # Release notes per version (vX.Y.Z.md)
+migrations/                # ordered SQL migrations (000–093)
 libs/                      # helix-ir (schema) + helix-sdk
 plugins/                   # auth, cache, db, events, git, integrations, search
-scripts/                   # Superadmin setup, key verification
+load-tests/                # Locust load test suite (4 user classes)
 deploy/
-├── docker-compose/        # Local dev + production compose stack
+├── docker-compose/        # Local dev compose stack (incl. nginx gateway + OpenBao)
 ├── helm/                  # Kubernetes Helm charts
-└── cloudflare-tunnel.example.yml
+└── openbao/               # Secrets-manager config
 ```
+
+> The **API gateway** (nginx) is the only externally exposed door on `:8200`; it routes `/api/v1/*` to the case-service monolith on loopback `:8201`. The gateway's upstreams are pre-wired so analytics, HxGraph, and HxMigrate can split into their own services later with no client change.
 
 ---
 
-## Database Migrations
+## Database migrations
 
-Migrations run automatically on `./start-velaris.sh`. To apply manually:
+Migrations run automatically on `setup-velaris.sh` / `start-velaris.sh`. To inspect manually:
 
 ```bash
-# List all migrations
+# List migrations
 find migrations/ -name "*.sql" | sort
 
 # Apply a specific migration
-PGPASSWORD=<pw> psql -h localhost -U helix -d helix -f migrations/080_versioned_flags.sql
+PGPASSWORD=<pw> psql -h localhost -U helix -d helix -f migrations/093_testsuite_ai_stale.sql
 ```
 
 ---
 
-## API Reference
+## API reference
 
-Both services expose interactive Swagger UIs:
+The platform API is served through the gateway with interactive Swagger UIs:
 
-- **Case Service** — http://localhost:8200/docs
-- **Engine** — http://localhost:8100/docs
+- **API (via gateway)** — http://localhost:8200/docs (full platform API)
+- **Engine** — http://localhost:8100/docs (BPMN process API)
 
-Key Case Service endpoint groups:
+Key endpoint groups:
 
 | Prefix | Description |
 |--------|-------------|
 | `/api/v1/cases` | Case CRUD, stage transitions, locking |
 | `/api/v1/case-types` | Case type designer |
-| `/api/v1/auth` | Login, MFA, SSO, token refresh, user management |
-| `/api/v1/portal` | Customer-facing portal |
-| `/api/v1/analytics` | Dashboards, reporting, process mining |
+| `/api/v1/auth` | Login, MFA, passkeys, token refresh, user management |
+| `/api/v1/my` | Personal assignments, workload, notifications |
+| `/api/v1/queues` | Work queues |
+| `/api/v1/analytics` | Dashboard, reporting |
 | `/api/v1/graph` | HxGraph knowledge graph queries |
 | `/api/v1/nexus` | HxNexus AI assistant |
-| `/api/v1/forms` | Form definitions |
+| `/api/v1/marketplace` | Marketplace — discover and install apps |
+| `/api/v1/testsuite` | Test Suite — runs, history, conformance gate |
+| `/api/v1/hxtest` | HxTest — AI test generation (install-gated add-on) |
+| `/api/v1/hxdbmanager` | HxDB Manager — guarded database operations |
 | `/api/v1/deploy` | HxDeploy promotion governance |
-| `/api/v1/bridge` | HxBridge connector execution |
-| `/api/v1/payments` | Stripe payments (HxConnect) |
-| `/api/v1/identity` | KYC / identity verification (HxConnect) |
-| `/api/v1/esign` | E-signatures via DocuSign (HxConnect) |
-| `/api/v1/work` | HxWork tasks, stories, sprints |
-| `/api/v1/migrate` | HxMigrate data migration jobs |
-| `/api/v1/shield` | HxShield security events |
-| `/api/v1/compliance` | Audit log, compliance reports |
-| `/api/v1/my` | Personal assignments, workload, notifications |
+| `/api/v1/forms` | Form definitions |
+| `/api/v1/portal` | Customer-facing portal + customer accounts |
 
 ---
 
-## HxGraph
+## HxGraph (knowledge graph)
 
 Velaris ships a live semantic knowledge graph at `/api/v1/graph`:
 
@@ -261,46 +336,45 @@ open http://localhost:8200/api/v1/graph/visualize
 
 ---
 
-## Environment Variables
-
-Key variables in `.env`:
-
-| Variable | Description |
-|----------|-------------|
-| `VELARIS_DB_PASSWORD` | PostgreSQL password |
-| `HELIX_CASE_AUTH_SECRET` | JWT signing secret |
-| `HELIX_CASE_AI_PROVIDER` | AI provider: `ollama`, `openai`, `anthropic`, `groq` |
-| `HELIX_CASE_AI_OLLAMA_URL` | Ollama endpoint (default: `http://localhost:11434`) |
-| `VELARIS_REGISTER_URL` | Product key registration server |
-
-Generate secrets:
+## Load testing
 
 ```bash
-openssl rand -hex 32   # for HELIX_CASE_AUTH_SECRET
+# Install Locust (already in .venv)
+uv run locust --version
+
+# Headless smoke test — 40 users, 2 min
+uv run locust -f load-tests/locustfile.py --host http://localhost:8200 \
+    --headless -u 40 -r 2 --run-time 2m
+
+# With HTML report
+uv run locust -f load-tests/locustfile.py --host http://localhost:8200 \
+    --headless -u 40 -r 2 --run-time 5m --html load-tests/report.html
+
+# Interactive web UI (http://localhost:8089)
+uv run locust -f load-tests/locustfile.py --host http://localhost:8200
 ```
+
+Simulated user classes: `CaseWorkerUser` (60%), `ManagerUser` (20%), `DevOpsUser` (10%), `SpikeUser` (10%).
 
 ---
 
-## Releases
+## Secrets & configuration
 
-Release notes live in `releases/notes/`. Each version has its own file:
-
-```
-releases/notes/
-├── README.md       # versioning guide + release checklist
-└── v1.0.0.md       # initial release
-```
+Velaris secrets are managed by **OpenBao** — `setup-velaris.sh` generates them and `start-velaris.sh` renders them into the app at startup (fail-closed: a problem leaves the last-known-good config untouched). There is no manual environment-variable wrangling; for local development an `.env` is created from `.env.example` automatically, and per-tenant data is encrypted at rest by **HxVault**.
 
 ---
 
-## Licence
+## License
 
-| Component | Licence |
+| Component | License |
 |-----------|---------|
-| Core platform (`services/`, `engine/`, `studio/`) | Business Source Licence 1.1 → Apache 2.0 after 4 years |
-| SDK + IR schema (`libs/`) | Apache Licence 2.0 |
-| Plugins (`plugins/`) | Apache Licence 2.0 |
+| Core platform (`services/`, `engine/`, `studio/`) | Business Source License 1.1 → Apache 2.0 after 4 years |
+| SDK + IR schema (`libs/`) | Apache License 2.0 |
+| Plugins (`plugins/`) | Apache License 2.0 |
 
-**BSL 1.1 summary:** You can use, run, and customise Velaris for any internal business purpose. You may sell services, plugins, and applications built on the platform. You may not resell the platform itself, sublicense it, or offer it as a competing SaaS product. See `LICENSE` for full terms.
+**Free to use.** Run, customise, and build on Velaris for any internal business purpose, and sell services, plugins, and applications built on it. The single BSL 1.1 limit: you may not resell the platform itself, sublicense it, or offer it as a competing hosted/SaaS product. Each release's BSL grant converts to Apache 2.0 after four years. See `LICENSE` for the full terms.
 
-For commercial licensing or enterprise agreements: **velaris.app.os@gmail.com**
+<div align="center">
+  <sub>Questions &middot; <a href="mailto:velaris.app.os@gmail.com">velaris.app.os@gmail.com</a></sub>
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:4ecdc4,100:0d9488&height=120&section=footer" width="100%" alt="" />
+</div>

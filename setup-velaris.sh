@@ -154,11 +154,19 @@ _write_if_missing() {
   fi
 }
 
+# Treat the publicly-known dev default as unset so a real secret is generated
+# (older .env files created from .env.example may carry it as a non-empty value)
+sed -i "s|^HELIX_CASE_AUTH_SECRET=helix-dev-secret-change-in-production$|HELIX_CASE_AUTH_SECRET=|" "$ENV_FILE"
+
 _write_if_missing VELARIS_DB_PASSWORD            "$(openssl rand -hex 16)"
+_write_if_missing VELARIS_MINIO_PASSWORD         "$(openssl rand -hex 24)"
 _write_if_missing VELARIS_ADMIN_PASSWORD         "$(openssl rand -hex 16)"
-_write_if_missing VELARIS_SEARCH_PASSWORD        "$(openssl rand -hex 16)"
 _write_if_missing HELIX_CASE_AUTH_SECRET         "$(openssl rand -hex 32)"
 _write_if_missing HELIX_CASE_STORAGE_MASTER_KEY  "$(openssl rand -hex 32)"
+# HxVault (#19) master KEK that wraps per-tenant DEKs — 32 bytes hex. When unset,
+# the app derives a dev KEK from auth_secret (with a startup warning); production
+# should use a dedicated key so crypto-shredding is independent of auth_secret.
+_write_if_missing VELARIS_CASE_KEK               "$(openssl rand -hex 32)"
 _write_if_missing HELIX_CASE_STORAGE_BACKEND     "minio"
 
 # Generate RSA-2048 key pair for JWT RS256 signing (idempotent — skipped if already set).
@@ -189,10 +197,20 @@ else
   ok "HELIX_CASE_AUTH_RSA_PRIVATE_KEY already set — keeping existing key pair"
 fi
 
-# Update DATABASE_URL in .env to use the generated password
+# Update DATABASE_URL in .env to use the generated password.
+# Only fill it in when it's still the .env.example placeholder ("REPLACE") or
+# empty/missing — NEVER clobber a custom URL an operator set on their own
+# server (e.g. a managed/remote Postgres host).
 DB_PASS=$(grep "^VELARIS_DB_PASSWORD=" "$ENV_FILE" | cut -d= -f2)
-sed -i "s|HELIX_CASE_DATABASE_URL=.*|HELIX_CASE_DATABASE_URL=postgresql+asyncpg://helix:${DB_PASS}@localhost:5432/helix|" "$ENV_FILE"
-ok "DATABASE_URL updated with generated password"
+if grep -qE "^HELIX_CASE_DATABASE_URL=\s*$" "$ENV_FILE" 2>/dev/null || \
+   grep -q   "^HELIX_CASE_DATABASE_URL=.*REPLACE" "$ENV_FILE" 2>/dev/null || \
+   ! grep -q "^HELIX_CASE_DATABASE_URL=" "$ENV_FILE" 2>/dev/null; then
+  sed -i "/^HELIX_CASE_DATABASE_URL=/d" "$ENV_FILE"
+  echo "HELIX_CASE_DATABASE_URL=postgresql+asyncpg://helix:${DB_PASS}@localhost:5432/helix" >> "$ENV_FILE"
+  ok "DATABASE_URL set with generated password"
+else
+  ok "HELIX_CASE_DATABASE_URL already customized — keeping existing value"
+fi
 
 # Load the generated vars into this shell so docker compose can use them
 set -o allexport; source "$ENV_FILE"; set +o allexport

@@ -43,8 +43,15 @@ velaris:
   # ── Updates ──
   updates:
     source: "github"                            # "github" or "server"
-    github_repo: "UtpalBhadra93/Velaris-App"    # used when source=github
+    github_repo: "Velaris-App-OS/Velaris-App-OS"    # used when source=github
     server_url: "https://updates.velaris.io/latest"  # used when source=server
+    # ── Channel-based rollout (Group G) ──
+    # This environment follows a release channel; promotion happens centrally
+    # by moving the channel pointer in channels.json — no per-env action.
+    channel: "stable"             # stable (all client installs) | beta (vendor playground only)
+    auto_update: false            # true = apply updates automatically (use with --install-timer)
+    update_window: "02:00-05:00"  # auto updates run only inside this window (empty = anytime)
+    manifest_branch: "main"       # branch serving channels.json (raw)
 
   # ── Audit ──
   audit:

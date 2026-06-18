@@ -62,7 +62,7 @@ postgresql:
     password: helix_dev_password
     database: helix
 
-redis:
+valkey:
   enabled: true
   architecture: standalone
   auth:

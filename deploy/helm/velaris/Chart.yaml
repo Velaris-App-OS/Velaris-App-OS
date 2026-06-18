@@ -1,6 +1,6 @@
 apiVersion: v2
 name: helix
-description: HELIX BPM platform — case-service, engine, worker, Postgres, Redis
+description: HELIX BPM platform — case-service, engine, worker, Postgres, Valkey
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -9,7 +9,7 @@ dependencies:
     version: "15.5.14"
     repository: "https://charts.bitnami.com/bitnami"
     condition: postgresql.enabled
-  - name: redis
-    version: "19.6.4"
+  - name: valkey
+    version: "4.0.2"
     repository: "https://charts.bitnami.com/bitnami"
-    condition: redis.enabled
+    condition: valkey.enabled
