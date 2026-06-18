@@ -46,7 +46,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    allowedHosts: "all",
+    allowedHosts: true,
     fs: {
       // Allow serving files from root node_modules (hoisted monorepo deps)
       allow: [path.resolve(__dirname, ".."), "/home/utpal-bhadra/helix/node_modules"],
