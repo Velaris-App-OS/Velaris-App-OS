@@ -25,7 +25,6 @@ studio/.env
 .env
 .env.local
 .env.*.local
-deploy/openbao/.bao-init.json
 
 # ── Velaris runtime files (generated on install) ──────────
 .velaris-key
@@ -50,12 +49,9 @@ logs/
 *.pt
 *.bin
 uv.lock
+
+# ── Group K — OpenBao local credentials (per-host, generated at runtime) ──
 deploy/openbao/.bao-init.json
-deploy/openbao/agent/role_id
-deploy/openbao/agent/secret_id
-deploy/openbao/agent/secret_id
-deploy/openbao/agent/out/
-deploy/openbao/enabled
 deploy/openbao/agent/role_id
 deploy/openbao/agent/secret_id
 deploy/openbao/agent/out/

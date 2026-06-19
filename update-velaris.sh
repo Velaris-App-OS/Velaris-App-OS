@@ -342,6 +342,27 @@ fi
 step "Step 4/7 — Pulling latest code..."
 cd "$HELIX_DIR"
 
+# Protect per-host OpenBao runtime secrets (unseal keys, root token, AppRole)
+# from the update. They live in the tree but are generated per-server; while any
+# stay git-tracked, a checkout/pull would abort, and a tarball extract would
+# overwrite them. Strategy: back up → clear local mods so git won't refuse →
+# update → restore the host's live copies → verify → drop the backup.
+_SECRET_FILES=(
+  "deploy/openbao/.bao-init.json"
+  "deploy/openbao/agent/role_id"
+  "deploy/openbao/agent/secret_id"
+)
+_SECRET_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/velaris-secrets.XXXXXX")"
+for _f in "${_SECRET_FILES[@]}"; do
+  if [ -f "$_f" ]; then
+    mkdir -p "$_SECRET_BACKUP/$(dirname "$_f")"
+    cp -p "$_f" "$_SECRET_BACKUP/$_f"
+    if git ls-files --error-unmatch "$_f" >/dev/null 2>&1; then
+      git checkout -- "$_f" 2>/dev/null || true   # tracked + modified → drop local edit
+    fi
+  fi
+done
+
 if [[ "$UPDATE_SOURCE" == "github" ]]; then
   git fetch origin --tags
   git checkout "v${LATEST_VERSION}" 2>/dev/null || git checkout "tags/v${LATEST_VERSION}" 2>/dev/null || {
@@ -355,6 +376,23 @@ elif [[ "$UPDATE_SOURCE" == "server" ]]; then
   curl -sf --max-time 120 -o /tmp/velaris-update.tar.gz "$TARBALL_URL"
   tar -xzf /tmp/velaris-update.tar.gz -C "$HELIX_DIR" --strip-components=1
   rm -f /tmp/velaris-update.tar.gz
+fi
+
+# Restore the host's live secrets (overwrites whatever the update brought),
+# verify each, and only drop the backup on full success.
+_secrets_ok=1
+for _f in "${_SECRET_FILES[@]}"; do
+  if [ -f "$_SECRET_BACKUP/$_f" ]; then
+    mkdir -p "$(dirname "$_f")"
+    if cp -p "$_SECRET_BACKUP/$_f" "$_f" && cmp -s "$_SECRET_BACKUP/$_f" "$_f"; then :; else
+      _secrets_ok=0; red "  ✗ Failed to restore OpenBao secret: $_f"
+    fi
+  fi
+done
+if [ "$_secrets_ok" = 1 ]; then
+  rm -rf "$_SECRET_BACKUP"
+else
+  red "  Kept secret backup at: $_SECRET_BACKUP — restore manually before restarting."
 fi
 
 green "  ✓ Code updated to v$LATEST_VERSION"
