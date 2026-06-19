@@ -25,6 +25,7 @@ studio/.env
 .env
 .env.local
 .env.*.local
+deploy/openbao/.bao-init.json
 
 # ── Velaris runtime files (generated on install) ──────────
 .velaris-key
