@@ -19,12 +19,12 @@ mkdir -p "$OUT_DIR"
 rm -f "$RENDERED"
 
 # 1. Server must be up AND unsealed (health 200/429 = active/standby unsealed)
-HEALTH=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8300/v1/sys/health" || echo "000")
+HEALTH=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8350/v1/sys/health" || echo "000")
 case "$HEALTH" in
   200|429) ;;
   503) echo "✗ OpenBao is SEALED — unseal first. .env left untouched."; exit 1 ;;
   501) echo "✗ OpenBao not initialized — run ./scripts/secrets-init.sh. .env left untouched."; exit 1 ;;
-  *)   echo "✗ OpenBao unreachable on :8300 (health=$HEALTH). .env left untouched."; exit 1 ;;
+  *)   echo "✗ OpenBao unreachable on :8350 (health=$HEALTH). .env left untouched."; exit 1 ;;
 esac
 
 # 2. One-shot agent render — throwaway container in the server's netns,

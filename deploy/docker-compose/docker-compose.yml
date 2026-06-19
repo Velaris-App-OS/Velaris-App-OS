@@ -199,7 +199,7 @@ services:
   # <<< P25b mailpit
 
   # >>> Group K: OpenBao secrets manager
-  # Host port 8300 (8200 belongs to case-service). Loopback-only binding:
+  # Host port 8350 (8200 belongs to case-service). Loopback-only binding:
   # nothing off-host can reach the secrets API. The app does NOT talk to
   # OpenBao at runtime — the agent renders .env at platform start.
   openbao:
@@ -209,7 +209,7 @@ services:
     cap_add:
       - IPC_LOCK        # mlock: keep secrets out of swap
     ports:
-      - "127.0.0.1:8300:8200"
+      - "127.0.0.1:8350:8200"
     volumes:
       - openbao-data:/openbao/data
       - ../openbao/server.hcl:/openbao/config/server.hcl:ro

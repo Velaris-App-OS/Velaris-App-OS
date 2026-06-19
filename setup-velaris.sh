@@ -256,6 +256,44 @@ else
   warn "Docker not accessible — skipping image pull."
 fi
 
+# ── Step 5b: OpenBao secrets bootstrap (Group K — only if enabled) ─
+# Runs only when the sentinel deploy/openbao/enabled is present. .env was
+# already populated in Step 1b (existing values kept, missing ones generated),
+# so this just brings up OpenBao, initialises it on a fresh install (or unseals
+# an existing one), then imports those .env secrets into the vault — OpenBao is
+# the source of truth from here on. Every failure is non-fatal (warn, continue).
+if [ -f "$HELIX_DIR/deploy/openbao/enabled" ]; then
+  step "Step 5b — Bootstrapping OpenBao secrets..."
+  INIT_FILE="$HELIX_DIR/deploy/openbao/.bao-init.json"
+
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d openbao 2>/dev/null \
+    || warn "Could not start the OpenBao container"
+
+  # Wait for OpenBao to answer (471=uninitialised, 472=sealed, 200/429=unsealed).
+  BAO_HEALTH="000"
+  for i in $(seq 1 15); do
+    BAO_HEALTH=$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" 2>/dev/null || echo "000")
+    [ "$BAO_HEALTH" != "000" ] && break
+    sleep 1
+  done
+
+  if [ ! -f "$INIT_FILE" ] && [ "$BAO_HEALTH" = "471" ]; then
+    # Fresh OpenBao — one-time init: writes the keyfile, unseals, enables KV + AppRole.
+    if "$HELIX_DIR/scripts/secrets-init.sh"; then ok "OpenBao initialised"; else warn "OpenBao init failed — continuing"; fi
+  else
+    # Already initialised — just make sure it's unsealed.
+    if "$HELIX_DIR/scripts/secrets-unseal.sh" >/dev/null 2>&1; then ok "OpenBao unsealed"; else warn "OpenBao still sealed — run ./scripts/secrets-unseal.sh"; fi
+  fi
+
+  # Import the secrets from .env into OpenBao (source of truth going forward).
+  if "$HELIX_DIR/scripts/secrets-push.sh" --sync-env >/dev/null 2>&1; then
+    ok "Secrets synced from .env into OpenBao"
+  else
+    warn "secrets-push failed — run ./scripts/secrets-push.sh --sync-env once OpenBao is unsealed"
+  fi
+fi
+
 # ── Step 6: Check migrations ──────────────────────────────────────
 step "Step 6/9 — Checking migrations..."
 MIGRATION_COUNT=$(find "$HELIX_DIR/migrations" -name "*.sql" | wc -l)

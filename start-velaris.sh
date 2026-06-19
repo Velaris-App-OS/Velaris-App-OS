@@ -30,7 +30,7 @@ if [ -f "$HELIX_DIR/deploy/openbao/enabled" ]; then
   BAO_HEALTH="000"
   for i in $(seq 1 15); do
     BAO_HEALTH=$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
-      "http://127.0.0.1:8300/v1/sys/health?sealedcode=472&uninitcode=471" || echo "000")
+      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || echo "000")
     [ "$BAO_HEALTH" != "000" ] && break
     sleep 1
   done
