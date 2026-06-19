@@ -752,6 +752,12 @@ function AiTab() {
               </table>
             </div>
           )}
+
+          {runResult && runResultCols.length === 0 && (
+            <div style={{ marginTop: 14, padding: "10px 12px", ...S.card, fontSize: 12, color: "var(--text-muted)" }}>
+              0 rows found{runResult.duration_ms != null ? ` · ${fmtMs(runResult.duration_ms)}` : ""}
+            </div>
+          )}
         </div>
       )}
     </div>
