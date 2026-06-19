@@ -6,9 +6,14 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: temporal
-      POSTGRES_PASSWORD: temporal
+      # Default "temporal" kept as fallback so existing setups still boot, but
+      # set VELARIS_TEMPORAL_DB_PASSWORD in your .env — weak default creds plus
+      # an exposed port were the 2026-06-19 cryptojacker entry vector.
+      POSTGRES_PASSWORD: ${VELARIS_TEMPORAL_DB_PASSWORD:-temporal}
       POSTGRES_DB: temporal
-    ports: ["5433:5432"]
+    # NO published port: only the `temporal` container connects to this DB, over
+    # the internal compose network (POSTGRES_SEEDS=temporal-db). Never expose a
+    # database to the host or network unless something off-Docker must reach it.
     volumes: [temporal-db:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U temporal"]
@@ -23,16 +28,19 @@ services:
       - DB=postgres12
       - DB_PORT=5432
       - POSTGRES_USER=temporal
-      - POSTGRES_PWD=temporal
+      - POSTGRES_PWD=${VELARIS_TEMPORAL_DB_PASSWORD:-temporal}
       - POSTGRES_SEEDS=temporal-db
-    ports: ["7233:7233"]
+    # Loopback-only: the host case-service reaches Temporal at 127.0.0.1:7233.
+    # Not reachable from the network.
+    ports: ["127.0.0.1:7233:7233"]
 
   temporal-ui:
     image: temporalio/ui:2.31.2
     depends_on: [temporal]
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
-    ports: ["8233:8080"]
+    # Loopback-only admin UI. Reach it via SSH tunnel, not over the network.
+    ports: ["127.0.0.1:8233:8080"]
 
   helix-db:
     image: postgres:16-alpine
@@ -40,7 +48,9 @@ services:
       POSTGRES_USER: helix
       POSTGRES_PASSWORD: ${VELARIS_DB_PASSWORD:?not set - run scripts/secrets-render.sh or pass --env-file ~/helix/.env}
       POSTGRES_DB: helix
-    ports: ["5432:5432"]
+    # Loopback-only: the host case-service connects at 127.0.0.1:5432. This is
+    # your application database — it must NEVER be reachable from the network.
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [helix-db:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U helix"]
@@ -52,7 +62,8 @@ services:
     # SSPL). Protocol-compatible drop-in: same port, same client library.
     # Architecture Report §11 mandates this swap.
     image: valkey/valkey:8-alpine
-    ports: ["6379:6379"]
+    # Loopback-only: host case-service reaches the cache at 127.0.0.1:6379.
+    ports: ["127.0.0.1:6379:6379"]
     volumes: [cache-data:/data]
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
@@ -68,7 +79,8 @@ services:
       - --overprovisioned
       - --kafka-addr PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr PLAINTEXT://events:9092
-    ports: ["9092:9092"]
+    # Loopback-only: host case-service reaches the broker at 127.0.0.1:9092.
+    ports: ["127.0.0.1:9092:9092"]
     volumes: [events-data:/var/lib/redpanda/data]
 
 
@@ -84,7 +96,8 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    ports: ["11434:11434"]
+    # Loopback-only: host case-service reaches the model server at 127.0.0.1:11434.
+    ports: ["127.0.0.1:11434:11434"]
     volumes:
       - ollama-data:/root/.ollama
       - ../../models:/models:ro
@@ -128,7 +141,7 @@ services:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - helix-prometheus-data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     profiles: [observability]
@@ -140,8 +153,8 @@ services:
     volumes:
       - ./observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"
-      - "4318:4318"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
     profiles: [observability]
   # <<< P23 observability services
 
@@ -153,9 +166,11 @@ services:
     environment:
       - MINIO_ROOT_USER=helix
       - MINIO_ROOT_PASSWORD=${VELARIS_MINIO_PASSWORD:?not set - run scripts/secrets-render.sh or pass --env-file ~/helix/.env}
+    # Loopback-only: API (9000) for the host case-service, console (9001) via
+    # SSH tunnel. Object storage must not be network-reachable.
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - helix-minio-data:/data
     healthcheck:
@@ -181,10 +196,12 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     container_name: helix-mailpit
+    # Loopback-only. mailpit accepts any SMTP auth (MP_SMTP_AUTH_ACCEPT_ANY) and
+    # must never be network-reachable — it would be an open relay / data leak.
     ports:
-      - "1025:1025"   # SMTP
-      - "1143:1143"   # IMAP
-      - "8025:8025"   # Web UI
+      - "127.0.0.1:1025:1025"   # SMTP
+      - "127.0.0.1:1143:1143"   # IMAP
+      - "127.0.0.1:8025:8025"   # Web UI
     environment:
       - MP_SMTP_AUTH_ACCEPT_ANY=1
       - MP_SMTP_AUTH_ALLOW_INSECURE=1
