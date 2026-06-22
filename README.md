@@ -374,6 +374,18 @@ Velaris secrets are managed by **OpenBao** — `setup-velaris.sh` generates them
 
 **Free to use.** Run, customise, and build on Velaris for any internal business purpose, and sell services, plugins, and applications built on it. The single BSL 1.1 limit: you may not resell the platform itself, sublicense it, or offer it as a competing hosted/SaaS product. Each release's BSL grant converts to Apache 2.0 after four years. See `LICENSE` for the full terms.
 
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Velaris-App-OS%2FVelaris-App-OS&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Velaris-App-OS/Velaris-App-OS&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Velaris-App-OS/Velaris-App-OS&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Velaris-App-OS/Velaris-App-OS&type=date&legend=top-left" />
+ </picture>
+</a>
+
 <div align="center">
   <sub>Questions &middot; <a href="mailto:velaris.app.os@gmail.com">velaris.app.os@gmail.com</a></sub>
   <img src="https://capsule-render.vercel.app/api?type=waving&color=0:4ecdc4,100:0d9488&height=120&section=footer" width="100%" alt="" />
