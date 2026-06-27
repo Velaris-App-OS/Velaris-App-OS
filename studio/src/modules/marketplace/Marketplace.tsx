@@ -320,8 +320,13 @@ const S: Record<string, React.CSSProperties> = {
 
 // ── PackageCard ───────────────────────────────────────────────────────────────
 
-function PackageCard({ pkg, onSelect, onInstall, canInstall, selected }:
-  { pkg: MktPackage; onSelect: () => void; onInstall: (pkg: MktPackage) => void; canInstall: boolean; selected: boolean }) {
+function PackageCard({ pkg, onSelect, onInstall, canInstall, installed, requested, selected }:
+  { pkg: MktPackage; onSelect: () => void; onInstall: (pkg: MktPackage) => void;
+    canInstall: boolean; installed: boolean; requested: boolean; selected: boolean }) {
+  const doneBtn = (color: string): React.CSSProperties => ({
+    ...S.btn, width: "100%", padding: "8px 0", background: "var(--bg-subtle)",
+    color, cursor: "default",
+  });
   return (
     <div
       style={{ ...S.card, borderColor: selected ? "var(--accent)" : "var(--border-subtle)",
@@ -357,16 +362,22 @@ function PackageCard({ pkg, onSelect, onInstall, canInstall, selected }:
         </div>
         {/* Action button — full width so any label length fits */}
         {canInstall && pkg.publisher_tier === "official" && (
-          <button style={{ ...S.btn, background: "#0d9488", width: "100%", padding: "8px 0" }}
-            onClick={e => { e.stopPropagation(); onInstall(pkg); }}>
-            Request Release
-          </button>
+          installed
+            ? <button disabled style={doneBtn("var(--text-muted)")}>✓ Installed</button>
+            : requested
+              ? <button disabled style={doneBtn("#0d9488")}>✓ Requested for Release</button>
+              : <button style={{ ...S.btn, background: "#0d9488", width: "100%", padding: "8px 0" }}
+                  onClick={e => { e.stopPropagation(); onInstall(pkg); }}>
+                  Request Release
+                </button>
         )}
         {canInstall && pkg.publisher_tier !== "official" && (
-          <button style={{ ...S.btn, width: "100%", padding: "8px 0" }}
-            onClick={e => { e.stopPropagation(); onInstall(pkg); }}>
-            {pkg.price === "paid" ? "Get" : "Install"}
-          </button>
+          installed
+            ? <button disabled style={doneBtn("var(--text-muted)")}>✓ Installed</button>
+            : <button style={{ ...S.btn, width: "100%", padding: "8px 0" }}
+                onClick={e => { e.stopPropagation(); onInstall(pkg); }}>
+                {pkg.price === "paid" ? "Get" : "Install"}
+              </button>
         )}
       </div>
     </div>
@@ -375,8 +386,13 @@ function PackageCard({ pkg, onSelect, onInstall, canInstall, selected }:
 
 // ── DetailPanel ───────────────────────────────────────────────────────────────
 
-function DetailPanel({ pkg, onClose, onInstall, canInstall, isManager }:
-  { pkg: MktPackage; onClose: () => void; onInstall: (pkg: MktPackage) => void; canInstall: boolean; isManager: boolean }) {
+function DetailPanel({ pkg, onClose, onInstall, canInstall, installed, requested, isManager }:
+  { pkg: MktPackage; onClose: () => void; onInstall: (pkg: MktPackage) => void;
+    canInstall: boolean; installed: boolean; requested: boolean; isManager: boolean }) {
+  const doneFootBtn = (color: string): React.CSSProperties => ({
+    ...S.btn, width: "100%", padding: "11px 0", fontSize: 13,
+    background: "var(--bg-subtle)", color, cursor: "default",
+  });
   return (
     <div style={S.panel}>
       {/* Header */}
@@ -493,20 +509,29 @@ function DetailPanel({ pkg, onClose, onInstall, canInstall, isManager }:
         <div style={S.panelFoot}>
           {pkg.publisher_tier === "official"
             ? <>
-                <button style={{ ...S.btn, width: "100%", padding: "11px 0", fontSize: 13, background: "#0d9488" }}
-                  onClick={() => onInstall(pkg)}>
-                  Request for Next Release
-                </button>
+                {installed
+                  ? <button disabled style={doneFootBtn("var(--text-muted)")}>✓ Installed</button>
+                  : requested
+                    ? <button disabled style={doneFootBtn("#0d9488")}>✓ Requested for Release</button>
+                    : <button style={{ ...S.btn, width: "100%", padding: "11px 0", fontSize: 13, background: "#0d9488" }}
+                        onClick={() => onInstall(pkg)}>
+                        Request for Next Release
+                      </button>
+                }
                 <div style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", marginTop: 8 }}>
-                  Official packages are bundled into the next deployment cycle via HxDeploy.
-                  They roll through your environments (dev → UAT → prod) automatically.
+                  {requested && !installed
+                    ? "Pending admin approval in the Review Queue. Once approved it is installed for your tenant."
+                    : "Official packages are flagged for the next release cycle. An admin approves them in the Review Queue, which installs them for this tenant."}
                 </div>
               </>
             : <>
-                <button style={{ ...S.btn, width: "100%", padding: "11px 0", fontSize: 13 }}
-                  onClick={() => onInstall(pkg)}>
-                  {pkg.price === "paid" ? "Enter Licence Key & Install to Sandbox" : "Install to Sandbox"}
-                </button>
+                {installed
+                  ? <button disabled style={doneFootBtn("var(--text-muted)")}>✓ Installed</button>
+                  : <button style={{ ...S.btn, width: "100%", padding: "11px 0", fontSize: 13 }}
+                      onClick={() => onInstall(pkg)}>
+                      {pkg.price === "paid" ? "Enter Licence Key & Install to Sandbox" : "Install to Sandbox"}
+                    </button>
+                }
                 <div style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", marginTop: 8 }}>
                   Installs into an isolated sandbox workspace. Admin approval required before production.
                 </div>
@@ -610,6 +635,7 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
   const [selected,     setSelected]     = useState<MktPackage | null>(null);
   const [installing,   setInstalling]   = useState<MktPackage | null>(null);
   const [installedIds, setInstalledIds] = useState<Set<string>>(new Set());
+  const [requestedIds, setRequestedIds] = useState<Set<string>>(new Set());
   const [packages,      setPackages]      = useState<MktPackage[]>(MOCK_PACKAGES);
   const [tagCategories, setTagCategories] = useState<TagCategory[]>([]);
   const [typeCategories,setTypeCategories]= useState<MktTypeCategory[]>([]);
@@ -625,10 +651,23 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
       apiFetch("/packages").then(r => r.json()).catch(() => null),
       apiFetch("/tags").then(r => r.json()).catch(() => null),
       apiFetch("/types").then(r => r.json()).catch(() => null),
-    ]).then(([pkgData, tagData, typeData]) => {
+      // Seed button state so already-requested / already-installed packages persist
+      // across a page refresh (both endpoints are admin-only → null for other roles).
+      apiFetch("/release-requests").then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch("/installs").then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([pkgData, tagData, typeData, rrData, instData]) => {
       if (pkgData?.packages?.length) setPackages(pkgData.packages);
       else setPackages(MOCK_PACKAGES);
       setApiError(!pkgData);
+
+      if (rrData?.requests?.length)
+        setRequestedIds(new Set(rrData.requests.map((r: any) => r.package_id)));
+      if (instData?.installs?.length)
+        setInstalledIds(prev => {
+          const next = new Set(prev);
+          instData.installs.forEach((i: any) => next.add(i.package_id));
+          return next;
+        });
 
       if (tagData?.categories) {
         const cats: TagCategory[] = Object.entries(tagData.categories).map(
@@ -705,6 +744,7 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
       if (installing.publisher_tier === "official") {
         // Official packages: flag for next release cycle — no sandbox
         await apiFetch(`/packages/${encodeURIComponent(installing.id)}/request-release`, { method: "POST" });
+        setRequestedIds(prev => new Set(prev).add(installing.id));
       } else {
         // Community packages: create sandbox workspace + install
         const wsRes = await apiFetch("/workspaces", {
@@ -721,8 +761,8 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
           body: JSON.stringify({ package_id: installing.id, licence_key: licenceKey || null }),
         });
         if (!installRes.ok) throw new Error("Failed to install package");
+        setInstalledIds(prev => new Set(prev).add(installing.id));
       }
-      setInstalledIds(prev => new Set(prev).add(installing.id));
     } catch (err: any) {
       alert(err?.message ?? "Install failed. Check workspace limit or try again.");
     } finally {
@@ -916,7 +956,9 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
                       selected={selected?.id === pkg.id}
                       onSelect={() => setSelected(s => s?.id === pkg.id ? null : pkg)}
                       onInstall={setInstalling}
-                      canInstall={canInstall && !installedIds.has(pkg.id)} />
+                      canInstall={canInstall}
+                      installed={installedIds.has(pkg.id)}
+                      requested={requestedIds.has(pkg.id)} />
                   ))}
                 </div>
               );
@@ -932,7 +974,9 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
                           selected={selected?.id === pkg.id}
                           onSelect={() => setSelected(s => s?.id === pkg.id ? null : pkg)}
                           onInstall={setInstalling}
-                          canInstall={canInstall && !installedIds.has(pkg.id)} />
+                          canInstall={canInstall}
+                          installed={installedIds.has(pkg.id)}
+                          requested={requestedIds.has(pkg.id)} />
                       ))}
                     </div>
                   </>
@@ -946,7 +990,9 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
                           selected={selected?.id === pkg.id}
                           onSelect={() => setSelected(s => s?.id === pkg.id ? null : pkg)}
                           onInstall={setInstalling}
-                          canInstall={canInstall && !installedIds.has(pkg.id)} />
+                          canInstall={canInstall}
+                          installed={installedIds.has(pkg.id)}
+                          requested={requestedIds.has(pkg.id)} />
                       ))}
                     </div>
                   </>
@@ -994,7 +1040,8 @@ function BrowseTab({ canInstall, isManager }: { canInstall: boolean; isManager: 
         {/* Detail panel */}
         {selected && (
           <DetailPanel pkg={selected} onClose={() => setSelected(null)}
-            onInstall={setInstalling} canInstall={canInstall && !installedIds.has(selected.id)}
+            onInstall={setInstalling} canInstall={canInstall}
+            installed={installedIds.has(selected.id)} requested={requestedIds.has(selected.id)}
             isManager={isManager} />
         )}
       </div>
@@ -1505,19 +1552,32 @@ function ReviewQueueTab() {
   const [rejecting,  setRejecting]  = useState<string | null>(null);
   const [rejectNote, setRejectNote] = useState("");
   const [updates,    setUpdates]    = useState<any[]>([]);
+  const [releaseReqs,setReleaseReqs]= useState<any[]>([]);
 
   const load = () => {
     setLoading(true);
     Promise.all([
       apiFetch("/review-queue").then(r => r.json()),
       apiFetch("/updates").then(r => r.json()),
-    ]).then(([q, u]) => {
+      apiFetch("/release-requests").then(r => r.json()),
+    ]).then(([q, u, rr]) => {
       setQueue(q.queue ?? []);
       setUpdates(u.updates ?? []);
+      setReleaseReqs(rr.requests ?? []);
       setLoading(false);
     }).catch(() => setLoading(false));
   };
   React.useEffect(load, []);
+
+  const approveRelease = async (id: string) => {
+    await apiFetch(`/release-requests/${id}/approve`, { method: "POST" });
+    load();
+  };
+
+  const rejectRelease = async (id: string) => {
+    await apiFetch(`/release-requests/${id}/reject`, { method: "POST" });
+    load();
+  };
 
   const approve = async (wsId: string, packageIds?: string[]) => {
     await apiFetch(`/review-queue/${wsId}/approve`, {
@@ -1587,6 +1647,40 @@ function ReviewQueueTab() {
                   )}
                   <button style={{ ...S.btn, ...S.btnGhost, fontSize: 11 }} onClick={() => dismissUpdate(upd.id)}>
                     Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* Official package release requests */}
+      {releaseReqs.length > 0 && (
+        <>
+          <div style={S.sectionHd}>Official Package Release Requests — {releaseReqs.length}</div>
+          {releaseReqs.map(rr => (
+            <div key={rr.id} style={{ ...S.card, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 2 }}>
+                    {rr.package_id.split("/").pop()}{" "}
+                    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>v{rr.package_version}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    Requested by {rr.requested_by}
+                    {rr.created_at && ` · ${new Date(rr.created_at).toLocaleDateString()}`}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button style={{ ...S.btn, fontSize: 11, background: "#0d9488" }}
+                    onClick={() => approveRelease(rr.id)}>
+                    Approve &amp; Install
+                  </button>
+                  <button style={{ ...S.btn, background: "#ef44441a", color: "#ef4444",
+                    border: "1px solid #ef444430", fontSize: 11 }}
+                    onClick={() => rejectRelease(rr.id)}>
+                    Reject
                   </button>
                 </div>
               </div>

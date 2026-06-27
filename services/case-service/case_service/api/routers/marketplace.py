@@ -1786,6 +1786,88 @@ async def list_release_requests(
     ]}
 
 
+@router.post("/release-requests/{request_id}/approve")
+async def approve_release_request(
+    request_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Approve a pending official-package release request → install it for this tenant.
+
+    On a single environment there is no separate HxDeploy pipeline, so admin
+    approval here is what activates the package: it creates (or reactivates) the
+    `marketplace_installs` row that feature-gates the app. The request row is
+    deleted once fulfilled — the install row (with approved_by / installed_at)
+    becomes the source of truth, and keeping a terminal-status request row would
+    collide with the (tenant_id, package_id, status) unique constraint on the
+    next request cycle.
+    """
+    _require_admin(user)
+    from case_service.db.models import MarketplaceReleaseRequestModel
+    try:
+        rid = uuid.UUID(request_id)
+    except ValueError:
+        raise HTTPException(404, "Release request not found")
+    req = await session.get(MarketplaceReleaseRequestModel, rid)
+    if not req or req.tenant_id != (user.tenant_id or "default") or req.status != "pending":
+        raise HTTPException(404, "Release request not found")
+
+    package_id = req.package_id
+    pkg = await session.get(MarketplacePackageCacheModel, package_id)
+    existing_r = await session.execute(
+        select(MarketplaceInstallModel).where(
+            MarketplaceInstallModel.tenant_id == req.tenant_id,
+            MarketplaceInstallModel.package_id == package_id,
+        )
+    )
+    install = existing_r.scalar_one_or_none()
+    if install is None:
+        session.add(MarketplaceInstallModel(
+            tenant_id=req.tenant_id,
+            package_id=package_id,
+            package_version=req.package_version,
+            package_type=pkg.package_type if pkg else "module",
+            approved_by=user.user_id,
+            workspace_id=None,
+        ))
+    elif install.revoked_at is not None:
+        # Re-approving a previously uninstalled package — reactivate in place.
+        install.revoked_at      = None
+        install.package_version = req.package_version
+        install.approved_by     = user.user_id
+        install.installed_at    = _utcnow()
+
+    # Fulfilled — drop the request row (see docstring re: unique constraint).
+    await session.delete(req)
+    await session.commit()
+    return {"status": "approved", "package_id": package_id}
+
+
+@router.post("/release-requests/{request_id}/reject")
+async def reject_release_request(
+    request_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Reject/cancel a pending official-package release request.
+
+    The row is deleted (not status-flipped) so the developer can re-request later
+    without tripping the (tenant_id, package_id, status) unique constraint.
+    """
+    _require_admin(user)
+    from case_service.db.models import MarketplaceReleaseRequestModel
+    try:
+        rid = uuid.UUID(request_id)
+    except ValueError:
+        raise HTTPException(404, "Release request not found")
+    req = await session.get(MarketplaceReleaseRequestModel, rid)
+    if not req or req.tenant_id != (user.tenant_id or "default") or req.status != "pending":
+        raise HTTPException(404, "Release request not found")
+    await session.delete(req)
+    await session.commit()
+    return {"status": "rejected"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SOURCE DECOMMISSIONING
 #  Removing a source is irreversible. It triggers a decommissioning flow:
