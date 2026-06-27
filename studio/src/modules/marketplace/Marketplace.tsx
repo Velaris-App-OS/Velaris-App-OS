@@ -1556,14 +1556,17 @@ function ReviewQueueTab() {
 
   const load = () => {
     setLoading(true);
+    // Per-fetch catch: one failing endpoint must not blank the whole tab
+    // (e.g. /release-requests erroring should still let submissions render, and
+    //  vice-versa). Mirrors BrowseTab's resilient loading.
     Promise.all([
-      apiFetch("/review-queue").then(r => r.json()),
-      apiFetch("/updates").then(r => r.json()),
-      apiFetch("/release-requests").then(r => r.json()),
+      apiFetch("/review-queue").then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch("/updates").then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch("/release-requests").then(r => r.ok ? r.json() : null).catch(() => null),
     ]).then(([q, u, rr]) => {
-      setQueue(q.queue ?? []);
-      setUpdates(u.updates ?? []);
-      setReleaseReqs(rr.requests ?? []);
+      setQueue(q?.queue ?? []);
+      setUpdates(u?.updates ?? []);
+      setReleaseReqs(rr?.requests ?? []);
       setLoading(false);
     }).catch(() => setLoading(false));
   };
