@@ -242,7 +242,7 @@ async def build_http_connector(
 
 async def generate_from_openapi(spec_text: str, connector_name: str) -> dict:
     """Call HxNexus to generate an http_custom connector config from an OpenAPI spec."""
-    prompt = f"""You are a Helix connector generator. Given this OpenAPI/Swagger spec, generate a connector configuration.
+    prompt = f"""You are a Velaris connector generator. Given this OpenAPI/Swagger spec, generate a connector configuration.
 
 OpenAPI spec:
 {spec_text[:8000]}
@@ -260,7 +260,7 @@ Return a JSON object with these exact keys:
       "auth_type": "none|bearer|basic",
       "body_template": "JSON string template with {{var}} placeholders or empty",
       "response_mapping": {{"case_field": "response.json.dotpath"}},
-      "step_type_suggestion": "suggested Helix step type name"
+      "step_type_suggestion": "suggested Velaris step type name"
     }}
   ],
   "auth_notes": "brief description of authentication required",
@@ -269,7 +269,7 @@ Return a JSON object with these exact keys:
 
     try:
         from case_service.hxnexus.factory import generate_json
-        result = await generate_json(prompt, system="You are a Helix BPM connector configuration generator.")
+        result = await generate_json(prompt, system="You are a Velaris BPM connector configuration generator.")
         if result:
             return result
     except Exception as exc:

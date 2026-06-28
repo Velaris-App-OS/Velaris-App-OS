@@ -259,7 +259,7 @@ async def generate_article_content(
     try:
         from case_service.hxnexus.factory import get_llm_backend
         llm = get_llm_backend()
-        prompt = f"""You are a technical documentation writer for a BPM platform called Helix.
+        prompt = f"""You are a technical documentation writer for a BPM platform called Velaris.
 Write a comprehensive documentation article about: {concept}
 
 Platform context from HxGraph:

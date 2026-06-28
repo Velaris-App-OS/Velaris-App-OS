@@ -622,7 +622,7 @@ async def generate_stories(
 
     from case_service.hxnexus.factory import generate_json
     prompt = (
-        f"Generate user stories for this Helix artifact:\n{artifact_context}\n\n"
+        f"Generate user stories for this Velaris artifact:\n{artifact_context}\n\n"
         "Create 5-8 user stories covering: happy path, edge cases, error handling, SLA compliance, and admin use cases.\n"
         'Return JSON: {"stories": [{"title": "...", "description": "...", "acceptance_criteria": "...", "story_points": 3}]}'
     )

@@ -288,7 +288,7 @@ def build_zip(pkg: AppPackageModel) -> bytes:
         readme = "\n".join([
             f"# {pkg.name} v{pkg.version}",
             f"",
-            f"Packaged from HELIX BPM Platform.",
+            f"Packaged from Velaris BPM Platform.",
             f"",
             f"## Contents",
             *[f"- {k}: {v}" for k, v in manifest.items() if isinstance(v, int)],

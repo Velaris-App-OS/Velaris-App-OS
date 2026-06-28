@@ -38,7 +38,7 @@ async def classify_risk(package_manifest: dict, to_env: str) -> dict:
     notes   = package_manifest.get("notes", "")
 
     prompt = (
-        f"You are a deployment risk classifier for Helix BPM.\n"
+        f"You are a deployment risk classifier for Velaris BPM.\n"
         f"A package is being promoted to environment: {to_env}\n"
         f"Package contents:\n"
         f"- Case types changed/added: {len(changes)}\n"

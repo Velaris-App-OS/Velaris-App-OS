@@ -51,13 +51,20 @@ function RunTab() {
   const [result, setResult] = useState<any>(null);
 
   useEffect(() => {
-    authFetch(`${TS}/suites`).then(r => r.json()).then(d => setSuites(d.builtin || [])).catch(() => {});
+    // Builtin suites run by name; stored (e.g. generated) run by their uuid —
+    // the /run endpoint accepts either (see _resolve_suite). Merge both so
+    // generated suites are runnable here, not just visible in the Generated tab.
+    authFetch(`${TS}/suites`).then(r => r.json()).then(d => {
+      const builtin = (d.builtin || []).map((s: any) => ({ ...s, ref: s.name }));
+      const stored  = (d.stored  || []).map((s: any) => ({ ...s, ref: s.id }));
+      setSuites([...builtin, ...stored]);
+    }).catch(() => {});
   }, []);
 
-  const run = async (name: string, isolate: boolean) => {
-    setRunning(name); setResult(null);
+  const run = async (ref: string, isolate: boolean) => {
+    setRunning(ref); setResult(null);
     try {
-      const r = await authFetch(`${TS}/run`, { method: "POST", body: JSON.stringify({ suite: name, isolate }) });
+      const r = await authFetch(`${TS}/run`, { method: "POST", body: JSON.stringify({ suite: ref, isolate }) });
       setResult(await r.json());
     } finally { setRunning(null); }
   };
@@ -65,16 +72,16 @@ function RunTab() {
   return (
     <div>
       {suites.map(s => (
-        <div key={s.name} style={S.card}>
+        <div key={s.ref} style={S.card}>
           <div style={S.row}>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, fontSize: 14 }}>{s.name}</div>
               <div style={S.sub}>{s.suite_type} · {s.count} test{s.count === 1 ? "" : "s"}</div>
             </div>
-            <Button onClick={() => run(s.name, false)} disabled={!!running}>
-              {running === s.name ? "Running…" : "Run"}
+            <Button onClick={() => run(s.ref, false)} disabled={!!running}>
+              {running === s.ref ? "Running…" : "Run"}
             </Button>
-            <Button onClick={() => run(s.name, true)} disabled={!!running} variant="secondary">
+            <Button onClick={() => run(s.ref, true)} disabled={!!running} variant="secondary">
               Run isolated
             </Button>
           </div>

@@ -24,25 +24,25 @@ logger = logging.getLogger(__name__)
 _TRANSLATE_SYSTEM = (
     "You are HxNexus, an expert in enterprise BPM platforms. "
     "Given a concept from {tool}, explain exactly what it does and what the "
-    "Helix BPM equivalent is. Be concrete — name the Helix table, step type, "
+    "Velaris BPM equivalent is. Be concrete — name the Velaris table, step type, "
     "or module. If there is no direct equivalent, say so and suggest the closest approach."
 )
 
 _ANALYZE_SYSTEM = (
-    "You are HxNexus, reverse-engineering a {tool} application for migration to Helix BPM. "
+    "You are HxNexus, reverse-engineering a {tool} application for migration to Velaris BPM. "
     "Analyse the provided configuration fragment. Return:\n"
     "1. What this rule/element does in plain English\n"
-    "2. The Helix equivalent (be specific: case_type, stage, step type, form, routing rule, etc.)\n"
+    "2. The Velaris equivalent (be specific: case_type, stage, step type, form, routing rule, etc.)\n"
     "3. Confidence: exact / close / partial / manual\n"
     "4. Any caveats or things that need manual review\n"
     "Be concise and structured."
 )
 
 _COMPARE_SYSTEM = (
-    "You are HxNexus, an expert in both {tool} and Helix BPM. "
-    "Answer the question by comparing how {tool} approaches it vs how Helix approaches it. "
-    "Format as two clear paragraphs: '{tool} approach:' then 'Helix approach:'. "
-    "Be specific — name actual {tool} constructs and their Helix counterparts."
+    "You are HxNexus, an expert in both {tool} and Velaris BPM. "
+    "Answer the question by comparing how {tool} approaches it vs how Velaris approaches it. "
+    "Format as two clear paragraphs: '{tool} approach:' then 'Velaris approach:'. "
+    "Be specific — name actual {tool} constructs and their Velaris counterparts."
 )
 
 
@@ -122,7 +122,7 @@ async def translate(
         if llm and getattr(llm, "available", False):
             try:
                 prompt = (
-                    f"In {tool}, '{concept}' maps to Helix '{best.helix_equiv}'. "
+                    f"In {tool}, '{concept}' maps to Velaris '{best.helix_equiv}'. "
                     f"Give a 2-sentence plain-English explanation of this mapping, "
                     f"with one concrete example."
                 )
@@ -148,7 +148,7 @@ async def translate(
 
     if llm and getattr(llm, "available", False):
         try:
-            prompt = f"What is '{concept}' in {tool}, and what is the Helix BPM equivalent?"
+            prompt = f"What is '{concept}' in {tool}, and what is the Velaris BPM equivalent?"
             answer = await llm.complete(
                 prompt,
                 system=_TRANSLATE_SYSTEM.format(tool=tool),
@@ -193,7 +193,7 @@ async def analyze(
     session: AsyncSession,
     llm=None,
 ) -> dict:
-    """Analyse a raw BPM config fragment and map it to Helix.
+    """Analyse a raw BPM config fragment and map it to Velaris.
 
     Keyword scan first; LLM for deeper interpretation.
     """
@@ -283,7 +283,7 @@ async def compare(
         if related and kb_context:
             answer = (
                 f"{tool} approach: Uses {related[0].source_concept}.\n\n"
-                f"Helix approach: Uses {related[0].helix_equiv}. {related[0].description}"
+                f"Velaris approach: Uses {related[0].helix_equiv}. {related[0].description}"
             )
         else:
             answer = (

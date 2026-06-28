@@ -130,7 +130,7 @@ async def _build_dev_context(session: AsyncSession) -> str:
     )).scalars().all()
 
     lines = [
-        f"Platform: HELIX BPM",
+        f"Platform: Velaris BPM",
         f"Studio modules ({len(modules)}): " + ", ".join(m.label for m in modules[:20]),
         f"API endpoints ({len(endpoints)}): " + ", ".join(e.label for e in endpoints[:20]),
         f"Form definitions ({len(forms)}): " + ", ".join(f.label for f in forms),
@@ -152,10 +152,10 @@ async def _business_guide_template(session: AsyncSession) -> str:
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     lines = [
-        f"# HELIX Platform — Business Guide",
+        f"# Velaris Platform — Business Guide",
         f"*Generated {now}*",
         "",
-        "HELIX is an enterprise BPM (Business Process Management) platform. "
+        "Velaris is an enterprise BPM (Business Process Management) platform. "
         "It manages structured business processes called **cases** — each case "
         "moves through a defined set of **stages**, with work items (**steps**) "
         "assigned to operators at each stage.",
@@ -211,12 +211,12 @@ async def _dev_guide_template(session: AsyncSession) -> str:
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     lines = [
-        f"# HELIX Platform — Developer Guide",
+        f"# Velaris Platform — Developer Guide",
         f"*Generated {now}*",
         "",
         "## Platform Overview",
         "",
-        "HELIX is an open-source BPM platform built on FastAPI + React.",
+        "Velaris is an open-source BPM platform built on FastAPI + React.",
         "- **Backend:** `services/case-service` (Python, FastAPI, SQLAlchemy async)",
         "- **Frontend:** `studio/` (React 18, TypeScript, Vite)",
         "- **DB:** PostgreSQL (production), SQLite (tests)",
@@ -247,7 +247,7 @@ async def _dev_guide_template(session: AsyncSession) -> str:
         "- **case_instances** — running cases (status, priority, stage, data JSONB)",
         "- **graph_nodes / graph_edges** — HxGraph knowledge graph",
         "- **trace_events** — HxStream live event log",
-        "- **bpm_concepts** — BPM tool → Helix translation knowledge base",
+        "- **bpm_concepts** — BPM tool → Velaris translation knowledge base",
         "",
         "## Adding a New Phase",
         "",

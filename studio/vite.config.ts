@@ -52,6 +52,14 @@ export default defineConfig({
       allow: [path.resolve(__dirname, ".."), "/home/utpal-bhadra/helix/node_modules"],
     },
     proxy: {
+      "/api/v1/testsuite": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
+      "/api/v1/hxtest": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
       "/api/v1/cases": {
         target: "http://localhost:8200",
         changeOrigin: true,

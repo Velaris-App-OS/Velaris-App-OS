@@ -13,7 +13,7 @@ from case_service.hxgraph.embedder import _cosine
 logger = logging.getLogger(__name__)
 
 _NL_SYSTEM = (
-    "You are HxNexus answering questions about the HELIX BPM platform's knowledge graph. "
+    "You are HxNexus answering questions about the Velaris BPM platform's knowledge graph. "
     "Use the provided graph context (nodes and their relationships) to give a clear, "
     "accurate answer. Be concise. If the answer is not in the context, say so."
 )
@@ -211,7 +211,7 @@ async def explain_node(
 
     context = f"Node: {node.label} ({node.node_type})\nProperties: {node.properties}\nNeighbours: {', '.join(nb_labels[:10])}"
 
-    explanation = node.summary or f"{node.label} is a {node.node_type} in the Helix platform."
+    explanation = node.summary or f"{node.label} is a {node.node_type} in the Velaris platform."
 
     if llm is None:
         try:

@@ -146,7 +146,7 @@ async def generate_summaries(session: AsyncSession, llm=None) -> int:
     )).scalars().all()
 
     system = (
-        "You are describing components of an enterprise BPM platform called Helix. "
+        "You are describing components of an enterprise BPM platform called Velaris. "
         "Write a single concise sentence (max 20 words) describing what the given component does. "
         "Be specific and plain — no jargon."
     )

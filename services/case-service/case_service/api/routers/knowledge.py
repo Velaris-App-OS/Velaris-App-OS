@@ -36,7 +36,7 @@ _GLOSSARY_STATIC = [
     {"term": "Case Type",       "definition": "A template that defines the stages, steps, forms, and SLA rules for a category of cases."},
     {"term": "Stage",           "definition": "A major phase in the case lifecycle (e.g. Intake → Review → Resolution). Cases move forward through stages."},
     {"term": "Step",            "definition": "A task within a stage — can be a user form, an approval, a document upload request, or an automated action."},
-    {"term": "Operator",        "definition": "A staff member who works on cases inside Helix Studio."},
+    {"term": "Operator",        "definition": "A staff member who works on cases inside Velaris Studio."},
     {"term": "Access Group",    "definition": "A bundle of roles and portal assignment for a group of operators — equivalent to Pega's Access Group."},
     {"term": "Portal",          "definition": "The UI layout shown to operators in an access group — Staff Studio, Customer Portal, Manager view, etc."},
     {"term": "Role / Privilege","definition": "A named set of permissions (e.g. 'Claims Adjuster') that controls which case types and actions an operator can perform."},
@@ -45,15 +45,15 @@ _GLOSSARY_STATIC = [
     {"term": "Review View",     "definition": "Read-only screen shown to managers — all completed step forms and audit trail."},
     {"term": "Case 360",        "definition": "Full lifecycle view shown to case owners and admins — all stages, steps, history, and assignments."},
     {"term": "SLA",             "definition": "Service Level Agreement — the deadline by which a case must be resolved. Breaches trigger escalations."},
-    {"term": "HxNexus",         "definition": "The AI copilot embedded in Helix — provides case suggestions, document Q&A, and conversational help."},
+    {"term": "HxNexus",         "definition": "The AI copilot embedded in Velaris — provides case suggestions, document Q&A, and conversational help."},
     {"term": "HxStream",        "definition": "Live execution and interaction stream — shows every event, click, stage transition, and AI call in real time."},
     {"term": "Form Builder",    "definition": "The drag-and-drop tool for creating step forms — supports text, select, rating, signature, file upload, and more."},
     {"term": "Queue",           "definition": "A pool of unassigned cases that operators pick from. Cases can be routed to queues by rules."},
     {"term": "Escalation Tree", "definition": "A visual tree of escalation actions that fire when an SLA is breached — reassignments, notifications, priority bumps."},
     {"term": "Tracking Token",  "definition": "A unique code given to a customer when they submit a request — lets them track status without logging in."},
-    {"term": "Tenant",          "definition": "An organisation within Helix. All data (cases, users, portals) is isolated per tenant."},
+    {"term": "Tenant",          "definition": "An organisation within Velaris. All data (cases, users, portals) is isolated per tenant."},
     {"term": "Migration",       "definition": "A numbered SQL file that evolves the database schema. Applied in order, never via ORM auto-create."},
-    {"term": "Phase",           "definition": "A development milestone in Helix. Each phase ships a complete feature from migration → API → tests → Studio UI."},
+    {"term": "Phase",           "definition": "A development milestone in Velaris. Each phase ships a complete feature from migration → API → tests → Studio UI."},
 ]
 
 
@@ -166,7 +166,7 @@ async def knowledge_overview(
     completed_phases = [p for p in PHASES if p["complete"]]
 
     return {
-        "platform": "HELIX BPM",
+        "platform": "Velaris BPM",
         "stats": {
             "case_types":    case_type_count,
             "forms":         form_count,

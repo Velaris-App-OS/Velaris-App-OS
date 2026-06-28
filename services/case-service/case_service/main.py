@@ -61,6 +61,9 @@ from case_service.api.routers.hxglobal import router as hxglobal_router
 from case_service.api.routers.hxshield import router as hxshield_router
 from case_service.api.routers.hxfusion import router as hxfusion_router
 from case_service.api.routers.payments import router as payments_router
+from case_service.api.routers.checkout import router as checkout_router  # HxCheckout (marketplace)
+from case_service.api.routers.storefront import router as storefront_router  # HxStorefront (marketplace)
+from case_service.api.routers.storefront_public import router as storefront_public_router  # HxStorefront public
 from case_service.api.routers.kyc import identity_router, esign_router
 from case_service.api.routers.crm import crm_router, invoice_router
 from case_service.api.routers.comms import router as comms_router
@@ -497,8 +500,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="HELIX Case Service",
-        description="Case management API for the HELIX BPM platform",
+        title="Velaris Case Service",
+        description="Case management API for the Velaris BPM platform",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -584,6 +587,9 @@ def create_app() -> FastAPI:
     app.include_router(auth_real_router, prefix=prefix)  # P64 Real Auth
     app.include_router(permissions_router, prefix=prefix)
     app.include_router(marketplace_router, prefix=prefix)  # Marketplace
+    app.include_router(checkout_router, prefix=prefix)  # HxCheckout (marketplace app)
+    app.include_router(storefront_router, prefix=prefix)  # HxStorefront (marketplace app)
+    app.include_router(storefront_public_router, prefix=prefix)  # HxStorefront public storefront
     app.include_router(platform_updates_router, prefix=prefix)  # PUO Phase 1
     app.include_router(case_variables_router, prefix=prefix)  # Case Variables P1
     from case_service.api.routers import testsuite as _testsuite

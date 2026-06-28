@@ -112,9 +112,9 @@ async def generate_helix_code(
         logger.info("AI backend unavailable — using heuristic code generation")
         return _heuristic_generate_code(analysis, artifact_type)
 
-    prompt = f"""Port the following legacy {source_platform} {artifact_type} to HELIX Python code.
+    prompt = f"""Port the following legacy {source_platform} {artifact_type} to Velaris Python code.
 
-Target: Python async function following HELIX conventions.
+Target: Python async function following Velaris conventions.
 Output ONLY Python code, no explanations.
 
 Legacy code:

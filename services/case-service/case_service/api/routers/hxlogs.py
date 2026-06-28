@@ -1,6 +1,6 @@
 """P63 — HxLogs: AI-driven unified log analyser.
 
-Reads structlog output from all Helix service log files, serves
+Reads structlog output from all Velaris service log files, serves
 filtered entries to the Studio, and uses HxNexus to explain errors.
 No DB tables — purely a log file reader.
 """
@@ -302,7 +302,7 @@ async def analyse_log(
     from case_service.hxnexus.factory import generate_json
 
     prompt = (
-        f"Analyse this Helix platform log output and identify the root cause:\n\n"
+        f"Analyse this Velaris platform log output and identify the root cause:\n\n"
         f"```\n{body.log_text[:4000]}\n```\n\n"
         + (f"Additional context: {body.context}\n\n" if body.context else "")
         + "Return JSON:\n"
@@ -311,12 +311,12 @@ async def analyse_log(
         '"likely_file": "filename:line if determinable else null", '
         '"suggested_fix": "concrete actionable fix", '
         '"severity": "critical|high|medium|low", '
-        '"related_components": ["list", "of", "affected", "helix", "modules"]}'
+        '"related_components": ["list", "of", "affected", "velaris", "modules"]}'
     )
 
     result = await generate_json(
         prompt,
-        system="You are a senior Helix platform engineer analysing production logs. Be precise and actionable.",
+        system="You are a senior Velaris platform engineer analysing production logs. Be precise and actionable.",
     )
 
     if not result:
