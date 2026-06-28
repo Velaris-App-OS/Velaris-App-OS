@@ -320,6 +320,7 @@ export default defineConfig({
       },
       "/api/v1/hxstream":{
         target: "http://localhost:8200",
+        ws: true,
         changeOrigin: true,
       },
       "/api/v1/hxdbmanager": {
