@@ -291,8 +291,10 @@ async def create_case(
 
     # Generate human-readable case number: HLX-{TYPE}-{NNNNNN}
     try:
-        from sqlalchemy import text as _text
-        seq_val = (await session.execute(_text("SELECT nextval('helix_case_seq')"))).scalar()
+        from case_service.config import get_settings
+        from case_service.db.backends import get_backend
+        # Per-dialect monotonic counter (PG sequence / MySQL atomic counter row).
+        seq_val = await get_backend(get_settings().database_backend).next_case_seq(session)
         prefix = re.sub(r"[^A-Za-z]", "", case_type.name).upper()[:3].ljust(3, "X")
         case_number = f"HLX-{prefix}-{seq_val:06d}"
         await repo.update_case_instance(session, case.id, values={"case_number": case_number})

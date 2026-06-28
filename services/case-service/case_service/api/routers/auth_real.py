@@ -25,10 +25,10 @@ import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from case_service.db.models import HelixUserModel, AuthOtpModel, SsoProviderModel, RefreshTokenModel, RevokedSessionModel
+from case_service.db.models import HelixUserModel, AuthOtpModel, SsoProviderModel, RefreshTokenModel, RevokedSessionModel, HelixSettingModel
 from case_service.db.session import get_auth_session as get_session
 from case_service.auth.dependencies import get_current_user, require_role
 from case_service.auth.models import AuthenticatedUser
@@ -95,9 +95,8 @@ def _is_locked(user: HelixUserModel) -> bool:
     return False
 
 async def _get_token_expiry_days(session: AsyncSession) -> int:
-    from sqlalchemy import text
     row = (await session.execute(
-        text("SELECT value FROM helix_settings WHERE key = 'token_expiry_days'")
+        select(HelixSettingModel.value).where(HelixSettingModel.key == "token_expiry_days")
     )).scalar_one_or_none()
     try:
         return int(row) if row else get_settings().token_expiry_days
@@ -141,11 +140,13 @@ async def _make_tokens(
         device_id=device_id,
     ))
 
-    # Prune expired tokens for this user (bounded per-user housekeeping)
-    from sqlalchemy import text as _text
+    # Prune expired tokens for this user (bounded per-user housekeeping).
+    # func.now() is dialect-portable (NOW() on PG/MySQL, CURRENT_TIMESTAMP on SQLite).
     await session.execute(
-        _text("DELETE FROM refresh_tokens WHERE user_id = :uid AND expires_at < NOW()"),
-        {"uid": str(user.id)},
+        delete(RefreshTokenModel).where(
+            RefreshTokenModel.user_id == str(user.id),
+            RefreshTokenModel.expires_at < func.now(),
+        )
     )
 
     await session.commit()
@@ -982,12 +983,18 @@ async def set_token_expiry(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(require_role("admin")),
 ):
-    from sqlalchemy import text
-    await session.execute(text(
-        "INSERT INTO helix_settings (key, value, updated_at, updated_by) "
-        "VALUES ('token_expiry_days', :v, NOW(), :u) "
-        "ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW(), updated_by = :u"
-    ), {"v": str(body.token_expiry_days), "u": user.username})
+    # Get-or-create via the ORM (dialect-portable; admin-only/low-concurrency, so
+    # last-write-wins is fine). updated_at is handled by the model's default/onupdate.
+    setting = await session.get(HelixSettingModel, "token_expiry_days")
+    if setting is None:
+        session.add(HelixSettingModel(
+            key="token_expiry_days",
+            value=str(body.token_expiry_days),
+            updated_by=user.username,
+        ))
+    else:
+        setting.value = str(body.token_expiry_days)
+        setting.updated_by = user.username
     await session.commit()
     return {"token_expiry_days": body.token_expiry_days}
 
@@ -1008,26 +1015,32 @@ async def refresh_token_endpoint(
     if not _check_refresh_rate(client_ip):
         raise HTTPException(429, "Too many refresh attempts. Please wait before retrying.")
 
-    from sqlalchemy import text as _text
-
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
 
     # Atomic check-and-revoke: only one concurrent request can win this UPDATE.
-    # If two requests race with the same token, the loser gets rowcount=0 → 401.
+    # If two requests race with the same token, the loser blocks on the row
+    # write-lock, re-evaluates `revoked_at IS NULL` after the winner commits and
+    # gets rowcount=0 → 401. Atomicity lives in the WHERE + rowcount, not in
+    # RETURNING (which MySQL lacks); we re-SELECT the row we just locked —
+    # token_hash is the PK and we hold the write-lock in this txn, so the SELECT
+    # is guaranteed to return our row (read-your-writes). Dialect-portable.
     result = await session.execute(
-        _text("""
-            UPDATE refresh_tokens
-            SET    revoked_at = NOW(), revoked_by = 'rotation'
-            WHERE  token_hash = :hash
-              AND  revoked_at IS NULL
-              AND  expires_at > NOW()
-            RETURNING user_id, device_id
-        """),
-        {"hash": token_hash},
+        update(RefreshTokenModel)
+        .where(
+            RefreshTokenModel.token_hash == token_hash,
+            RefreshTokenModel.revoked_at.is_(None),
+            RefreshTokenModel.expires_at > func.now(),
+        )
+        .values(revoked_at=func.now(), revoked_by="rotation")
+        .execution_options(synchronize_session=False)
     )
-    row = result.fetchone()
-    if not row:
+    if result.rowcount != 1:
         raise HTTPException(401, "Invalid or expired refresh token.")
+
+    row = (await session.execute(
+        select(RefreshTokenModel.user_id, RefreshTokenModel.device_id)
+        .where(RefreshTokenModel.token_hash == token_hash)
+    )).one()
 
     # Group J: validate the device the chain is bound to. A revoked device or
     # a user-agent mismatch (token replayed from different software) kills

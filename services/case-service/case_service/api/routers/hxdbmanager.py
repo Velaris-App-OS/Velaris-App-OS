@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.auth.dependencies import get_current_user
 from case_service.auth.models import AuthenticatedUser
+from case_service.db.introspection import get_introspector
 from case_service.db.models import (
     DbManagerQueryLogModel, DmlBeforeImageModel, HelixUserModel, RevokedSessionModel,
 )
@@ -82,6 +83,12 @@ _ABUSE_PATTERNS = [
     (re.compile(r'\bcopy\s+\w+\s+(?:to|from)\b', re.I),          "COPY TO/FROM is not permitted"),
     (re.compile(r'\bgenerate_series\s*\([^,]+,\s*(\d{7,})', re.I), "generate_series upper bound too large (max 999,999)"),
     (re.compile(r'\bWITH\s+RECURSIVE\b(?!.*\bLIMIT\b)', re.I | re.S), "WITH RECURSIVE requires a LIMIT clause"),
+    # MySQL equivalents of the above abuse vectors (DoS / file access / SSRF):
+    (re.compile(r'\bsleep\s*\(', re.I),                          "sleep() is not permitted"),
+    (re.compile(r'\bbenchmark\s*\(', re.I),                      "benchmark() is not permitted"),
+    (re.compile(r'\bload_file\s*\(', re.I),                      "load_file() is not permitted"),
+    (re.compile(r'\binto\s+(?:outfile|dumpfile)\b', re.I),       "INTO OUTFILE/DUMPFILE is not permitted"),
+    (re.compile(r'\bload\s+data\b', re.I),                       "LOAD DATA is not permitted"),
 ]
 
 # ── Protected tables — DML writes to these are blocked regardless of role ─────
@@ -345,13 +352,14 @@ _DBVIEW_ELEVATION_TTL_S = 15 * 60   # 15 minutes
 _DML_PREVIEWS: dict[str, dict] = {}
 _DML_PREVIEW_TTL = 300.0
 
-# Regex to extract table name and WHERE clause from DELETE/UPDATE for before-image
+# Regex to extract table name and WHERE clause from DELETE/UPDATE for before-image.
+# The identifier may be unquoted, "double-quoted" (Postgres) or `backtick-quoted` (MySQL).
 _DELETE_RE = re.compile(
-    r'\bDELETE\s+FROM\s+"?(\w+)"?\s*(?:WHERE\s+(.*?))?(?:RETURNING|;|$)',
+    r'\bDELETE\s+FROM\s+["`]?(\w+)["`]?\s*(?:WHERE\s+(.*?))?(?:RETURNING|;|$)',
     re.I | re.S,
 )
 _UPDATE_RE = re.compile(
-    r'\bUPDATE\s+"?(\w+)"?\s+SET\s+.+?\bWHERE\s+(.*?)(?:RETURNING|;|$)',
+    r'\bUPDATE\s+["`]?(\w+)["`]?\s+SET\s+.+?\bWHERE\s+(.*?)(?:RETURNING|;|$)',
     re.I | re.S,
 )
 
@@ -716,10 +724,13 @@ async def _capture_before_image(
         return "disabled"
 
     table_hint, where_clause = _extract_table_and_where(sql)
+    insp = get_introspector(session)
     old_rows: list[dict] = []
     capture_method = "partial"
 
-    if kind == "delete" and table_hint:
+    # RETURNING is Postgres-only (MySQL 8 has no UPDATE/DELETE … RETURNING); on MySQL
+    # the savepoint+RETURNING path is skipped and we fall through to the pre-SELECT.
+    if kind == "delete" and table_hint and insp.name == "postgresql":
         # Run DELETE inside a savepoint and capture RETURNING * before rolling back
         try:
             sp = await session.begin_nested()
@@ -737,7 +748,8 @@ async def _capture_before_image(
 
     elif kind in ("update", "delete") and table_hint and where_clause:
         try:
-            pre_sql = f'SELECT * FROM "{table_hint}" WHERE {where_clause} LIMIT 500'
+            pre_sql = (f'SELECT * FROM {insp.quote_ident(table_hint)} '
+                       f'WHERE {where_clause} LIMIT 500')
             result = await session.execute(text(pre_sql))
             old_rows = [dict(r) for r in result.mappings().all()]
             capture_method = "pre_select"
@@ -769,26 +781,9 @@ async def list_schema(
 ):
     """Return all tables visible to this user with column counts and row estimates."""
     _require_db_viewer(current_user)
-    result = await session.execute(text("""
-        SELECT
-            t.table_name,
-            COUNT(c.column_name)                          AS column_count,
-            COALESCE(s.n_live_tup, 0)                    AS row_estimate,
-            COALESCE(pg_size_pretty(pg_total_relation_size(
-                quote_ident(t.table_name)::regclass)), '?') AS total_size,
-            s.last_vacuum, s.last_analyze
-        FROM information_schema.tables t
-        LEFT JOIN information_schema.columns c
-            ON c.table_name = t.table_name AND c.table_schema = 'public'
-        LEFT JOIN pg_stat_user_tables s
-            ON s.relname = t.table_name
-        WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-        GROUP BY t.table_name, s.n_live_tup, s.last_vacuum, s.last_analyze
-        ORDER BY t.table_name
-    """))
-    rows = result.mappings().all()
+    rows = await get_introspector(session).list_tables(session)
     # Filter to only tables this user's role may see
-    return {"tables": [dict(r) for r in rows if _table_allowed(current_user, r["table_name"])]}
+    return {"tables": [r for r in rows if _table_allowed(current_user, r["table_name"])]}
 
 
 @router.get("/schema/{table_name}")
@@ -801,59 +796,17 @@ async def get_table_schema(
     _require_db_viewer(current_user)
     _require_table_access(current_user, table_name)
 
+    insp = get_introspector(session)
     # Validate table exists (prevent injection via table_name in subsequent queries)
-    exists = await session.execute(text(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema='public' AND table_name=:t"
-    ), {"t": table_name})
-    if not exists.scalar_one_or_none():
+    if not await insp.table_exists(session, table_name):
         raise HTTPException(404, f"Table '{table_name}' not found")
-
-    cols = await session.execute(text("""
-        SELECT column_name, data_type, is_nullable, column_default, character_maximum_length
-        FROM information_schema.columns
-        WHERE table_schema='public' AND table_name=:t
-        ORDER BY ordinal_position
-    """), {"t": table_name})
-
-    idxs = await session.execute(text("""
-        SELECT i.relname AS index_name, ix.indisunique AS is_unique,
-               ix.indisprimary AS is_primary,
-               pg_size_pretty(pg_relation_size(i.oid)) AS size,
-               s.idx_scan AS scans
-        FROM pg_class t
-        JOIN pg_index ix ON t.oid = ix.indrelid
-        JOIN pg_class i  ON i.oid = ix.indexrelid
-        LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = i.oid
-        WHERE t.relname = :t AND t.relkind = 'r'
-        ORDER BY i.relname
-    """), {"t": table_name})
-
-    fks = await session.execute(text("""
-        SELECT kcu.column_name, ccu.table_name AS foreign_table,
-               ccu.column_name AS foreign_column,
-               rc.delete_rule
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
-        JOIN information_schema.referential_constraints rc
-            ON tc.constraint_name = rc.constraint_name
-        JOIN information_schema.constraint_column_usage ccu
-            ON rc.unique_constraint_name = ccu.constraint_name
-        WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = :t
-    """), {"t": table_name})
-
-    stats = await session.execute(text("""
-        SELECT n_live_tup, n_dead_tup, last_vacuum, last_analyze, last_autoanalyze
-        FROM pg_stat_user_tables WHERE relname = :t
-    """), {"t": table_name})
 
     return {
         "table":   table_name,
-        "columns": [dict(r) for r in cols.mappings().all()],
-        "indexes": [dict(r) for r in idxs.mappings().all()],
-        "foreign_keys": [dict(r) for r in fks.mappings().all()],
-        "stats":   dict(stats.mappings().first() or {}),
+        "columns": await insp.columns(session, table_name),
+        "indexes": await insp.indexes(session, table_name),
+        "foreign_keys": await insp.foreign_keys(session, table_name),
+        "stats":   await insp.table_stats(session, table_name),
     }
 
 
@@ -952,35 +905,29 @@ async def get_table_rows(
     if expose:
         _require_write(current_user)  # superadmin only
 
+    insp = get_introspector(session)
     # Validate table
-    exists = await session.execute(text(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema='public' AND table_name=:t"
-    ), {"t": table_name})
-    if not exists.scalar_one_or_none():
+    if not await insp.table_exists(session, table_name):
         raise HTTPException(404, f"Table '{table_name}' not found")
 
     # Validate sort column if provided
     order_clause = ""
     if sort_col:
-        valid_cols = await session.execute(text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema='public' AND table_name=:t"
-        ), {"t": table_name})
-        valid = {r[0] for r in valid_cols}
+        valid = await insp.column_names(session, table_name)
         if sort_col not in valid:
             raise HTTPException(400, f"Unknown column: {sort_col}")
-        order_clause = f' ORDER BY "{sort_col}" {sort_dir.upper()}'
+        order_clause = f' ORDER BY {insp.quote_ident(sort_col)} {sort_dir.upper()}'
 
+    qtable = insp.quote_ident(table_name)
     offset = (page - 1) * page_size
-    sql = f'SELECT * FROM "{table_name}"{order_clause} LIMIT :lim OFFSET :off'
+    sql = f'SELECT * FROM {qtable}{order_clause} LIMIT :lim OFFSET :off'
 
     t0 = time.monotonic()
     result = await session.execute(text(sql), {"lim": page_size, "off": offset})
     duration_ms = int((time.monotonic() - t0) * 1000)
 
     raw_rows = [dict(r) for r in result.mappings().all()]
-    total = await session.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+    total = await session.execute(text(f'SELECT COUNT(*) FROM {qtable}'))
     _tid = str(getattr(current_user, "tenant_id", "system"))
 
     await _log_query(session, _tid, current_user.user_id, sql, "success", duration_ms, len(raw_rows))
@@ -1096,8 +1043,9 @@ async def execute_query(
     rows: list[dict] = []
     rows_affected = None
 
+    insp = get_introspector(session)
     try:
-        await session.execute(text(f"SET LOCAL statement_timeout = '{_QUERY_TIMEOUT_MS}'"))
+        await insp.set_statement_timeout(session, _QUERY_TIMEOUT_MS)
         result = await session.execute(text(exec_sql))
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1113,6 +1061,13 @@ async def execute_query(
         status = "timeout" if "canceling statement" in str(exc).lower() else "error"
         error_detail = str(exc)
         await session.rollback()
+    finally:
+        # MySQL's session-scoped timeout would otherwise leak onto the next caller of
+        # this pooled connection; reset is a no-op on Postgres (SET LOCAL auto-reverts).
+        try:
+            await insp.reset_statement_timeout(session)
+        except Exception:
+            pass
 
     await _log_query(session, _tid, current_user.user_id, sql, status,
                      duration_ms, rows_affected, error_detail)
@@ -1200,13 +1155,12 @@ async def export_table(
     from fastapi.responses import StreamingResponse
     import io, csv, json as _json
 
-    exists = await session.execute(text(
-        "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=:t"
-    ), {"t": table_name})
-    if not exists.scalar_one_or_none():
+    insp = get_introspector(session)
+    if not await insp.table_exists(session, table_name):
         raise HTTPException(404, f"Table '{table_name}' not found")
 
-    result = await session.execute(text(f'SELECT * FROM "{table_name}" LIMIT :lim'), {"lim": limit})
+    result = await session.execute(
+        text(f'SELECT * FROM {insp.quote_ident(table_name)} LIMIT :lim'), {"lim": limit})
     raw_rows = [dict(r) for r in result.mappings().all()]
     # always=True + exclude=True: sensitive columns are completely removed from
     # exports — column name and value both absent from the downloaded file.
@@ -1279,8 +1233,7 @@ async def explain_query(
     if _classify(sql) != "select":
         raise HTTPException(400, "EXPLAIN only supports SELECT queries")
     try:
-        result = await session.execute(text(f"EXPLAIN (FORMAT JSON) {sql}"))
-        plan = result.scalar_one()
+        plan = await get_introspector(session).explain_json(session, sql)
         return {"plan": plan}
     except Exception as exc:
         raise HTTPException(400, str(exc))
@@ -1306,19 +1259,14 @@ async def ai_generate_sql(
         raise HTTPException(503, "HxNexus AI is not available")
 
     # Build schema context
-    tables_result = await session.execute(text("""
-        SELECT t.table_name, string_agg(c.column_name || ' ' || c.data_type, ', ' ORDER BY c.ordinal_position) AS cols
-        FROM information_schema.tables t
-        JOIN information_schema.columns c ON c.table_name = t.table_name AND c.table_schema = 'public'
-        WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-        GROUP BY t.table_name ORDER BY t.table_name
-    """))
-    schema_lines = [f"  {r['table_name']}({r['cols']})" for r in tables_result.mappings().all()]
+    insp = get_introspector(session)
+    schema_lines = [f"  {r['table_name']}({r['cols']})" for r in await insp.schema_summary(session)]
     schema_ctx = "Database schema:\n" + "\n".join(schema_lines)
 
+    dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
     system = (
-        "You are a PostgreSQL expert. Given the database schema below and a user question, "
-        "generate a correct, safe, read-only SQL SELECT query. "
+        f"You are a {dialect_name} expert. Given the database schema below and a user question, "
+        f"generate a correct, safe, read-only SQL SELECT query for {dialect_name}. "
         "Return ONLY a JSON object with keys: sql (string), explanation (string), estimated_rows (string). "
         "Never generate DDL or DML — SELECT only.\n\n" + schema_ctx
     )
@@ -1370,15 +1318,16 @@ async def ai_optimise_query(
     sql = body.sql.strip()
     if _classify(sql) != "select":
         raise HTTPException(400, "AI optimiser only supports SELECT queries")
+    insp = get_introspector(session)
     try:
-        result = await session.execute(text(f"EXPLAIN (FORMAT JSON) {sql}"))
-        plan = result.scalar_one()
+        plan = await insp.explain_json(session, sql)
     except Exception as exc:
         raise HTTPException(400, f"EXPLAIN failed: {exc}")
 
     import json as _json, re as _re
+    _dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
     system = (
-        "You are a PostgreSQL query optimisation expert. "
+        f"You are a {_dialect_name} query optimisation expert. "
         "Analyse the EXPLAIN plan and return a JSON object with: "
         "summary (string), suggestions (array of {issue, recommendation, ddl_fix (optional)}). "
         "Be specific — reference actual table names, column names, and costs from the plan."
@@ -1411,20 +1360,9 @@ async def get_slow_queries(
     current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Top N slowest queries from pg_stat_statements (requires pg_stat_statements extension)."""
+    """Top N slowest queries (Postgres pg_stat_statements; unavailable on MySQL)."""
     _require_admin(current_user)
-    try:
-        result = await session.execute(text("""
-            SELECT query, calls, total_exec_time, mean_exec_time,
-                   rows, shared_blks_hit, shared_blks_read
-            FROM pg_stat_statements
-            ORDER BY total_exec_time DESC
-            LIMIT :lim
-        """), {"lim": limit})
-        rows = [dict(r) for r in result.mappings().all()]
-        return {"available": True, "queries": rows}
-    except Exception:
-        return {"available": False, "queries": [], "message": "pg_stat_statements not enabled"}
+    return await get_introspector(session).slow_queries(session, limit)
 
 
 @router.get("/index-advisor")
@@ -1439,19 +1377,17 @@ async def get_index_advice(
     if not await check_ai_available():
         raise HTTPException(503, "HxNexus AI is not available")
 
-    try:
-        result = await session.execute(text("""
-            SELECT query, total_exec_time, calls, mean_exec_time
-            FROM pg_stat_statements
-            ORDER BY total_exec_time DESC LIMIT 20
-        """))
-        slow = [dict(r) for r in result.mappings().all()]
-    except Exception:
-        raise HTTPException(503, "pg_stat_statements not available — enable it in postgresql.conf")
+    insp = get_introspector(session)
+    stats = await insp.slow_queries(session, 20)
+    if not stats.get("available"):
+        raise HTTPException(503, stats.get("message")
+                            or "Slow-query statistics are not available on this backend.")
+    slow = stats["queries"]
 
     import json as _json
+    _dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
     system = (
-        "You are a PostgreSQL indexing expert. Given the top 20 slowest queries, "
+        f"You are a {_dialect_name} indexing expert. Given the top 20 slowest queries, "
         "recommend indexes that would have the greatest impact. "
         "Return JSON: {recommendations: [{table, column, index_type, ddl, reason, affected_queries}]}"
     )
@@ -1513,11 +1449,15 @@ async def dml_preview(
     if protected_msg:
         raise HTTPException(403, protected_msg)
 
-    # Add RETURNING * so we can show which rows will be affected
+    # Add RETURNING * so we can show which rows will be affected. RETURNING is
+    # Postgres-only; on MySQL the preview reports the affected-row COUNT (via
+    # rowcount in the savepoint below) rather than the row contents.
+    insp = get_introspector(session)
     exec_sql = sql.rstrip(";")
-    has_returning = re.search(r'\bRETURNING\b', exec_sql, re.I)
-    if not has_returning:
-        exec_sql += " RETURNING *"
+    if insp.name == "postgresql":
+        has_returning = re.search(r'\bRETURNING\b', exec_sql, re.I)
+        if not has_returning:
+            exec_sql += " RETURNING *"
 
     preview_rows: list[dict] = []
     row_count = 0
@@ -1611,8 +1551,9 @@ async def dml_confirm(
     rows_affected = None
     result_rows: list[dict] = []
 
+    insp = get_introspector(session)
     try:
-        await session.execute(text(f"SET LOCAL statement_timeout = '{_QUERY_TIMEOUT_MS}'"))
+        await insp.set_statement_timeout(session, _QUERY_TIMEOUT_MS)
         result = await session.execute(text(sql))
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1628,6 +1569,13 @@ async def dml_confirm(
         status = "error"
         error_detail = str(exc)
         await session.rollback()
+    finally:
+        # Reset the session-scoped MySQL timeout so it can't leak onto the next caller
+        # of this pooled connection (no-op on Postgres).
+        try:
+            await insp.reset_statement_timeout(session)
+        except Exception:
+            pass
 
     await _log_query(session, _tid, current_user.user_id, sql, status,
                      duration_ms, rows_affected, error_detail)

@@ -29,6 +29,7 @@ from sqlalchemy import (
     TypeDecorator
 )
 from sqlalchemy.types import CHAR, TypeEngine
+from sqlalchemy.dialects import mysql  # dialect-specific variants for index-key limits (DB SDK)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -1326,7 +1327,7 @@ class EmailMessageModel(Base):
     __tablename__ = "email_messages"
     __table_args__ = (
         Index("idx_email_messages_case", "case_id"),
-        Index("idx_email_messages_msgid", "message_id"),
+        Index("idx_email_messages_msgid", "message_id", mysql_length={"message_id": 255}),
         Index("idx_email_messages_direction", "direction"),
         Index("idx_email_messages_status", "status"),
         Index("idx_email_messages_received", "received_at"),
@@ -3061,11 +3062,11 @@ class ComponentCommitModel(Base):
     )
 
     id:              Mapped[uuid.UUID]    = mapped_column(GUID(), primary_key=True, default=_new_uuid)
-    component_type:  Mapped[str]          = mapped_column(Text, nullable=False)
-    component_id:    Mapped[str]          = mapped_column(Text, nullable=False)
+    component_type:  Mapped[str]          = mapped_column(String(64), nullable=False)
+    component_id:    Mapped[str]          = mapped_column(String(255), nullable=False)
     component_name:  Mapped[str]          = mapped_column(Text, nullable=False, default="")
     commit_message:  Mapped[str]          = mapped_column(Text, nullable=False)
-    committed_by:    Mapped[str]          = mapped_column(Text, nullable=False)
+    committed_by:    Mapped[str]          = mapped_column(String(255), nullable=False)
     diff_snapshot:   Mapped[dict | None]  = mapped_column(PortableJSON(), nullable=True)
     story_matches:   Mapped[list | None]  = mapped_column(PortableJSON(), nullable=True)
     committed_at:    Mapped[datetime]     = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -3353,8 +3354,8 @@ class HelixUserModel(Base):
     )
 
     id:                       Mapped[uuid.UUID]      = mapped_column(GUID(), primary_key=True, default=_new_uuid)
-    username:                 Mapped[str]            = mapped_column(Text, nullable=False, unique=True)
-    email:                    Mapped[str]            = mapped_column(Text, nullable=False, unique=True)
+    username:                 Mapped[str]            = mapped_column(String(255), nullable=False, unique=True)
+    email:                    Mapped[str]            = mapped_column(String(255), nullable=False, unique=True)
     display_name:             Mapped[str | None]     = mapped_column(Text, nullable=True)
     password_hash:            Mapped[str | None]     = mapped_column(Text, nullable=True)
     roles:                    Mapped[list]           = mapped_column(PortableJSON(), nullable=False, default=list)
@@ -3365,8 +3366,8 @@ class HelixUserModel(Base):
     password_change_required: Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
     mfa_enabled:              Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
     mfa_secret_enc:           Mapped[dict | None]    = mapped_column(PortableJSON(), nullable=True)
-    sso_provider:             Mapped[str | None]     = mapped_column(Text, nullable=True)
-    sso_subject:              Mapped[str | None]     = mapped_column(Text, nullable=True)
+    sso_provider:             Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    sso_subject:              Mapped[str | None]     = mapped_column(String(255), nullable=True)
     created_at:               Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at:               Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     last_login_at:            Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -3402,7 +3403,7 @@ class SsoProviderModel(Base):
     )
 
     id:                Mapped[uuid.UUID]   = mapped_column(GUID(), primary_key=True, default=_new_uuid)
-    tenant_id:         Mapped[str | None]  = mapped_column(Text, nullable=True)
+    tenant_id:         Mapped[str | None]  = mapped_column(String(255), nullable=True)
     provider:          Mapped[str]         = mapped_column(String(30), nullable=False)
     client_id:         Mapped[str]         = mapped_column(Text, nullable=False)
     client_secret_enc: Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
@@ -3485,7 +3486,11 @@ class MarketplaceSourceModel(Base):
 
     id:                   Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
     name:                 Mapped[str]       = mapped_column(String(255), nullable=False)
-    url:                  Mapped[str]       = mapped_column(String(1024), nullable=False)   # velaris.json URL
+    # velaris.json URL. UNIQUE (uq_mks_url). URLs are ASCII, so on MySQL use an ascii
+    # charset (1 byte/char) → the unique index fits the 3072-byte key limit at full
+    # 1024-char length, keeping true uniqueness without a prefix.
+    url:                  Mapped[str]       = mapped_column(
+        String(1024).with_variant(mysql.VARCHAR(1024, charset="ascii"), "mysql"), nullable=False)
     tier:                 Mapped[str]       = mapped_column(String(32), default="community")
     # tier: official | community | private
     token_enc:            Mapped[str | None]= mapped_column(Text, nullable=True)            # AES-encrypted PAT
@@ -3677,7 +3682,7 @@ class MarketplaceBlacklistModel(Base):
     __tablename__ = "marketplace_blacklist"
     __table_args__ = (
         Index("ix_mbl_tenant", "tenant_id"),
-        Index("ix_mbl_type_value", "type", "value"),
+        Index("ix_mbl_type_value", "type", "value", mysql_length={"value": 500}),
     )
 
     id:              Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
@@ -3847,7 +3852,11 @@ class WebAuthnCredentialModel(Base):
 
     id:            Mapped[uuid.UUID]     = mapped_column(GUID(), primary_key=True, default=_new_uuid)
     user_id:       Mapped[str]           = mapped_column(String(255), nullable=False)
-    credential_id: Mapped[bytes]         = mapped_column(LargeBinary, nullable=False, unique=True)
+    # WebAuthn credential id (raw bytes). BYTEA on PG; VARBINARY(1023) on MySQL so the
+    # UNIQUE index fits InnoDB's 3072-byte key limit at FULL length — no prefix-unique
+    # weakening on an auth table (spec caps credential ids at 1023 bytes).
+    credential_id: Mapped[bytes]         = mapped_column(
+        LargeBinary().with_variant(mysql.VARBINARY(1023), "mysql"), nullable=False, unique=True)
     public_key:    Mapped[bytes]         = mapped_column(LargeBinary, nullable=False)
     sign_count:    Mapped[int]           = mapped_column(BigInteger, default=0, nullable=False)
     transports:    Mapped[list]          = mapped_column(PortableJSON(), default=list)
@@ -3926,7 +3935,7 @@ class CaseInstanceVariableModel(Base):
     __table_args__ = (
         UniqueConstraint("case_id", "full_key"),
         Index("ix_civ_key_num", "full_key", "value_num"),
-        Index("ix_civ_key_text", "full_key", "value_text"),
+        Index("ix_civ_key_text", "full_key", "value_text", mysql_length={"value_text": 255}),
     )
 
     id:         Mapped[uuid.UUID]   = mapped_column(GUID(), primary_key=True, default=_new_uuid)
@@ -4103,7 +4112,7 @@ class PlatformUpdatePlanModel(Base):
     resolved_version: Mapped[str]             = mapped_column(Text, nullable=False)
     channel:          Mapped[str]             = mapped_column(Text, nullable=False, default="stable")
     soak_hours:       Mapped[int]             = mapped_column(Integer, nullable=False, default=48)
-    state:            Mapped[str]             = mapped_column(Text, nullable=False, default="draft")
+    state:            Mapped[str]             = mapped_column(String(32), nullable=False, default="draft")
     halted_reason:    Mapped[str | None]      = mapped_column(Text, nullable=True)
     approved_by:      Mapped[str | None]      = mapped_column(Text, nullable=True)
     approved_at:      Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -4141,3 +4150,518 @@ class PlatformUpdateSettingsModel(Base):
     calendar_id:        Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
     updated_at:         Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 # <<< PUO Phase 3
+
+
+# >>> DB SDK — portable monotonic counter (case numbers)
+class SequenceCounterModel(Base):
+    """Named monotonic counters for backends without native SEQUENCEs (MySQL et al).
+
+    PostgreSQL uses its native ``helix_case_seq`` SEQUENCE (migration 035) and never
+    touches this table — the per-dialect ``DatabaseBackend.next_case_seq`` decides.
+    Intentional cross-dialect drift: present in metadata/MySQL baseline, unused on PG.
+    """
+    __tablename__ = "velaris_sequences"
+
+    name:  Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+# <<< DB SDK
+
+
+# >>> DB SDK — settings/config tables that raw migrations create without a model.
+# Modeling them puts them in the generated baseline (so MySQL/SQLite get them) and
+# lets callers use the ORM, which quotes the reserved word `key` per-dialect — no
+# hand-written backticks. `value` columns mirror the live migration types (068/070).
+class HelixSettingModel(Base):
+    """Key/value platform settings (migration 068). e.g. token_expiry_days."""
+    __tablename__ = "helix_settings"
+
+    key:        Mapped[str]            = mapped_column(String(255), primary_key=True)
+    value:      Mapped[str]            = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_by: Mapped[str | None]     = mapped_column(Text, nullable=True)
+
+
+class SystemConfigModel(Base):
+    """Admin-managed JSON config (migration 070). e.g. route_permissions matrix."""
+    __tablename__ = "system_config"
+
+    key:        Mapped[str]            = mapped_column(String(255), primary_key=True)
+    value:      Mapped[dict | list]    = mapped_column(PortableJSON(), nullable=False)
+    updated_at: Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_by: Mapped[str | None]     = mapped_column(String(255), nullable=True)
+# <<< DB SDK
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HxCheckout — commerce integration layer (marketplace app `velaris/hxcheckout`).
+#
+#  The HxCheckout Python ships in-image like every official marketplace module;
+#  these tables ship via the normal startup migration track (095_checkout.sql /
+#  MySQL baseline). Installing the marketplace package only flips the per-tenant
+#  gate + Studio routes — it does NOT provision schema (the tables are always
+#  present, empty until the app is used). An order is stored here AND opened as a
+#  Velaris Order `case_type`; checkout_orders.case_id links the two.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CheckoutOrderModel(Base):
+    """One commerce order. Mirrors a Velaris Order case (case_id) and carries the
+    customer-facing tracking token. Immutable from the external API after creation."""
+
+    __tablename__ = "checkout_orders"
+    __table_args__ = (
+        Index("ix_checkout_orders_tenant",   "tenant_id"),
+        Index("ix_checkout_orders_case",     "case_id"),
+        Index("ix_checkout_orders_status",   "status"),
+        UniqueConstraint("tracking_token", name="uq_checkout_orders_tracking"),
+        # Optional client-supplied idempotency key (Idempotency-Key header). A retry
+        # after a timeout returns the existing order instead of creating a duplicate
+        # Order case. Scoped per tenant; NULLs are distinct so keyless orders never collide.
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_checkout_orders_idem"),
+    )
+
+    id:                 Mapped[uuid.UUID]      = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    tenant_id:          Mapped[str]            = mapped_column(String(255), nullable=False)
+    # SET NULL (not CASCADE): deleting a case must never erase order history.
+    case_id:            Mapped[uuid.UUID|None] = mapped_column(GUID(),      ForeignKey("case_instances.id", ondelete="SET NULL"), nullable=True)
+    tracking_token:     Mapped[str]            = mapped_column(String(64),  nullable=False)
+    status:             Mapped[str]            = mapped_column(String(50),  nullable=False, default="pending_payment")
+    currency:           Mapped[str]            = mapped_column(String(10),  nullable=False, default="GBP")
+    total_cents:        Mapped[int]            = mapped_column(BigInteger,  nullable=False, default=0)
+    customer:           Mapped[dict]           = mapped_column(PortableJSON(), default=dict)   # name/email/phone
+    shipping:           Mapped[dict]           = mapped_column(PortableJSON(), default=dict)   # address + method
+    order_meta:         Mapped[dict]           = mapped_column("metadata", PortableJSON(), default=dict)
+    source:             Mapped[str]            = mapped_column(String(50),  nullable=False, default="api")  # api|sdk|webhook|storefront
+    idempotency_key:    Mapped[str|None]       = mapped_column(String(255), nullable=True)
+    integration_id:     Mapped[uuid.UUID|None] = mapped_column(GUID(),      ForeignKey("checkout_webhook_integrations.id", ondelete="SET NULL"), nullable=True)
+    payment_request_id: Mapped[uuid.UUID|None] = mapped_column(GUID(),      nullable=True)
+    is_test:            Mapped[bool]           = mapped_column(Boolean,     nullable=False, default=False)
+    created_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class CheckoutOrderItemModel(Base):
+    """A line item on a checkout order (a basket entry, captured at purchase time)."""
+
+    __tablename__ = "checkout_order_items"
+    __table_args__ = (
+        Index("ix_checkout_order_items_order", "order_id"),
+    )
+
+    id:               Mapped[uuid.UUID] = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    order_id:         Mapped[uuid.UUID] = mapped_column(GUID(),      ForeignKey("checkout_orders.id", ondelete="CASCADE"), nullable=False)
+    sku:              Mapped[str]       = mapped_column(String(255), nullable=False)
+    name:             Mapped[str]       = mapped_column(String(512), nullable=False)
+    quantity:         Mapped[int]       = mapped_column(Integer,     nullable=False, default=1)
+    unit_price_cents: Mapped[int]       = mapped_column(BigInteger,  nullable=False, default=0)
+    item_meta:        Mapped[dict]      = mapped_column("metadata", PortableJSON(), default=dict)
+
+
+class CheckoutServiceTokenModel(Base):
+    """A per-tenant service token (API key) authenticating external order creation.
+    Only the bcrypt hash is persisted — the plaintext is shown once at creation."""
+
+    __tablename__ = "checkout_service_tokens"
+    __table_args__ = (
+        Index("ix_checkout_tokens_tenant", "tenant_id"),
+        # token_prefix carries the public key-id (vsk_<mode>_<keyid>) and is the
+        # O(1) lookup key at auth time — bcrypt is salted so token_hash can't be
+        # queried directly. Unique so a key-id resolves to exactly one row.
+        UniqueConstraint("token_prefix", name="uq_checkout_tokens_prefix"),
+    )
+
+    id:           Mapped[uuid.UUID]     = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    tenant_id:    Mapped[str]           = mapped_column(String(255), nullable=False)
+    label:        Mapped[str]           = mapped_column(String(255), nullable=False, default="")
+    token_hash:   Mapped[str]           = mapped_column(String(255), nullable=False)   # bcrypt
+    token_prefix: Mapped[str]           = mapped_column(String(24),  nullable=False)  # public key-id vsk_<mode>_<keyid>; UNIQUE lookup key (always set by generate_token)
+    scope:        Mapped[str]           = mapped_column(String(50),  nullable=False, default="orders:create")
+    last_used_at: Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at:   Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspended:    Mapped[bool]          = mapped_column(Boolean,     nullable=False, default=False)  # auto-suspend on rate spike
+    created_by:   Mapped[str|None]      = mapped_column(String(255), nullable=True)
+    created_at:   Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CheckoutWebhookIntegrationModel(Base):
+    """Inbound webhook source config (Shopify/WooCommerce/Magento/BigCommerce/custom)
+    with the HMAC secret (encrypted) and the field mapping into the order shape."""
+
+    __tablename__ = "checkout_webhook_integrations"
+    __table_args__ = (
+        Index("ix_checkout_integrations_tenant", "tenant_id"),
+    )
+
+    id:              Mapped[uuid.UUID] = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    tenant_id:       Mapped[str]       = mapped_column(String(255), nullable=False)
+    platform:        Mapped[str]       = mapped_column(String(50),  nullable=False, default="custom")
+    label:           Mapped[str]       = mapped_column(String(255), nullable=False, default="")
+    hmac_secret_enc: Mapped[str|None]  = mapped_column(Text,        nullable=True)   # hxv1: encrypted shared secret
+    field_map:       Mapped[dict]      = mapped_column(PortableJSON(), default=dict)  # {} = use built-in platform map
+    enabled:         Mapped[bool]      = mapped_column(Boolean,     nullable=False, default=True)
+    created_by:      Mapped[str|None]  = mapped_column(String(255), nullable=True)
+    created_at:      Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CheckoutWebhookEventModel(Base):
+    """Full log of every inbound webhook event — raw payload + mapped result + status —
+    written regardless of success/failure (key invariant 6)."""
+
+    __tablename__ = "checkout_webhook_events"
+    __table_args__ = (
+        Index("ix_checkout_wh_events_integration", "integration_id"),
+        Index("ix_checkout_wh_events_created",     "created_at"),
+    )
+
+    id:             Mapped[uuid.UUID]      = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    integration_id: Mapped[uuid.UUID|None] = mapped_column(GUID(),      ForeignKey("checkout_webhook_integrations.id", ondelete="CASCADE"), nullable=True)
+    raw:            Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    mapped:         Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    status:         Mapped[str]            = mapped_column(String(50),  nullable=False, default="received")  # received|order_created|rejected|error
+    order_id:       Mapped[uuid.UUID|None] = mapped_column(GUID(),      nullable=True)
+    error:          Mapped[str|None]       = mapped_column(Text,        nullable=True)
+    created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CheckoutNotificationLogModel(Base):
+    """Record of every customer notification sent for an order event (per channel)."""
+
+    __tablename__ = "checkout_notifications_log"
+    __table_args__ = (
+        Index("ix_checkout_notif_order", "order_id"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),      primary_key=True, default=_new_uuid)
+    order_id:   Mapped[uuid.UUID] = mapped_column(GUID(),      ForeignKey("checkout_orders.id", ondelete="CASCADE"), nullable=False)
+    event:      Mapped[str]       = mapped_column(String(100), nullable=False)   # order_received|payment_confirmed|dispatched|…
+    channel:    Mapped[str]       = mapped_column(String(20),  nullable=False)   # email|sms|push
+    status:     Mapped[str]       = mapped_column(String(50),  nullable=False, default="sent")
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HxStorefront — hosted store builder (marketplace app `velaris/hxstorefront`).
+#
+#  Same pattern as HxCheckout: Python + Studio ship in-image, tables on the normal
+#  migration track (096), install flips the per-tenant gate + routes. A purchase on
+#  a storefront flows through HxCheckout to become an Order case. A tenant can run
+#  multiple stores (multi-store); storefront_stores.slug is the public identifier.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StorefrontStoreModel(Base):
+    """One hosted store. slug is the public route (/store/:slug). Multi-store: a
+    tenant may own several. settings holds currency/tax/shipping/locale config."""
+
+    __tablename__ = "storefront_stores"
+    __table_args__ = (
+        Index("ix_storefront_stores_tenant", "tenant_id"),
+        UniqueConstraint("slug", name="uq_storefront_stores_slug"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    tenant_id:  Mapped[str]       = mapped_column(String(255),  nullable=False)
+    slug:       Mapped[str]       = mapped_column(String(255),  nullable=False)
+    name:       Mapped[str]       = mapped_column(String(255),  nullable=False)
+    currency:   Mapped[str]       = mapped_column(String(10),   nullable=False, default="GBP")
+    locale:     Mapped[str]       = mapped_column(String(20),   nullable=False, default="en-GB")
+    status:     Mapped[str]       = mapped_column(String(20),   nullable=False, default="active")  # active|archived
+    settings:   Mapped[dict]      = mapped_column(PortableJSON(), default=dict)   # tax rules, shipping zones, etc.
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class StorefrontProductModel(Base):
+    """A product in a store's catalogue. Prices are integer minor units (pence/cents)."""
+
+    __tablename__ = "storefront_products"
+    __table_args__ = (
+        Index("ix_storefront_products_store",  "store_id"),
+        Index("ix_storefront_products_status", "status"),
+        UniqueConstraint("store_id", "slug", name="uq_storefront_products_slug"),
+    )
+
+    id:                  Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:            Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    name:                Mapped[str]       = mapped_column(String(512),  nullable=False)
+    slug:                Mapped[str]       = mapped_column(String(255),  nullable=False)
+    sku:                 Mapped[str|None]  = mapped_column(String(255),  nullable=True)
+    description:         Mapped[str]       = mapped_column(Text,         default="")
+    short_description:   Mapped[str]       = mapped_column(String(512),  default="")
+    tags:                Mapped[list]      = mapped_column(PortableJSON(), default=list)
+    price_cents:         Mapped[int]       = mapped_column(BigInteger,   nullable=False, default=0)
+    compare_at_cents:    Mapped[int|None]  = mapped_column(BigInteger,   nullable=True)   # crossed-out sale price
+    tax_class:           Mapped[str]       = mapped_column(String(20),   nullable=False, default="standard")
+    weight_grams:        Mapped[int]       = mapped_column(Integer,      nullable=False, default=0)
+    status:              Mapped[str]       = mapped_column(String(20),   nullable=False, default="draft")  # draft|active|archived
+    stock_quantity:      Mapped[int|None]  = mapped_column(Integer,      nullable=True)   # NULL = unlimited (no variants)
+    low_stock_threshold: Mapped[int|None]  = mapped_column(Integer,      nullable=True)
+    is_featured:         Mapped[bool]      = mapped_column(Boolean,      nullable=False, default=False)
+    is_digital:          Mapped[bool]      = mapped_column(Boolean,      nullable=False, default=False)
+    product_meta:        Mapped[dict]      = mapped_column("metadata", PortableJSON(), default=dict)
+    created_at:          Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:          Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class StorefrontProductImageModel(Base):
+    """A product image (stored in MinIO). First by display_order = primary."""
+
+    __tablename__ = "storefront_product_images"
+    __table_args__ = (Index("ix_storefront_images_product", "product_id"),)
+
+    id:            Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    product_id:    Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_products.id", ondelete="CASCADE"), nullable=False)
+    media_path:    Mapped[str]       = mapped_column(String(1024), nullable=False)   # MinIO object path
+    alt_text:      Mapped[str]       = mapped_column(String(512),  default="")
+    display_order: Mapped[int]       = mapped_column(Integer,      nullable=False, default=0)
+
+
+class StorefrontVariantOptionModel(Base):
+    """An option definition per product (e.g. name='Size', values=['S','M','L'])."""
+
+    __tablename__ = "storefront_variant_options"
+    __table_args__ = (Index("ix_storefront_varopt_product", "product_id"),)
+
+    id:            Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    product_id:    Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_products.id", ondelete="CASCADE"), nullable=False)
+    name:          Mapped[str]       = mapped_column(String(255),  nullable=False)   # "Size", "Colour"
+    values:        Mapped[list]      = mapped_column(PortableJSON(), default=list)   # ["S","M","L"]
+    display_order: Mapped[int]       = mapped_column(Integer,      nullable=False, default=0)
+
+
+class StorefrontProductVariantModel(Base):
+    """A concrete variant (a cross-product of option values). Overrides price/stock/sku."""
+
+    __tablename__ = "storefront_product_variants"
+    __table_args__ = (
+        Index("ix_storefront_variants_product", "product_id"),
+        UniqueConstraint("product_id", "sku", name="uq_storefront_variants_sku"),
+    )
+
+    id:             Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    product_id:     Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_products.id", ondelete="CASCADE"), nullable=False)
+    sku:            Mapped[str]       = mapped_column(String(255),  nullable=False)
+    option_values:  Mapped[dict]      = mapped_column(PortableJSON(), default=dict)   # {"Size":"M","Colour":"Blue"}
+    price_cents:    Mapped[int|None]  = mapped_column(BigInteger,   nullable=True)    # NULL = use product price
+    stock_quantity: Mapped[int|None]  = mapped_column(Integer,      nullable=True)    # NULL = unlimited
+    media_path:     Mapped[str|None]  = mapped_column(String(1024), nullable=True)
+    display_order:  Mapped[int]       = mapped_column(Integer,      nullable=False, default=0)
+
+
+class StorefrontCategoryModel(Base):
+    """Category tree (adjacency list via parent_id). Products link many-to-many."""
+
+    __tablename__ = "storefront_categories"
+    __table_args__ = (
+        Index("ix_storefront_categories_store",  "store_id"),
+        Index("ix_storefront_categories_parent", "parent_id"),
+        UniqueConstraint("store_id", "slug", name="uq_storefront_categories_slug"),
+    )
+
+    id:            Mapped[uuid.UUID]      = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:      Mapped[uuid.UUID]      = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    parent_id:     Mapped[uuid.UUID|None] = mapped_column(GUID(),       ForeignKey("storefront_categories.id", ondelete="SET NULL"), nullable=True)
+    name:          Mapped[str]            = mapped_column(String(255),  nullable=False)
+    slug:          Mapped[str]            = mapped_column(String(255),  nullable=False)
+    description:   Mapped[str]            = mapped_column(Text,         default="")
+    banner_path:   Mapped[str|None]       = mapped_column(String(1024), nullable=True)
+    display_order: Mapped[int]            = mapped_column(Integer,      nullable=False, default=0)
+
+
+class StorefrontProductCategoryModel(Base):
+    """Many-to-many product ↔ category."""
+
+    __tablename__ = "storefront_product_categories"
+    __table_args__ = (
+        Index("ix_storefront_prodcat_product",  "product_id"),
+        Index("ix_storefront_prodcat_category", "category_id"),
+        UniqueConstraint("product_id", "category_id", name="uq_storefront_prodcat"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    product_id:  Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("storefront_products.id", ondelete="CASCADE"), nullable=False)
+    category_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("storefront_categories.id", ondelete="CASCADE"), nullable=False)
+
+
+class StorefrontInventoryLogModel(Base):
+    """Stock movement history per variant (sale / manual edit / restock)."""
+
+    __tablename__ = "storefront_inventory_log"
+    __table_args__ = (Index("ix_storefront_invlog_variant", "variant_id"),)
+
+    id:           Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    variant_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_product_variants.id", ondelete="CASCADE"), nullable=False)
+    change:       Mapped[int]       = mapped_column(Integer,      nullable=False)   # signed delta
+    new_quantity: Mapped[int|None]  = mapped_column(Integer,      nullable=True)
+    reason:       Mapped[str]       = mapped_column(String(100),  nullable=False, default="adjustment")  # sale|adjustment|restock
+    actor:        Mapped[str|None]  = mapped_column(String(255),  nullable=True)
+    created_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontThemeModel(Base):
+    """Versioned theme config JSON per store (keep last 10; one active)."""
+
+    __tablename__ = "storefront_themes"
+    __table_args__ = (Index("ix_storefront_themes_store", "store_id"),)
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    config:     Mapped[dict]      = mapped_column(PortableJSON(), default=dict)
+    version:    Mapped[int]       = mapped_column(Integer,      nullable=False, default=1)
+    is_active:  Mapped[bool]      = mapped_column(Boolean,      nullable=False, default=True)
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontPageModel(Base):
+    """A store page (home/about/custom) built from Page Builder sections."""
+
+    __tablename__ = "storefront_pages"
+    __table_args__ = (
+        Index("ix_storefront_pages_store", "store_id"),
+        UniqueConstraint("store_id", "page_slug", name="uq_storefront_pages_slug"),
+    )
+
+    id:           Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:     Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    page_slug:    Mapped[str]       = mapped_column(String(255),  nullable=False)   # "home", "about", …
+    title:        Mapped[str]       = mapped_column(String(512),  default="")
+    sections:     Mapped[list]      = mapped_column(PortableJSON(), default=list)   # ordered section blocks
+    is_published: Mapped[bool]      = mapped_column(Boolean,      nullable=False, default=False)
+    created_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class StorefrontNavigationModel(Base):
+    """Header/footer menu config per store."""
+
+    __tablename__ = "storefront_navigation"
+    __table_args__ = (
+        UniqueConstraint("store_id", "location", name="uq_storefront_nav_location"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    location:   Mapped[str]       = mapped_column(String(20),   nullable=False, default="header")  # header|footer
+    items:      Mapped[list]      = mapped_column(PortableJSON(), default=list)
+    updated_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class StorefrontPromotionModel(Base):
+    """Discount code or automatic discount rule."""
+
+    __tablename__ = "storefront_promotions"
+    __table_args__ = (
+        Index("ix_storefront_promotions_store", "store_id"),
+        Index("ix_storefront_promotions_code",  "code"),
+    )
+
+    id:                Mapped[uuid.UUID]   = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:          Mapped[uuid.UUID]   = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    code:              Mapped[str|None]    = mapped_column(String(64),   nullable=True)    # NULL = automatic discount
+    discount_type:     Mapped[str]         = mapped_column(String(30),   nullable=False)   # percentage|fixed|free_shipping|bxgy|spend|quantity|bundle|flash
+    config:            Mapped[dict]        = mapped_column(PortableJSON(), default=dict)    # type-specific params
+    applies_to:        Mapped[dict]        = mapped_column(PortableJSON(), default=dict)    # all|categories|products
+    min_order_cents:   Mapped[int|None]    = mapped_column(BigInteger,   nullable=True)
+    usage_limit:       Mapped[int|None]    = mapped_column(Integer,      nullable=True)
+    per_customer_limit:Mapped[int|None]    = mapped_column(Integer,      nullable=True)
+    valid_from:        Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until:       Mapped[datetime|None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stackable:         Mapped[bool]        = mapped_column(Boolean,      nullable=False, default=False)
+    active:            Mapped[bool]        = mapped_column(Boolean,      nullable=False, default=True)
+    created_at:        Mapped[datetime]    = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontPromotionUseModel(Base):
+    """Per-order usage of a promotion (enforces usage / per-customer limits)."""
+
+    __tablename__ = "storefront_promotion_uses"
+    __table_args__ = (Index("ix_storefront_promouse_promo", "promotion_id"),)
+
+    id:            Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    promotion_id:  Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_promotions.id", ondelete="CASCADE"), nullable=False)
+    order_ref:     Mapped[str|None]  = mapped_column(String(255),  nullable=True)   # checkout order id / tracking token
+    customer_email:Mapped[str|None]  = mapped_column(String(255),  nullable=True)
+    used_at:       Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontDomainModel(Base):
+    """Custom domain config per store (+ DNS/SSL status)."""
+
+    __tablename__ = "storefront_domains"
+    __table_args__ = (
+        Index("ix_storefront_domains_store", "store_id"),
+        UniqueConstraint("domain", name="uq_storefront_domains_domain"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:    Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    domain:      Mapped[str]       = mapped_column(String(255),  nullable=False)
+    domain_type: Mapped[str]       = mapped_column(String(20),   nullable=False, default="cname")  # subdomain|cname|root
+    dns_verified:Mapped[bool]      = mapped_column(Boolean,      nullable=False, default=False)
+    ssl_status:  Mapped[str]       = mapped_column(String(20),   nullable=False, default="pending")  # pending|active|failed
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontSeoOverrideModel(Base):
+    """Per-product / per-category / per-page SEO fields."""
+
+    __tablename__ = "storefront_seo_overrides"
+    __table_args__ = (
+        UniqueConstraint("store_id", "target_type", "target_id", name="uq_storefront_seo_target"),
+    )
+
+    id:               Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:         Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    target_type:      Mapped[str]       = mapped_column(String(20),   nullable=False)  # product|category|page|store
+    target_id:        Mapped[str]       = mapped_column(String(255),  nullable=False)  # the target's id/slug ("" for store-level)
+    meta_title:       Mapped[str]       = mapped_column(String(255),  default="")
+    meta_description: Mapped[str]       = mapped_column(String(512),  default="")
+    og_title:         Mapped[str]       = mapped_column(String(255),  default="")
+    og_description:   Mapped[str]       = mapped_column(String(512),  default="")
+    og_image:         Mapped[str|None]  = mapped_column(String(1024), nullable=True)
+    canonical_url:    Mapped[str|None]  = mapped_column(String(1024), nullable=True)
+
+
+class StorefrontSubscriberModel(Base):
+    """Newsletter sign-up. Stored only here — never merged into user accounts."""
+
+    __tablename__ = "storefront_subscribers"
+    __table_args__ = (
+        UniqueConstraint("store_id", "email", name="uq_storefront_subscribers_email"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    email:      Mapped[str]       = mapped_column(String(255),  nullable=False)
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontMediaModel(Base):
+    """Media library item (MinIO-backed)."""
+
+    __tablename__ = "storefront_media"
+    __table_args__ = (Index("ix_storefront_media_store", "store_id"),)
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    media_path: Mapped[str]       = mapped_column(String(1024), nullable=False)
+    media_type: Mapped[str]       = mapped_column(String(50),   nullable=False, default="image")  # image|video|file
+    size_bytes: Mapped[int]       = mapped_column(BigInteger,   nullable=False, default=0)
+    alt_text:   Mapped[str]       = mapped_column(String(512),  default="")
+    folder:     Mapped[str]       = mapped_column(String(512),  default="")
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class StorefrontAnalyticsEventModel(Base):
+    """Raw commerce event log (feeds HxAnalytics)."""
+
+    __tablename__ = "storefront_analytics_events"
+    __table_args__ = (
+        Index("ix_storefront_events_store", "store_id"),
+        Index("ix_storefront_events_created", "created_at"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(),       primary_key=True, default=_new_uuid)
+    store_id:   Mapped[uuid.UUID] = mapped_column(GUID(),       ForeignKey("storefront_stores.id", ondelete="CASCADE"), nullable=False)
+    event:      Mapped[str]       = mapped_column(String(50),   nullable=False)  # store.page_view, store.add_to_basket, …
+    data:       Mapped[dict]      = mapped_column(PortableJSON(), default=dict)
+    session:    Mapped[str|None]  = mapped_column(String(128),  nullable=True)
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)

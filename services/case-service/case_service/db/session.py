@@ -27,12 +27,19 @@ from case_service.config import get_settings
 
 def _make_engine(pool_size: int, max_overflow: int, url: str | None = None):
     settings = get_settings()
+    # url is passed only for the explicit read-replica (db_analytics_url); all primary
+    # pools resolve through the first-party backend allowlist (DB SDK Phase 0). The backend
+    # also supplies connect-time correctness options (e.g. MySQL READ COMMITTED); PostgreSQL
+    # returns {} so this path stays byte-identical for the default backend.
+    from case_service.db.backends import get_backend, resolve_async_url
+    backend = get_backend(settings.database_backend)
     return create_async_engine(
-        url or settings.database_url,
+        url or resolve_async_url(settings),
         echo=settings.db_echo,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_pre_ping=True,  # recycle stale connections before use
+        **backend.engine_options(),
     )
 
 

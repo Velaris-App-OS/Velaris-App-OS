@@ -5,16 +5,13 @@ PUT  /admin/permissions  — admin only
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.auth.dependencies import get_current_user, require_role
 from case_service.auth.models import AuthenticatedUser
+from case_service.db.models import SystemConfigModel
 from case_service.db.session import get_session
 
 router = APIRouter(tags=["permissions"])
@@ -77,14 +74,10 @@ async def get_permissions(
     session: AsyncSession = Depends(get_session),
     _user: AuthenticatedUser = Depends(get_current_user),
 ):
-    row = await session.execute(
-        text("SELECT value FROM system_config WHERE key = :key"),
-        {"key": _KEY},
-    )
-    result = row.scalar_one_or_none()
-    if result is None:
+    setting = await session.get(SystemConfigModel, _KEY)
+    if setting is None or setting.value is None:
         return PermissionsMap(permissions=_DEFAULTS)
-    return PermissionsMap(permissions=result)
+    return PermissionsMap(permissions=setting.value)
 
 
 @router.put("/admin/permissions", response_model=PermissionsMap)
@@ -93,22 +86,15 @@ async def update_permissions(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(require_role("admin")),
 ):
-    now = datetime.now(timezone.utc)
-    await session.execute(
-        text("""
-            INSERT INTO system_config (key, value, updated_at, updated_by)
-            VALUES (:key, CAST(:value AS jsonb), :ts, :by)
-            ON CONFLICT (key) DO UPDATE
-            SET value      = EXCLUDED.value,
-                updated_at = EXCLUDED.updated_at,
-                updated_by = EXCLUDED.updated_by
-        """),
-        {
-            "key":   _KEY,
-            "value": json.dumps(body.permissions),
-            "ts":    now,
-            "by":    user.username,
-        },
-    )
+    # Get-or-create via the ORM (dialect-portable; PortableJSON serializes the
+    # dict per-dialect, updated_at via the model's default/onupdate).
+    setting = await session.get(SystemConfigModel, _KEY)
+    if setting is None:
+        session.add(SystemConfigModel(
+            key=_KEY, value=body.permissions, updated_by=user.username,
+        ))
+    else:
+        setting.value = body.permissions
+        setting.updated_by = user.username
     await session.commit()
     return body

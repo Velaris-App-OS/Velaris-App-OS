@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -20,9 +20,27 @@ class Settings(BaseSettings):
     service_port: int = 8200
     debug: bool = False
 
-    # Database (async PostgreSQL)
+    # Database (DB SDK — multi-dialect). `database_backend` selects a FIRST-PARTY backend
+    # from the baked-in allowlist (case_service.db.backends.ALLOWED_BACKENDS); an unknown
+    # value aborts startup. Set once by start-velaris.sh from `velaris.yaml: database:`.
+    database_backend: str = Field(
+        default="postgresql",
+        validation_alias=AliasChoices("VELARIS_CASE_DATABASE_BACKEND", "DATABASE_BACKEND"),
+    )
+    # Full URL takes precedence when set (current behaviour; trusted operator / OpenBao
+    # config). Empty → the backend builds the URL from the typed components below.
     database_url: str = (
         "postgresql+asyncpg://helix:helix_dev_password@localhost:5432/helix"
+    )
+    # Typed connection components (used only when database_url is empty). Password is never
+    # read from velaris.yaml plaintext — only from env / OpenBao.
+    db_host: str = ""
+    db_port: int | None = None
+    db_name: str = ""
+    db_user: str = ""
+    db_password: str = Field(
+        default="",
+        validation_alias=AliasChoices("VELARIS_DB_PASSWORD", "VELARIS_CASE_DB_PASSWORD"),
     )
     db_echo: bool = False
     db_pool_size: int = 10           # operations pool (case CRUD, forms, etc.)
@@ -87,7 +105,14 @@ class Settings(BaseSettings):
 
     # >>> P24 document storage
     storage_backend: str = "local"  # "local" | "minio"
-    storage_local_path: str = "./data/helix-docs"  # relative to working dir; override via HELIX_CASE_STORAGE_LOCAL_PATH
+    storage_local_path: str = Field(
+        default="./data/helix-docs",  # relative to working dir
+        # New installs use VELARIS_CASE_STORAGE_LOCAL_PATH; HELIX_CASE_ kept for legacy .env files.
+        validation_alias=AliasChoices(
+            "VELARIS_CASE_STORAGE_LOCAL_PATH",
+            "HELIX_CASE_STORAGE_LOCAL_PATH",
+        ),
+    )
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "helix"
     minio_secret_key: str = "helix_dev_password"
@@ -235,6 +260,52 @@ class Settings(BaseSettings):
     webauthn_rp_name: str = "Velaris"
     webauthn_origin: str = "http://localhost:5173"
     # <<< Group J
+
+    # >>> HxCheckout (marketplace app `velaris/hxcheckout`)
+    # No `enabled` flag — availability is the marketplace install (the D2 gate,
+    # like HxTest); there is no bespoke on/off switch. New vars use the
+    # VELARIS_CASE_ alias prefix (the class default prefix stays HELIX_CASE_).
+    checkout_default_currency: str = Field(
+        default="GBP", validation_alias="VELARIS_CASE_CHECKOUT_DEFAULT_CURRENCY")
+    # stripe → inline payment via the existing HxConnect Stripe connector;
+    # none → invoice / cash-on-collection (payment_url is null, order skips to fulfilment).
+    checkout_payment_provider: str = Field(
+        default="stripe", validation_alias="VELARIS_CASE_CHECKOUT_PAYMENT_PROVIDER")
+    # Auto-set to the seeded Order case_type id on first install; override to use a
+    # custom case type. Empty → resolve/seed the built-in Order template on demand.
+    checkout_order_case_type_id: str = Field(
+        default="", validation_alias="VELARIS_CASE_CHECKOUT_ORDER_CASE_TYPE_ID")
+    # Webhook HMAC: requests whose signed timestamp is older than this are rejected (replay guard).
+    checkout_hmac_clock_skew_seconds: int = Field(
+        default=300, validation_alias="VELARIS_CASE_CHECKOUT_HMAC_CLOCK_SKEW_SECONDS")
+    # Orders per minute per service token before auto-suspend (mass-order-spam guard).
+    checkout_token_rate_limit: int = Field(
+        default=100, validation_alias="VELARIS_CASE_CHECKOUT_TOKEN_RATE_LIMIT")
+    # Test-mode orders auto-purged after this many days (purge cron deferred post-v1).
+    checkout_test_order_purge_days: int = Field(
+        default=30, validation_alias="VELARIS_CASE_CHECKOUT_TEST_ORDER_PURGE_DAYS")
+    # <<< HxCheckout
+
+    # >>> HxStorefront (marketplace app `velaris/hxstorefront`)
+    # No `enabled` flag — availability is the marketplace install (D2 gate, like HxTest).
+    storefront_default_currency: str = Field(
+        default="GBP", validation_alias="VELARIS_CASE_STOREFRONT_DEFAULT_CURRENCY")
+    storefront_max_stores_per_tenant: int = Field(
+        default=5, validation_alias="VELARIS_CASE_STOREFRONT_MAX_STORES_PER_TENANT")
+    storefront_max_products_per_store: int = Field(
+        default=10000, validation_alias="VELARIS_CASE_STOREFRONT_MAX_PRODUCTS_PER_STORE")
+    storefront_max_images_per_product: int = Field(
+        default=20, validation_alias="VELARIS_CASE_STOREFRONT_MAX_IMAGES_PER_PRODUCT")
+    storefront_image_max_mb: int = Field(
+        default=10, validation_alias="VELARIS_CASE_STOREFRONT_IMAGE_MAX_MB")
+    storefront_cdn_url: str = Field(
+        default="", validation_alias="VELARIS_CASE_STOREFRONT_CDN_URL")
+    storefront_basket_abandonment_hours: int = Field(
+        default=24, validation_alias="VELARIS_CASE_STOREFRONT_BASKET_ABANDONMENT_HOURS")
+    # Custom domains + SSL provisioning are DEFERRED post-v1 (the doc's certbot flow).
+    storefront_custom_domains_enabled: bool = Field(
+        default=False, validation_alias="VELARIS_CASE_STOREFRONT_CUSTOM_DOMAINS_ENABLED")
+    # <<< HxStorefront
 
     @model_validator(mode="after")
     def _fix_rsa_newlines(self) -> "Settings":

@@ -19,7 +19,11 @@ from typing import Awaitable, Callable
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from case_service.db.models import TestResultModel, TestRunModel, TestSuiteModel
+from case_service.db.models import (
+    CheckoutOrderModel, CheckoutServiceTokenModel, CheckoutWebhookEventModel,
+    CheckoutWebhookIntegrationModel, StorefrontStoreModel,
+    TestResultModel, TestRunModel, TestSuiteModel,
+)
 
 
 async def _teardown_hxtest(session: AsyncSession, tenant_id: str) -> dict:
@@ -53,9 +57,49 @@ async def _teardown_hxtest(session: AsyncSession, tenant_id: str) -> dict:
     return {"deleted": True, "suites": n_suites, "runs": n_runs, "results": n_results}
 
 
+async def _teardown_hxcheckout(session: AsyncSession, tenant_id: str) -> dict:
+    """Delete HxCheckout's own data for a tenant: service tokens, webhook
+    integrations (+ their events), and orders (+ items/notifications via FK CASCADE).
+
+    The Order/Return/Complaint CASES are core case-service data and are NOT deleted
+    here — they remain in Case Manager; only the checkout_* rows go. checkout_orders
+    has ON DELETE SET NULL to case_instances, so deleting orders never touches cases."""
+    n_events = (await session.execute(
+        delete(CheckoutWebhookEventModel).where(
+            CheckoutWebhookEventModel.integration_id.in_(
+                select(CheckoutWebhookIntegrationModel.id).where(
+                    CheckoutWebhookIntegrationModel.tenant_id == tenant_id)))
+    )).rowcount or 0
+    n_integrations = (await session.execute(
+        delete(CheckoutWebhookIntegrationModel).where(
+            CheckoutWebhookIntegrationModel.tenant_id == tenant_id))).rowcount or 0
+    n_tokens = (await session.execute(
+        delete(CheckoutServiceTokenModel).where(
+            CheckoutServiceTokenModel.tenant_id == tenant_id))).rowcount or 0
+    # Items + notifications cascade from the order delete (FK ON DELETE CASCADE).
+    n_orders = (await session.execute(
+        delete(CheckoutOrderModel).where(
+            CheckoutOrderModel.tenant_id == tenant_id))).rowcount or 0
+    return {"deleted": True, "orders": n_orders, "tokens": n_tokens,
+            "integrations": n_integrations, "webhook_events": n_events}
+
+
+async def _teardown_hxstorefront(session: AsyncSession, tenant_id: str) -> dict:
+    """Delete HxStorefront's own data for a tenant: deleting the tenant's stores
+    cascades (FK ON DELETE CASCADE) to products, variants, options, images,
+    categories, inventory logs, themes, pages, navigation, promotions, domains,
+    SEO overrides, subscribers, media, and analytics events."""
+    n_stores = (await session.execute(
+        delete(StorefrontStoreModel).where(
+            StorefrontStoreModel.tenant_id == tenant_id))).rowcount or 0
+    return {"deleted": True, "stores": n_stores}
+
+
 # package_id → teardown coroutine. Unlisted packages have no data teardown.
 _TEARDOWNS: dict[str, Callable[[AsyncSession, str], Awaitable[dict]]] = {
     "velaris/hxtest": _teardown_hxtest,
+    "velaris/hxcheckout": _teardown_hxcheckout,
+    "velaris/hxstorefront": _teardown_hxstorefront,
 }
 
 

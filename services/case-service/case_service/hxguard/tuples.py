@@ -14,7 +14,9 @@ import uuid
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.db.models import HxGuardTupleModel, OutboxEventModel
@@ -38,12 +40,31 @@ async def write_tuple(
     object_type: str, object_id: uuid.UUID, relation: str,
     subject_type: str, subject_id: str, created_by: str | None = None,
 ) -> None:
-    """Idempotent tuple upsert (ON CONFLICT DO NOTHING)."""
-    stmt = pg_insert(HxGuardTupleModel).values(
+    """Idempotent tuple upsert (ON CONFLICT DO NOTHING), dialect-portable.
+
+    Written in the caller's transaction, so catching IntegrityError is not an
+    option (it would poison the outer txn on PG). Dispatch on the session's real
+    bind dialect — in the SQLite test harness `database_backend` reads
+    "postgresql" but the engine is SQLite, so config is not the source of truth.
+    The conflict target is uq_hxguard_tuple (present in the model metadata, so it
+    exists on every dialect's schema)."""
+    values = dict(
         id=uuid.uuid4(), object_type=object_type, object_id=object_id,
         relation=relation, subject_type=subject_type, subject_id=subject_id,
         created_by=created_by,
-    ).on_conflict_do_nothing(constraint="uq_hxguard_tuple")
+    )
+    dialect = session.get_bind().dialect.name
+    if dialect == "mysql":
+        stmt = mysql_insert(HxGuardTupleModel).values(**values)
+        # Surgical no-op on the unique key — NOT INSERT IGNORE, which would also
+        # swallow FK/truncation errors.
+        stmt = stmt.on_duplicate_key_update(subject_id=stmt.inserted.subject_id)
+    elif dialect == "postgresql":
+        stmt = pg_insert(HxGuardTupleModel).values(**values).on_conflict_do_nothing(
+            constraint="uq_hxguard_tuple"
+        )
+    else:  # sqlite — bare DO NOTHING resolves the uniqueness conflict
+        stmt = sqlite_insert(HxGuardTupleModel).values(**values).on_conflict_do_nothing()
     await session.execute(stmt)
     _emit(session, "write", object_type=object_type, object_id=object_id,
           relation=relation, subject_type=subject_type, subject_id=subject_id)

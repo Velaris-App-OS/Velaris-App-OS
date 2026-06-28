@@ -4,11 +4,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-import json
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, cast, literal
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.auth.dependencies import get_current_user, require_role
@@ -106,13 +104,6 @@ async def list_entries(
         stmt = stmt.where(UserDirectoryModel.tenant_id == tenant_id)
     if manager_user_id:
         stmt = stmt.where(UserDirectoryModel.manager_user_id == manager_user_id)
-    if access_group_id:
-        # JSONB array contains filter: access_group_ids @> '["<id>"]'
-        stmt = stmt.where(
-            UserDirectoryModel.access_group_ids.op("@>")(
-                cast(literal(json.dumps([access_group_id])), JSONB)
-            )
-        )
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(
@@ -120,9 +111,18 @@ async def list_entries(
             | (UserDirectoryModel.email.ilike(pattern))
             | (UserDirectoryModel.display_name.ilike(pattern))
         )
-    stmt = stmt.order_by(UserDirectoryModel.updated_at.desc()).limit(limit)
+    stmt = stmt.order_by(UserDirectoryModel.updated_at.desc())
+    # access_group_ids is a deprecated JSON-array column and this filter is
+    # unused by the frontend; filter membership in Python (dialect-portable —
+    # avoids PG-only JSONB `@>`) and apply the limit AFTER so it isn't truncated
+    # before filtering. The directory is bounded (operators per tenant).
+    if not access_group_id:
+        stmt = stmt.limit(limit)
     res = await session.execute(stmt)
-    return [_to_response(u) for u in res.scalars().all()]
+    rows = res.scalars().all()
+    if access_group_id:
+        rows = [u for u in rows if access_group_id in (u.access_group_ids or [])][:limit]
+    return [_to_response(u) for u in rows]
 
 
 @router.get("/{user_id}", response_model=UserDirectoryResponse)
