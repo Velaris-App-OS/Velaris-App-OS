@@ -188,8 +188,8 @@ async def test_payment_request_created_and_retrievable(
     client: AsyncClient, session: AsyncSession
 ):
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -218,8 +218,8 @@ async def test_payment_request_created_and_retrievable(
 @pytest.mark.asyncio
 async def test_list_payments_for_case_returns_row(client: AsyncClient, session: AsyncSession):
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -249,8 +249,8 @@ async def test_refund_non_succeeded_payment_returns_400(
     client: AsyncClient, session: AsyncSession
 ):
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -291,8 +291,8 @@ async def test_webhook_succeeded_updates_payment_status(
     client: AsyncClient, session: AsyncSession
 ):
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -329,8 +329,8 @@ async def test_webhook_failed_updates_status(
     client: AsyncClient, session: AsyncSession
 ):
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -362,8 +362,8 @@ async def test_webhook_failed_updates_status(
 @pytest.mark.asyncio
 async def test_invalid_hmac_webhook_rejected(client: AsyncClient, session: AsyncSession):
     await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",
@@ -473,8 +473,8 @@ async def test_duplicate_webhook_second_call_is_idempotent(
 ):
     """Sending the same webhook twice should not error."""
     reg = await _register_stripe_connector(session)
+    await session.commit()   # commit BEFORE client calls — they roll back the shared connection
     case = await _make_case(client)
-    await session.commit()
 
     pr = PaymentRequestModel(
         tenant_id    = "t1",

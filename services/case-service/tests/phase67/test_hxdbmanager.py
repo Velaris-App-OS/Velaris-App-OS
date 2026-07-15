@@ -41,13 +41,22 @@ def _superadmin(): return _make_user(["admin", "superadmin"])
 def _worker():     return _make_user(["case_worker"])
 def _viewer():     return _make_user(["viewer"])
 
-# Tests that require PostgreSQL-specific features (information_schema, EXPLAIN ANALYZE,
-# SET LOCAL statement_timeout). Skipped on the default SQLite harness; they RUN when
-# the opt-in Postgres harness is active (VELARIS_TEST_DATABASE_URL set → helix_test).
+# DB-SDK Phase 1b: HxDBManager introspection is now dialect-portable (Postgres + MySQL
+# via case_service/db/introspection). Two markers:
+#   REQUIRES_EXTERNAL_DB — needs a real DB (information_schema, EXPLAIN, real tables);
+#                          RUNS on both the Postgres AND MySQL harness, skips on SQLite.
+#   REQUIRES_PG          — the test SQL itself is Postgres-only (generate_series); runs
+#                          ONLY when the harness URL is Postgres.
 import os as _os
+_EXT_URL = _os.environ.get("VELARIS_TEST_DATABASE_URL", "")
+_IS_PG   = _EXT_URL.startswith("postgresql")
+REQUIRES_EXTERNAL_DB = pytest.mark.skipif(
+    not _EXT_URL,
+    reason="Requires an external DB harness (Postgres or MySQL) — set VELARIS_TEST_DATABASE_URL"
+)
 REQUIRES_PG = pytest.mark.skipif(
-    not _os.environ.get("VELARIS_TEST_DATABASE_URL"),
-    reason="Requires PostgreSQL — set VELARIS_TEST_DATABASE_URL (helix_test) to run"
+    not _IS_PG,
+    reason="Requires PostgreSQL specifically (test uses pg-only SQL such as generate_series)"
 )
 
 def _override(user_fn):
@@ -101,7 +110,7 @@ class TestAuth:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_schema_admin_succeeds(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/schema")
@@ -226,7 +235,7 @@ class TestDosPrevention:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("label,sql", ALLOWED_SQLS)
-    @REQUIRES_PG
+    @REQUIRES_PG  # ALLOWED_SQLS use generate_series — Postgres-only execution
     async def test_safe_patterns_not_blocked(self, client: AsyncClient, label: str, sql: str):
         """Safe queries must not be blocked by abuse detection."""
         _override(_admin)
@@ -336,7 +345,7 @@ class TestInjectionPrevention:
     ]
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     @pytest.mark.parametrize("table_name", INJECTION_TABLE_NAMES)
     async def test_injection_via_table_name_blocked(self, client: AsyncClient, table_name: str):
         from urllib.parse import quote
@@ -349,7 +358,7 @@ class TestInjectionPrevention:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_injection_via_table_rows_endpoint_blocked(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/tables/helix_users%3B+DROP+TABLE+case_types--/rows")
@@ -357,7 +366,7 @@ class TestInjectionPrevention:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_sql_params_in_execute_are_safe(self, client: AsyncClient):
         """Ensure parameterised execution doesn't allow injection via sql body."""
         _override(_admin)
@@ -379,7 +388,7 @@ class TestAuditLog:
     """Every query — success, error, or rejected — must be written to query log."""
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_successful_query_logged(self, client: AsyncClient, session):
         _override(_admin)
         await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1 as ping", "row_limit": 1})
@@ -393,7 +402,7 @@ class TestAuditLog:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_rejected_ddl_logged(self, client: AsyncClient, session):
         _override(_admin)
         await client.post("/api/v1/hxdbmanager/execute", json={"sql": "DROP TABLE case_types"})
@@ -406,7 +415,7 @@ class TestAuditLog:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_history_endpoint_returns_own_queries(self, client: AsyncClient):
         _override(_admin)
         await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 42 as marker"})
@@ -424,7 +433,7 @@ class TestFunctional:
     """Core read paths work for admin users — PostgreSQL integration tests."""
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_schema_returns_table_list(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/schema")
@@ -432,10 +441,16 @@ class TestFunctional:
         data = r.json()
         assert "tables" in data
         assert isinstance(data["tables"], list)
+        # Non-empty + a known table must actually appear. This catches the silent
+        # MySQL landmine where `table_schema='public'` returns zero rows (no error):
+        # an isinstance-list check would pass on an empty browser.
+        names = {t["table_name"] for t in data["tables"]}
+        assert names, "schema returned ZERO tables — dialect introspection likely scoped to the wrong schema"
+        assert "access_groups" in names, f"expected seeded table missing; got {sorted(names)[:10]}…"
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_schema_table_detail_has_columns(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/schema/access_groups")
@@ -446,10 +461,14 @@ class TestFunctional:
         assert "columns" in data
         assert "indexes" in data
         assert "foreign_keys" in data
+        # Columns must actually be returned (silent-empty-result guard, both dialects).
+        assert len(data["columns"]) > 0, "table detail returned ZERO columns"
+        assert any(c["column_name"] == "id" for c in data["columns"]), \
+            "expected 'id' column missing from access_groups detail"
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_schema_nonexistent_table_returns_404(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/schema/this_table_does_not_exist_xyz")
@@ -457,7 +476,7 @@ class TestFunctional:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_execute_select_returns_rows(self, client: AsyncClient):
         _override(_admin)
         r = await client.post("/api/v1/hxdbmanager/execute", json={
@@ -471,7 +490,7 @@ class TestFunctional:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_explain_returns_plan(self, client: AsyncClient):
         _override(_admin)
         r = await client.post("/api/v1/hxdbmanager/explain", json={"sql": "SELECT 1"})
@@ -487,7 +506,7 @@ class TestFunctional:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_EXTERNAL_DB
     async def test_slow_queries_returns_availability_flag(self, client: AsyncClient):
         _override(_admin)
         r = await client.get("/api/v1/hxdbmanager/slow-queries?limit=5")
@@ -498,7 +517,7 @@ class TestFunctional:
         _clear()
 
     @pytest.mark.asyncio
-    @REQUIRES_PG
+    @REQUIRES_PG  # uses generate_series — Postgres-only
     async def test_row_limit_respected(self, client: AsyncClient):
         """Row limit parameter must cap results."""
         _override(_admin)

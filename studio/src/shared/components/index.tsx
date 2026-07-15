@@ -271,3 +271,5 @@ export { CommitHistory } from "./CommitHistory";
 export { BranchModeBanner } from "./BranchModeBanner";
 
 export { ReviewerPicker } from "./ReviewerPicker";
+
+export { default as MeetRoom } from "./MeetRoom";

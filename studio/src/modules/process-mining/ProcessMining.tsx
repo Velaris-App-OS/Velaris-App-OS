@@ -10,7 +10,7 @@ import { Card, Spinner, Stat, EmptyState } from "@shared/components";
    Process Mining — advanced flow analytics & discovery
    ═══════════════════════════════════════════════════════════════════ */
 
-type Tab = "overview" | "bottlenecks" | "variants" | "flow" | "activities";
+type Tab = "overview" | "bottlenecks" | "variants" | "flow" | "activities" | "insights";
 
 export default function ProcessMining() {
   const [tab, setTab] = useState<Tab>("overview");
@@ -61,7 +61,7 @@ export default function ProcessMining() {
         display: "flex", gap: 2, marginBottom: "var(--space-xl)",
         borderBottom: "1px solid var(--border-subtle)",
       }}>
-        {(["overview", "bottlenecks", "variants", "flow", "activities"] as Tab[]).map(t => (
+        {(["overview", "bottlenecks", "variants", "flow", "activities", "insights"] as Tab[]).map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             padding: "10px 16px", fontSize: 12, fontWeight: 500, fontFamily: "var(--font-mono)",
             textTransform: "uppercase", letterSpacing: "0.04em", border: "none", cursor: "pointer",
@@ -78,8 +78,129 @@ export default function ProcessMining() {
       {tab === "variants" && <VariantsTab caseTypeId={caseTypeId} days={days} tenantId={tenantId} />}
       {tab === "flow" && <FlowTab caseTypeId={caseTypeId} days={days} tenantId={tenantId} />}
       {tab === "activities" && <ActivitiesTab caseTypeId={caseTypeId} days={days} tenantId={tenantId} />}
+      {tab === "insights" && <InsightsTab caseTypeId={caseTypeId} days={days} />}
     </div>
   );
+}
+
+/* ── HxEvolve — Optimization Insights (design: docs/Future/hxevolve-self-optimizing.md)
+   The platform proposes and proves; only a human changes anything. ─────────────── */
+
+function _evolveHdr(): Record<string, string> {
+  const token = localStorage.getItem("helix_token");
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
+interface EvolveInsight {
+  id: string; case_type_id: string; proposal_kind: string; status: string;
+  evidence_kind: string | null; rationale: string | null; signal: any;
+  replay_run_id: string | null; branch_id: string | null;
+  proposal?: any; evidence?: any; created_at: string | null;
+}
+
+function InsightsTab({ caseTypeId, days }: { caseTypeId: string; days: number }) {
+  const [insights, setInsights] = useState<EvolveInsight[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [scanNote, setScanNote] = useState<string | null>(null);
+
+  async function load() {
+    const q = caseTypeId ? `?case_type_id=${caseTypeId}` : "";
+    const r = await fetch(`/api/v1/hxevolve/insights${q}`, { headers: _evolveHdr() });
+    if (r.ok) setInsights((await r.json()).insights);
+  }
+  React.useEffect(() => { load(); }, [caseTypeId]);
+
+  async function scan() {
+    if (!caseTypeId) { setError("Pick a case type to scan."); return; }
+    setBusy(true); setError(null); setScanNote(null);
+    try {
+      const r = await fetch(`/api/v1/hxevolve/scan`, {
+        method: "POST", headers: _evolveHdr(),
+        body: JSON.stringify({ case_type_id: caseTypeId, days }),
+      });
+      const j = await r.json();
+      if (!r.ok) { setError(j.detail || "Scan failed"); return; }
+      setScanNote(j.hint ?? `${j.candidates} candidate(s) examined, ${j.insights.length} insight(s) surfaced, ${j.recorded} recorded for provenance.`);
+      await load();
+    } finally { setBusy(false); }
+  }
+
+  async function act(id: string, action: "stage" | "dismiss") {
+    setBusy(true); setError(null);
+    try {
+      const r = await fetch(`/api/v1/hxevolve/insights/${id}/${action}`, { method: "POST", headers: _evolveHdr() });
+      const j = await r.json();
+      if (!r.ok) { setError(j.detail || `${action} failed`); return; }
+      await load();
+    } finally { setBusy(false); }
+  }
+
+  const KIND_LABEL: Record<string, string> = {
+    rule_adjust: "adjust rule", rule_add: "new rule", sla_duration: "SLA duration",
+    routing: "routing", reorder: "reorder steps",
+  };
+
+  return <>
+    <div style={{ display: "flex", gap: "var(--space-md)", alignItems: "center", marginBottom: "var(--space-lg)" }}>
+      <button onClick={scan} disabled={busy || !caseTypeId} style={{
+        padding: "8px 16px", borderRadius: "var(--radius-sm)", border: "none", cursor: "pointer",
+        background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600 }}>
+        {busy ? "Scanning…" : "Scan for optimizations"}
+      </button>
+      <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+        Detect (mining) &gt; propose (AI on rails) &gt; prove (replay vetoes) — a human approves every change via HxBranch.
+      </span>
+    </div>
+    {error && <Card><span style={{ color: "#ef4444", fontSize: 13 }}>{error}</span></Card>}
+    {scanNote && <Card><span style={{ color: "var(--text-secondary)", fontSize: 13 }}>{scanNote}</span></Card>}
+    {insights.length === 0 && !scanNote && (
+      <EmptyState title="No insights yet" description="Pick a case type and run a scan. Only proposals that survive the validation gate and the guardrail vetoes are surfaced here." />
+    )}
+    {insights.map(i => (
+      <Card key={i.id}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                           background: "var(--accent-dim)", color: "var(--accent)" }}>
+              {KIND_LABEL[i.proposal_kind] ?? i.proposal_kind}
+            </span>
+            <span style={{ padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 600,
+                           background: i.evidence_kind === "counterfactual" ? "#22c55e22" : "#f59e0b22",
+                           color: i.evidence_kind === "counterfactual" ? "#22c55e" : "#f59e0b" }}
+                  title={i.evidence_kind === "counterfactual"
+                    ? "Proven by HxReplay cohort simulation on real history"
+                    : "Descriptive mining statistics — not a simulated proof"}>
+              {i.evidence_kind === "counterfactual" ? "replay-proven" : "descriptive"}
+            </span>
+            {i.status === "staged" && <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 700 }}>PR open ✓ (HxBranch)</span>}
+            {i.status === "dismissed" && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>dismissed</span>}
+          </div>
+          {i.status === "surfaced" && (
+            <span style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => act(i.id, "stage")} disabled={busy} style={{
+                padding: "6px 12px", borderRadius: 6, border: "none", cursor: "pointer",
+                background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600 }}
+                title="Opens an HxBranch PR with the evidence attached — a reviewer's approval merges it. HxEvolve never applies anything itself.">
+                Open change PR
+              </button>
+              <button onClick={() => act(i.id, "dismiss")} disabled={busy} style={{
+                padding: "6px 12px", borderRadius: 6, border: "1px solid var(--border-subtle)", cursor: "pointer",
+                background: "transparent", color: "#ef4444", fontSize: 12 }}>
+                Dismiss
+              </button>
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: 13, margin: "8px 0 4px" }}>{i.rationale}</p>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+          signal: {i.signal?.kind} {i.signal?.target ? `· ${i.signal.target}` : ""}
+          {i.signal?.magnitude_seconds ? ` · avg ${Math.round(i.signal.magnitude_seconds / 60)}m` : ""}
+          {i.replay_run_id ? ` · replay run ${i.replay_run_id.slice(0, 8)}` : ""}
+        </div>
+      </Card>
+    ))}
+  </>;
 }
 
 function OverviewTab({ caseTypeId, days, tenantId }: { caseTypeId: string; days: number; tenantId: string }) {

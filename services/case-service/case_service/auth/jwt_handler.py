@@ -101,6 +101,7 @@ def create_dev_token(
     expire_minutes: int = 0,
     private_key: str = "",
     jti: str = "",
+    extra_claims: dict | None = None,
 ) -> str:
     """Create a signed JWT token.
 
@@ -110,6 +111,8 @@ def create_dev_token(
         roles:           Explicit role list. Defaults to [] (fail closed, never admin).
         expire_minutes:  When non-zero, overrides expire_days for short-lived tokens.
         jti:             JWT ID for revocation tracking. Auto-generated if not provided.
+        extra_claims:    Additional claims merged into the payload (they cannot
+                         override the standard claims). Used by MCP scoped tokens.
     """
     jwt = _get_jwt()
     if jwt is None:
@@ -126,6 +129,7 @@ def create_dev_token(
     exp = now + (expire_minutes * 60 if expire_minutes else expire_days * 86400)
 
     payload = {
+        **(extra_claims or {}),          # extras first: standard claims win
         "sub": user_id,
         "preferred_username": username,
         "email": f"{username}@{email_domain}",

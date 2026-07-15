@@ -4,13 +4,37 @@ from __future__ import annotations
 import logging
 from collections import deque
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.db.models import GraphNodeModel, GraphEdgeModel
 from case_service.hxgraph.embedder import _cosine
 
 logger = logging.getLogger(__name__)
+
+
+# ── Tenant visibility ─────────────────────────────────────────────────────────
+# Design metadata nodes are global (tenant_id NULL) and visible to everyone;
+# tenant-owned nodes (tenant-owned case types + their stages/steps, access
+# groups/roles) are visible only inside their tenant. Callers with no tenant
+# (platform operators, dev tokens) see everything — same posture as before,
+# so single-tenant setups are unaffected.
+
+def _vis_clause(tenant_id: str | None):
+    """SQL filter for nodes visible to this caller."""
+    if tenant_id is None:
+        return true()
+    return or_(
+        GraphNodeModel.tenant_id.is_(None),
+        GraphNodeModel.tenant_id == tenant_id,
+    )
+
+
+def _visible(node: GraphNodeModel | None, tenant_id: str | None) -> bool:
+    """Point-fetch counterpart of _vis_clause."""
+    if node is None:
+        return False
+    return tenant_id is None or node.tenant_id is None or node.tenant_id == tenant_id
 
 _NL_SYSTEM = (
     "You are HxNexus answering questions about the Velaris BPM platform's knowledge graph. "
@@ -21,21 +45,25 @@ _NL_SYSTEM = (
 
 # ── Node lookup ───────────────────────────────────────────────────────────────
 
-async def _find_node(session: AsyncSession, identifier: str) -> GraphNodeModel | None:
-    """Find a node by id, name, or label (fuzzy)."""
+async def _find_node(
+    session: AsyncSession, identifier: str, tenant_id: str | None = None,
+) -> GraphNodeModel | None:
+    """Find a node by id, name, or label (fuzzy) — within the caller's visibility."""
     # Try exact id
     try:
         import uuid as _uuid
         uid = _uuid.UUID(identifier)
         node = await session.get(GraphNodeModel, uid)
-        if node:
+        if node and _visible(node, tenant_id):
             return node
     except (ValueError, AttributeError):
         pass
 
     # Try exact name
     node = (await session.execute(
-        select(GraphNodeModel).where(GraphNodeModel.name == identifier)
+        select(GraphNodeModel).where(
+            GraphNodeModel.name == identifier, _vis_clause(tenant_id),
+        )
     )).scalar_one_or_none()
     if node:
         return node
@@ -43,7 +71,7 @@ async def _find_node(session: AsyncSession, identifier: str) -> GraphNodeModel |
     # Try label ILIKE
     nodes = (await session.execute(
         select(GraphNodeModel).where(
-            GraphNodeModel.label.ilike(f"%{identifier}%")
+            GraphNodeModel.label.ilike(f"%{identifier}%"), _vis_clause(tenant_id),
         ).limit(1)
     )).scalars().all()
     return nodes[0] if nodes else None
@@ -56,10 +84,11 @@ async def path_between(
     from_id: str,
     to_id: str,
     max_depth: int = 6,
+    tenant_id: str | None = None,
 ) -> list[dict] | None:
     """BFS shortest path between two nodes. Returns ordered list of nodes, or None."""
-    start = await _find_node(session, from_id)
-    end   = await _find_node(session, to_id)
+    start = await _find_node(session, from_id, tenant_id)
+    end   = await _find_node(session, to_id, tenant_id)
     if not start or not end:
         return None
     if start.id == end.id:
@@ -82,7 +111,7 @@ async def path_between(
             if edge.to_node_id in visited:
                 continue
             neighbour = await session.get(GraphNodeModel, edge.to_node_id)
-            if not neighbour:
+            if not _visible(neighbour, tenant_id):   # path may not tunnel through hidden nodes
                 continue
             new_path = path + [neighbour]
             if neighbour.id == end.id:
@@ -99,9 +128,10 @@ async def impact_nodes(
     session: AsyncSession,
     node_id: str,
     max_depth: int = 4,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """Return all nodes that depend on (have edges pointing to) this node."""
-    target = await _find_node(session, node_id)
+    target = await _find_node(session, node_id, tenant_id)
     if not target:
         return []
 
@@ -121,7 +151,7 @@ async def impact_nodes(
                 if edge.from_node_id in visited:
                     continue
                 upstream = await session.get(GraphNodeModel, edge.from_node_id)
-                if upstream:
+                if _visible(upstream, tenant_id):
                     visited.add(upstream.id)
                     result.append({**_node_dict(upstream), "edge_type": edge.edge_type})
                     queue.append(upstream)
@@ -137,6 +167,7 @@ async def similar_nodes(
     concept: str,
     top_k: int = 8,
     llm=None,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """Find nodes semantically similar to a free-text concept."""
     if llm is None:
@@ -157,13 +188,15 @@ async def similar_nodes(
         # Fall back to label text search
         nodes = (await session.execute(
             select(GraphNodeModel).where(
-                GraphNodeModel.label.ilike(f"%{concept}%")
+                GraphNodeModel.label.ilike(f"%{concept}%"), _vis_clause(tenant_id),
             ).limit(top_k)
         )).scalars().all()
         return [_node_dict(n) for n in nodes]
 
     all_nodes = (await session.execute(
-        select(GraphNodeModel).where(GraphNodeModel.embedding.isnot(None))
+        select(GraphNodeModel).where(
+            GraphNodeModel.embedding.isnot(None), _vis_clause(tenant_id),
+        )
     )).scalars().all()
 
     scored = [
@@ -184,11 +217,12 @@ async def explain_node(
     session: AsyncSession,
     concept: str,
     llm=None,
+    tenant_id: str | None = None,
 ) -> dict:
     """Find the node matching concept and explain it with its neighbourhood."""
-    node = await _find_node(session, concept)
+    node = await _find_node(session, concept, tenant_id)
     if not node:
-        sims = await similar_nodes(session, concept, top_k=1, llm=llm)
+        sims = await similar_nodes(session, concept, top_k=1, llm=llm, tenant_id=tenant_id)
         if sims:
             node = await session.get(GraphNodeModel, sims[0]["id"])
     if not node:
@@ -206,7 +240,7 @@ async def explain_node(
     for edge in (outgoing + incoming):
         nb_id = edge.to_node_id if edge.from_node_id == node.id else edge.from_node_id
         nb = await session.get(GraphNodeModel, nb_id)
-        if nb:
+        if _visible(nb, tenant_id):
             nb_labels.append(f"{edge.edge_type}: {nb.label}")
 
     context = f"Node: {node.label} ({node.node_type})\nProperties: {node.properties}\nNeighbours: {', '.join(nb_labels[:10])}"
@@ -241,6 +275,7 @@ async def query_graph(
     question: str,
     llm=None,
     top_k: int = 8,
+    tenant_id: str | None = None,
 ) -> dict:
     """HxNexus-powered natural language query over the graph."""
     if llm is None:
@@ -250,8 +285,9 @@ async def query_graph(
         except Exception:
             llm = None
 
-    # Find semantically relevant nodes
-    relevant = await similar_nodes(session, question, top_k=top_k, llm=llm)
+    # Find semantically relevant nodes (scoped to the caller's tenant visibility
+    # BEFORE the LLM sees them — the context window never contains hidden nodes)
+    relevant = await similar_nodes(session, question, top_k=top_k, llm=llm, tenant_id=tenant_id)
 
     context_parts = [f"Graph has {len(relevant)} relevant nodes for this query:"]
     for r in relevant:

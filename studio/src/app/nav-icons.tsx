@@ -66,6 +66,7 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   // Workspace
   "/":              DashboardIcon,
   "/cases":         CasesIcon,
+  "/hxmeet":        withSparkleBox(HxMeetIcon),
   "/work-center":   WorkCenterIcon,
   "/hxnexus":       withSparkleBox(HxNexusIcon),
   "/help":          KnowledgeIcon,
@@ -87,6 +88,8 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   "/app-builder":    AppBuilderIcon,
   "/hxwork":         withSparkleBox(HxWorkIcon),
   "/testsuite":      withSparkleBox(TestSuiteIcon),
+  "/hxcheckout":     HxCheckoutIcon,
+  "/hxstorefront":   HxStorefrontIcon,
   "/hxbranch":       withSparkleBox(HxBranchIcon),
   "/graph":          withSparkleBox(HxGraphIcon),
   "/process-mining": ProcessMiningIcon,
@@ -96,6 +99,8 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   // DevOps
   "/deploy":         withSparkleBox(HxDeployIcon),
   "/hxmigrate":      withSparkleBox(BpmImporterIcon),
+  "/hxdbmigrate":    withSparkleBox(HxDBManagerIcon),
+  "/hxreplay":       withSparkleBox(ProcessMiningIcon),
   "/scout":          ScoutIcon,
   "/scout-ai":       withSparkleBox(ScoutAIIcon),
   "/orchestrator":   withSparkleBox(OrchestratorIcon),
@@ -166,6 +171,17 @@ function CasesIcon({ active, size = 16 }: NavIconProps) {
       <rect x="1" y="4" width="14" height="10" rx="1.5" stroke={c} strokeWidth="1.5" />
       <path d="M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1" stroke={c} strokeWidth="1.5" />
       <path d="M1 8h14" stroke={c} strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function HxMeetIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <rect x="1.5" y="4" width="9" height="8" rx="1.5" stroke={c} strokeWidth="1.5" />
+      <path d="M10.5 7l4-2.5v7l-4-2.5" stroke={c} strokeWidth="1.5" strokeLinejoin="round" />
+      <circle cx="6" cy="8" r="1.4" stroke={c} strokeWidth="1.2" />
     </svg>
   );
 }
@@ -580,6 +596,28 @@ function HxConnectIcon({ active, size = 16 }: NavIconProps) {
       <rect x="1" y="5" width="14" height="8" rx="2" stroke={c} strokeWidth="1.3" />
       <path d="M5 9h2M9 9h2" stroke={c} strokeWidth="1.3" strokeLinecap="round" />
       <path d="M8 5V3M6 3h4" stroke={c} strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function HxCheckoutIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M1 2h2l1.2 7.5a1 1 0 0 0 1 .8h5.6a1 1 0 0 0 1-.8L13 4H4" stroke={c} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="6" cy="13" r="1" fill={c} />
+      <circle cx="11" cy="13" r="1" fill={c} />
+    </svg>
+  );
+}
+
+function HxStorefrontIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M2 6.5V13h12V6.5" stroke={c} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M1.5 6.5 3 2.5h10l1.5 4a2 2 0 0 1-3.7 0 2 2 0 0 1-3.6 0 2 2 0 0 1-3.7 0Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6.5 13v-3h3v3" stroke={c} strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   );
 }

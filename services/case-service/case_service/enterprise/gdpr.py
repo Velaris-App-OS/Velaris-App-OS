@@ -171,6 +171,31 @@ async def anonymize_user_data(
     except Exception:
         counts["memberships_removed"] = 0
 
+    # HxReplay traces are DERIVED case data (design §9 retention): anonymize the
+    # run creator and any recorded actor ids inside stored counterfactual traces.
+    from case_service.db.models import ReplayResultModel, ReplayRunModel
+
+    stmt = update(ReplayRunModel).where(
+        ReplayRunModel.created_by == user_id
+    ).values(created_by=anon_id)
+    counts["replay_runs"] = (await session.execute(stmt)).rowcount
+
+    import copy as _copy
+    scrubbed = 0
+    results = (await session.execute(select(ReplayResultModel))).scalars().all()
+    for res in results:
+        if not res.trace or user_id not in str(res.trace):
+            continue
+        # deep-copy FIRST: mutating the loaded dict in place would leave the new
+        # value == the old one at flush, and the JSON column would never update
+        trace = _copy.deepcopy(res.trace)
+        for node in trace.get("nodes", []) or []:
+            if node.get("actor_id") == user_id:
+                node["actor_id"] = anon_id
+        res.trace = trace
+        scrubbed += 1
+    counts["replay_traces"] = scrubbed
+
     return {
         "subject_id": user_id,
         "anonymized_id": anon_id,

@@ -24,8 +24,27 @@ import {
   getMyTask,
   unlockStep,
   getForm,
+  listMeetProviders,
+  listCaseSessions,
+  listCaseMessages,
+  postCaseMessage,
+  fetchRecordingUrl,
+  fetchSessionTranscript,
+  verifySessionTranscript,
+  askCase,
+  type CaseAskResult,
+  runSessionIntelligence,
+  getSessionIntelligence,
+  type SessionIntelligence,
+  startCaseSession,
+  endCaseSession,
+  getMeetSessionToken,
+  inviteMeetGuest,
+  startMeetRecording,
+  stopMeetRecording,
+  verifyMeetRecording,
 } from "@shared/api/client";
-import type { MyTaskResult } from "@shared/api/client";
+import type { MyTaskResult, CaseSession, MeetProvider } from "@shared/api/client";
 import FormRenderer from "@modules/form-builder/FormRenderer";
 import {
   Card,
@@ -34,6 +53,7 @@ import {
   EmptyState,
   TimeAgo,
   Stat,
+  MeetRoom,
 } from "@shared/components";
 import type { CaseSummary, CaseAuditEntry, CaseStatus, CasePriority, SLAStatusInfo, CaseTypeSummary } from "@shared/types";
 
@@ -287,7 +307,7 @@ function CaseDetailPanel({
   const { data: slaData } = useApi(() => getCaseSLA(caseId), [caseId]);
   const { data: caseTypeData } = useApi(() => getCaseType(caseData?.case_type_id ?? ""), [caseData?.case_type_id]);
   const { data: myTask, refetch: refetchMyTask } = useApi(() => getMyTask(caseId), [caseId]);
-  const [tab, setTab] = useState<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing">("stages");
+  const [tab, setTab] = useState<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing" | "sessions" | "messages" | "ask">("stages");
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [actionBusy, setActionBusy] = useState(false);
 
@@ -417,8 +437,8 @@ function CaseDetailPanel({
       <div style={{ display: "flex", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0, overflowX: "auto" }}>
         {([
           myTask ? "my-task" : null,
-          "stages", "details", "timeline", "sla", "sharing",
-        ].filter(Boolean) as Array<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing">).map((t) => (
+          "stages", "details", "timeline", "sla", "sharing", "sessions", "messages", "ask",
+        ].filter(Boolean) as Array<"my-task" | "stages" | "details" | "timeline" | "sla" | "sharing" | "sessions" | "messages" | "ask">).map((t) => (
           <button key={t} onClick={() => setTab(t)} style={{
             flex: 1, padding: "10px 8px", fontSize: 11, fontWeight: 500, fontFamily: "var(--font-mono)",
             textTransform: "uppercase", letterSpacing: "0.04em", border: "none", cursor: "pointer",
@@ -426,7 +446,7 @@ function CaseDetailPanel({
             color: tab === t ? "var(--accent)" : "var(--text-muted)",
             background: "transparent", borderBottom: tab === t ? "2px solid var(--accent)" : "2px solid transparent",
           }}>
-            {t === "my-task" ? "⚡ My Task" : t}
+            {t === "my-task" ? "⚡ My Task" : t === "sessions" ? "HxMeet" : t === "ask" ? "✦ Ask" : t}
           </button>
         ))}
       </div>
@@ -472,6 +492,9 @@ function CaseDetailPanel({
         {tab === "timeline" && <TimelineTab entries={history || []} />}
         {tab === "sla" && <SLATab slas={slaData || []} />}
         {tab === "sharing" && <SharingTab caseId={caseId} />}
+        {tab === "sessions" && <SessionsTab caseId={caseId} />}
+        {tab === "ask" && <AskTab caseId={caseId} />}
+        {tab === "messages" && <MessagesTab caseId={caseId} />}
       </div>
     </div>
   );
@@ -480,7 +503,7 @@ function CaseDetailPanel({
 /* ── Sharing Tab (HxGuard Phase B) ───────────────────────────── */
 
 function SharingTab({ caseId }: { caseId: string }) {
-  const [shares, setShares] = useState<{ user_id: string; relation: string; created_by: string | null; created_at: string | null }[]>([]);
+  const [shares, setShares] = useState<{ user_id: string; relation: string; username?: string | null; display_name?: string | null; created_by: string | null; created_at: string | null }[]>([]);
   const [userId, setUserId] = useState("");
   const [relation, setRelation] = useState("viewer");
   const [msg, setMsg] = useState<string | null>(null);
@@ -513,7 +536,7 @@ function SharingTab({ caseId }: { caseId: string }) {
       </div>
       {shares.map((s, i) => (
         <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border-subtle)", fontSize: 12 }}>
-          <code style={{ flex: 1 }}>{s.user_id}</code>
+          <code style={{ flex: 1 }} title={s.user_id}>{s.display_name || s.username || s.user_id}</code>
           <span style={{ color: s.relation === "editor" ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{s.relation}</span>
           {s.relation !== "assignee" && (
             <button onClick={async () => { try { await unshareCase(caseId, s.user_id, s.relation); await load(); } catch (e: any) { setMsg(e?.message || "Remove failed"); } }}
@@ -523,7 +546,7 @@ function SharingTab({ caseId }: { caseId: string }) {
       ))}
       {shares.length === 0 && <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>No direct access entries.</div>}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <input style={{ ...inp, flex: 1 }} placeholder="user id" value={userId} onChange={(e) => setUserId(e.target.value)} />
+        <input style={{ ...inp, flex: 1 }} placeholder="user id, username, or email" value={userId} onChange={(e) => setUserId(e.target.value)} />
         <select style={inp} value={relation} onChange={(e) => setRelation(e.target.value)}>
           <option value="viewer">viewer</option>
           <option value="editor">editor</option>
@@ -531,6 +554,575 @@ function SharingTab({ caseId }: { caseId: string }) {
         <button onClick={add} disabled={busy || !userId.trim()}
           style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 700 }}>Share</button>
       </div>
+      {msg && <div style={{ fontSize: 11, color: "var(--status-failed)", marginTop: 8 }}>{msg}</div>}
+    </div>
+  );
+}
+
+/* ── Messages Tab (Portal v2 P4 — worker ↔ customer thread) ──── */
+
+function MessagesTab({ caseId }: { caseId: string }) {
+  const [messages, setMessages] = useState<import("@shared/api/client").CaseMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [internal, setInternal] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try { setMessages((await listCaseMessages(caseId)).messages); setMsg(null); }
+    catch (e: any) { setMsg(e?.message || "Could not load messages"); }
+  }, [caseId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    try { await postCaseMessage(caseId, text, !internal); setDraft(""); await load(); }
+    catch (e: any) { setMsg(e?.message || "Could not send"); }
+    finally { setBusy(false); }
+  };
+
+  const inp: React.CSSProperties = { padding: "8px 10px", fontSize: 12, border: "1px solid var(--border-subtle)", borderRadius: 6, background: "var(--bg-input)", color: "var(--text-primary)" };
+
+  return (
+    <div style={{ padding: "var(--space-md)", display: "flex", flexDirection: "column", gap: 10, height: "100%" }}>
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+        {messages.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            No messages yet. Portal-visible messages reach the customer (and email them if they opted in).
+          </div>
+        )}
+        {messages.map((m) => {
+          const fromCustomer = m.author.startsWith("customer:");
+          return (
+            <div key={m.id} style={{
+              alignSelf: fromCustomer ? "flex-start" : "flex-end", maxWidth: "85%",
+              padding: "8px 12px", borderRadius: 10, fontSize: 12, lineHeight: 1.5,
+              background: fromCustomer ? "var(--bg-secondary)" : (m.portal_visible ? "var(--accent-soft, rgba(102,204,255,.12))" : "var(--bg-secondary)"),
+              border: m.portal_visible ? "1px solid var(--border-subtle)" : "1px dashed var(--border-subtle)",
+            }}>
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 3 }}>
+                {m.author_name || m.author}
+                {!m.portal_visible && " · internal note"}
+                {m.created_at ? ` · ${new Date(m.created_at).toLocaleString()}` : ""}
+              </div>
+              {m.body}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
+          placeholder={internal ? "Internal note (never shown to the customer)…" : "Message the customer…"}
+          style={{ ...inp, flex: 1, resize: "vertical" }} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ fontSize: 10, color: "var(--text-muted)", display: "flex", gap: 4, alignItems: "center", whiteSpace: "nowrap" }}>
+            <input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} />
+            internal
+          </label>
+          <button onClick={send} disabled={busy || !draft.trim()}
+            style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 600, opacity: busy || !draft.trim() ? 0.5 : 1 }}>
+            Send
+          </button>
+        </div>
+      </div>
+      {msg && <div style={{ fontSize: 11, color: "var(--status-failed)" }}>{msg}</div>}
+    </div>
+  );
+}
+
+/* ── Ask Tab (HxNexus case-scoped Q&A) ───────────────────────── */
+
+function AskTab({ caseId }: { caseId: string }) {
+  const [question, setQuestion] = useState("");
+  const [history, setHistory] = useState<{ q: string; r: CaseAskResult }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const ask = async () => {
+    const q = question.trim();
+    if (!q || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await askCase(caseId, q);
+      setHistory((h) => [...h, { q, r }]);
+      setQuestion("");
+    } catch (e: any) { setErr(e?.message || "Ask failed"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 760 }}>
+      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+        Answers come from this case only — variables, timeline, messages, documents,
+        verifications, and sealed transcripts (if you may view them). Assistive, not a verdict.
+      </div>
+
+      {history.map((h, i) => (
+        <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ alignSelf: "flex-end", maxWidth: "85%", padding: "8px 12px",
+            borderRadius: 10, background: "var(--accent)", color: "#fff", fontSize: 13 }}>
+            {h.q}
+          </div>
+          <div style={{ alignSelf: "flex-start", maxWidth: "90%", padding: "10px 12px",
+            borderRadius: 10, background: "var(--bg-secondary)",
+            border: "1px solid var(--border-subtle)", fontSize: 13, lineHeight: 1.55,
+            whiteSpace: "pre-wrap" }}>
+            {h.r.answer}
+            <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              {h.r.sources.map((s) => (
+                <span key={s.sid} title={s.label} style={{ fontSize: 10, padding: "1px 7px",
+                  borderRadius: 8, border: "1px solid var(--border-subtle)",
+                  color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                  {s.sid} {s.kind}
+                </span>
+              ))}
+              <span style={{ fontSize: 10, fontWeight: 700,
+                color: h.r.external_ai ? "var(--status-failed)" : "var(--accent)" }}>
+                {h.r.external_ai ? "⚠ processed by external AI (tenant consent)" : "🔒 processed locally"}
+              </span>
+            </div>
+            {h.r.withheld.length > 0 && (
+              <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-muted)" }}>
+                Withheld: {h.r.withheld.join("; ")}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {err && <div style={{ fontSize: 12, color: "var(--status-failed)" }}>{err}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={question} onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") ask(); }}
+          placeholder="Ask anything about this case…"
+          style={{ flex: 1, padding: "9px 12px", border: "1px solid var(--border-default)",
+            borderRadius: "var(--radius-sm)", background: "var(--bg-input)",
+            color: "var(--text-primary)", fontSize: 13 }} />
+        <button onClick={ask} disabled={busy || !question.trim()}
+          style={{ padding: "9px 18px", border: "none", borderRadius: "var(--radius-sm)",
+            background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600,
+            cursor: busy ? "wait" : "pointer", opacity: busy || !question.trim() ? 0.6 : 1 }}>
+          {busy ? "Thinking…" : "Ask"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Sessions Tab (HxMeet P1) ────────────────────────────────── */
+
+const PROVIDER_LABELS: Record<string, string> = {
+  teams: "Teams", zoom: "Zoom", gmeet: "Google Meet", generic: "Meeting", livekit: "Velaris",
+};
+
+function SessionsTab({ caseId }: { caseId: string }) {
+  const [sessions, setSessions] = useState<CaseSession[]>([]);
+  const [providers, setProviders] = useState<MeetProvider[]>([]);
+  const [driver, setDriver] = useState<string>("off_platform");
+  const [provider, setProvider] = useState<string>("");
+  const [title, setTitle] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [room, setRoom] = useState<{ url: string; token: string; session: CaseSession } | null>(null);
+  const [record, setRecord] = useState(false);
+  const [inviteFor, setInviteFor] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  // Sealed-recording in-app player (no download affordance — GDPR: the
+  // decrypted stream stays in memory; every view is audit-logged server-side)
+  const [playback, setPlayback] = useState<{ url: string; sessionId: string } | null>(null);
+  const [playBusy, setPlayBusy] = useState<string | null>(null);
+  // P4a — per-session intelligence (transcript + summary)
+  const [intel, setIntel] = useState<Record<string, SessionIntelligence>>({});
+  const [intelBusy, setIntelBusy] = useState<string | null>(null);
+
+  const loadIntel = async (sessionId: string) => {
+    try {
+      const got = await getSessionIntelligence(sessionId);
+      setIntel((m) => ({ ...m, [sessionId]: got }));
+    } catch { /* not enabled / none — leave unset */ }
+  };
+
+  const analyze = async (sessionId: string) => {
+    setIntelBusy(sessionId);
+    try {
+      await runSessionIntelligence(sessionId);
+      setIntel((m) => ({ ...m, [sessionId]: { status: "running" } }));
+      // Poll a few times — transcription runs in the background.
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const got = await getSessionIntelligence(sessionId);
+        setIntel((m) => ({ ...m, [sessionId]: got }));
+        if (got.status === "completed" || got.status === "failed") break;
+      }
+    } catch (e: any) { setMsg(e?.message || "Could not start analysis"); }
+    finally { setIntelBusy(null); }
+  };
+
+  const openRecording = async (sessionId: string) => {
+    setPlayBusy(sessionId);
+    try { setPlayback({ url: await fetchRecordingUrl(sessionId), sessionId }); }
+    catch (e: any) { setMsg(e?.message || "Could not load the recording"); }
+    finally { setPlayBusy(null); }
+  };
+
+  // P4a-live-2 — sealed live transcript viewer
+  const [transcripts, setTranscripts] = useState<Record<string, string>>({});
+  const [transcriptOpen, setTranscriptOpen] = useState<string | null>(null);
+
+  const openTranscript = async (sessionId: string) => {
+    if (transcriptOpen === sessionId) { setTranscriptOpen(null); return; }
+    try {
+      if (!transcripts[sessionId]) {
+        const text = await fetchSessionTranscript(sessionId);
+        setTranscripts((m) => ({ ...m, [sessionId]: text }));
+      }
+      setTranscriptOpen(sessionId);
+    } catch (e: any) { setMsg(e?.message || "Could not load the transcript"); }
+  };
+
+  const verifyTranscript = async (sessionId: string) => {
+    try {
+      const r = await verifySessionTranscript(sessionId);
+      setMsg(r.verified
+        ? `Transcript verified ✓ sha256 ${r.sha256?.slice(0, 16)}… matches the audit-chain seal`
+        : `TRANSCRIPT VERIFICATION FAILED: ${r.reason || "hash mismatch"}`);
+    } catch (e: any) { setMsg(e?.message || "Verification failed"); }
+  };
+
+  const closeRecording = () => {
+    if (playback) URL.revokeObjectURL(playback.url);
+    setPlayback(null);
+  };
+
+  const embedded = driver === "embedded";
+
+  const load = useCallback(async () => {
+    try {
+      const r = await listCaseSessions(caseId);
+      setSessions(r.sessions);
+      setMsg(null);
+    } catch (e: any) { setMsg(e?.message || "Could not load sessions"); }
+  }, [caseId]);
+
+  useEffect(() => {
+    load();
+    listMeetProviders()
+      .then((r) => {
+        setDriver(r.driver);
+        setProviders(r.providers);
+        const def = r.providers.find((p) => p.is_default) ?? r.providers[0];
+        if (def) setProvider(def.provider);
+      })
+      .catch(() => setProviders([]));
+  }, [load]);
+
+  const joinEmbedded = async (s: CaseSession, skipConsentPrompt = false) => {
+    // Consent is stamped server-side when the token is minted — the notice
+    // must come first. The starter checked the record box deliberately.
+    if (s.record_intent && !skipConsentPrompt &&
+        !window.confirm("This session is recorded. Joining records your audio, video, and screen-share, and counts as your consent. Join?")) {
+      return;
+    }
+    try {
+      const t = await getMeetSessionToken(s.id);
+      setRoom({ url: t.url, token: t.token, session: s });
+    } catch (e: any) { setMsg(e?.message || "Could not join the session"); }
+  };
+
+  const start = async () => {
+    setBusy(true);
+    try {
+      const s = await startCaseSession(caseId, {
+        title: title.trim() || undefined,
+        provider: embedded ? undefined : provider || undefined,
+        ...(embedded && record ? { record: true } : {}),
+      });
+      setTitle("");
+      if (s.driver === "embedded") await joinEmbedded(s, true);
+      else if (s.join_url) window.open(s.join_url, "_blank", "noopener");
+      await load();
+    } catch (e: any) { setMsg(e?.message || "Could not start the session"); }
+    finally { setBusy(false); }
+  };
+
+  const toggleRecording = async () => {
+    if (!room) return;
+    try {
+      const s = room.session.recording_status === "recording"
+        ? await stopMeetRecording(room.session.id)
+        : await startMeetRecording(room.session.id);
+      setRoom({ ...room, session: s });
+      await load();
+    } catch (e: any) { setMsg(e?.message || "Recording control failed"); }
+  };
+
+  const verifyRecording = async (id: string) => {
+    try {
+      const v = await verifyMeetRecording(id);
+      setMsg(v.verified
+        ? `Recording verified ✓ sha256 ${v.sha256?.slice(0, 16)}… matches the audit-chain seal.`
+        : `Recording NOT verified: ${v.reason || "hash mismatch against the audit-chain seal"}`);
+    } catch (e: any) { setMsg(e?.message || "Verification failed"); }
+  };
+
+  const end = async (id: string) => {
+    try { await endCaseSession(id); await load(); }
+    catch (e: any) { setMsg(e?.message || "Could not end the session"); }
+  };
+
+  const invite = async (sessionId: string) => {
+    try {
+      const inv = await inviteMeetGuest(sessionId, { email: inviteEmail.trim() });
+      setInviteLink(`${window.location.origin}${inv.join_path}`);
+      setInviteEmail("");
+    } catch (e: any) { setMsg(e?.message || "Could not create the invite"); }
+  };
+
+  const inp: React.CSSProperties = { padding: "6px 10px", fontSize: 12, border: "1px solid var(--border-subtle)", borderRadius: 6, background: "var(--bg-input)", color: "var(--text-primary)" };
+  const badge = (s: CaseSession): React.CSSProperties => ({
+    fontFamily: "var(--font-mono)", fontSize: 10, textTransform: "uppercase", padding: "2px 6px", borderRadius: 4,
+    color: s.status === "active" ? "var(--accent)" : "var(--text-muted)",
+    border: `1px solid ${s.status === "active" ? "var(--accent)" : "var(--border-subtle)"}`,
+  });
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
+        {embedded
+          ? "Live sessions for this case, hosted in Velaris — voice, video, and screen-share in the browser. Sessions are not recorded."
+          : "Live meetings for this case, created on your organisation's provider. The recording (if any) stays with that provider — it is not stored on the case."}
+      </div>
+
+      {!embedded && providers.length === 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>
+          No meeting provider configured. Add a Teams, Zoom, Google Meet, or generic
+          meeting connector in HxBridge to enable case sessions.
+        </div>
+      )}
+
+      {(embedded || providers.length > 0) && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <input style={{ ...inp, flex: 1 }} placeholder="session title (optional)"
+            value={title} onChange={(e) => setTitle(e.target.value)} />
+          {!embedded && (
+            <select style={inp} value={provider} onChange={(e) => setProvider(e.target.value)}>
+              {providers.map((p) => (
+                <option key={p.connector_id} value={p.provider}>{PROVIDER_LABELS[p.provider] ?? p.provider}</option>
+              ))}
+            </select>
+          )}
+          {embedded && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer" }}>
+              <input type="checkbox" checked={record} onChange={(e) => setRecord(e.target.checked)} />
+              record &amp; seal to case
+            </label>
+          )}
+          <button onClick={start} disabled={busy}
+            style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 700, whiteSpace: "nowrap" }}>
+            {busy ? "Starting…" : "▶ Start meeting"}
+          </button>
+        </div>
+      )}
+
+      {sessions.map((s) => (
+        <React.Fragment key={s.id}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border-subtle)", fontSize: 12 }}>
+          <span style={badge(s)}>{s.status}</span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
+            {PROVIDER_LABELS[s.provider] ?? s.provider}
+          </span>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {s.title || "Case session"}
+          </span>
+          <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+            {s.started_at ? new Date(s.started_at).toLocaleString() : ""}
+          </span>
+          {s.record_intent && s.recording_status && s.recording_status !== "none" && (
+            <span style={{
+              fontFamily: "var(--font-mono)", fontSize: 10, textTransform: "uppercase",
+              padding: "2px 6px", borderRadius: 4,
+              color: s.recording_status === "sealed" ? "var(--accent)" : s.recording_status === "failed" ? "var(--status-failed)" : "var(--text-muted)",
+              border: "1px solid var(--border-subtle)",
+            }}>
+              {s.recording_status === "recording" ? "● rec" : s.recording_status}
+            </span>
+          )}
+          {s.recording_status === "sealed" && (
+            <>
+              <button onClick={() => openRecording(s.id)} disabled={playBusy === s.id}
+                style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 600, cursor: "pointer", fontSize: 12, opacity: playBusy === s.id ? 0.5 : 1 }}>
+                {playBusy === s.id ? "Loading…" : "▶ Play"}
+              </button>
+              <button onClick={() => verifyRecording(s.id)}
+                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12 }}>
+                Verify
+              </button>
+            </>
+          )}
+          {s.transcript_status === "sealed" && (
+            <button onClick={() => openTranscript(s.id)}
+              style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 600, cursor: "pointer", fontSize: 12 }}>
+              {transcriptOpen === s.id ? "Hide transcript" : "Transcript"}
+            </button>
+          )}
+          {(s.recording_status === "sealed" || s.transcript_status === "sealed") && (
+            <button onClick={() => (intel[s.id] ? loadIntel(s.id) : analyze(s.id))} disabled={intelBusy === s.id}
+              style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12, opacity: intelBusy === s.id ? 0.5 : 1 }}>
+              {intelBusy === s.id ? "Analyzing…" : (intel[s.id]?.status === "completed" ? "Analysis" : "Analyze")}
+            </button>
+          )}
+          {s.status === "active" && s.driver === "embedded" && (
+            <>
+              <button onClick={() => joinEmbedded(s)}
+                style={{ background: "none", border: "none", color: "var(--accent)", fontWeight: 600, cursor: "pointer", fontSize: 12 }}>
+                Join
+              </button>
+              <button onClick={() => { setInviteFor(inviteFor === s.id ? null : s.id); setInviteLink(null); }}
+                style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
+                Invite
+              </button>
+            </>
+          )}
+          {s.status === "active" && s.driver !== "embedded" && s.join_url && (
+            <a href={s.join_url} target="_blank" rel="noopener noreferrer"
+              style={{ color: "var(--accent)", fontWeight: 600, textDecoration: "none" }}>Join</a>
+          )}
+          {s.status === "active" && (
+            <button onClick={() => end(s.id)}
+              style={{ background: "none", border: "none", color: "var(--status-failed)", cursor: "pointer", fontSize: 12 }}>
+              End
+            </button>
+          )}
+        </div>
+
+        {/* P4a-live-2 — sealed live transcript panel */}
+        {transcriptOpen === s.id && transcripts[s.id] !== undefined && (
+          <div style={{ padding: "10px 12px", margin: "6px 0 12px", borderRadius: 8,
+            background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)", fontSize: 12 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 6 }}>
+              <span style={{ fontWeight: 700 }}>Sealed live transcript</span>
+              <button onClick={() => verifyTranscript(s.id)}
+                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>
+                Verify seal
+              </button>
+              <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                tenant-key encrypted at rest · every view audited · assistive, may mis-hear
+              </span>
+            </div>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)",
+              fontSize: 11, lineHeight: 1.6, maxHeight: 260, overflowY: "auto",
+              color: "var(--text-secondary)" }}>
+              {transcripts[s.id]}
+            </pre>
+          </div>
+        )}
+
+        {/* P4a — session intelligence panel */}
+        {intel[s.id] && intel[s.id].status !== "none" && (
+          <div style={{ padding: "10px 12px", margin: "6px 0 12px", borderRadius: 8,
+            background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)", fontSize: 12 }}>
+            {intel[s.id].status === "running" && <span style={{ color: "var(--text-muted)" }}>Transcribing & summarizing… this runs locally and can take a minute.</span>}
+            {intel[s.id].status === "failed" && <span style={{ color: "var(--status-failed)" }}>Analysis failed: {intel[s.id].error || "unknown error"}</span>}
+            {intel[s.id].status === "completed" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {intel[s.id].summary && (
+                  <div>
+                    <div style={{ fontWeight: 700, marginBottom: 3 }}>Summary</div>
+                    <div style={{ color: "var(--text-secondary)", lineHeight: 1.5 }}>{intel[s.id].summary}</div>
+                  </div>
+                )}
+                {(intel[s.id].action_items?.length ?? 0) > 0 && (
+                  <div>
+                    <div style={{ fontWeight: 700, marginBottom: 3 }}>Action items</div>
+                    <ul style={{ margin: 0, paddingLeft: 18, color: "var(--text-secondary)" }}>
+                      {intel[s.id].action_items!.map((a, i) => <li key={i}>{a}</li>)}
+                    </ul>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 12, alignItems: "center", color: "var(--text-muted)", fontSize: 11 }}>
+                  {intel[s.id].transcript_document_id && (
+                    <a href={`/api/v1/documents/${intel[s.id].transcript_document_id}/download`}
+                      target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>Transcript</a>
+                  )}
+                  {intel[s.id].language && <span>lang: {intel[s.id].language}</span>}
+                  <span title={JSON.stringify(intel[s.id].model_versions)}>local models · assistive, not a verdict</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        </React.Fragment>
+      ))}
+
+      {inviteFor && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+          <input style={{ ...inp, flex: 1 }} placeholder="guest email"
+            value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} />
+          <button onClick={() => invite(inviteFor)} disabled={!inviteEmail.trim()}
+            style={{ ...inp, cursor: "pointer", color: "var(--accent)", fontWeight: 600 }}>
+            Create invite
+          </button>
+          {inviteLink && (
+            <button onClick={() => navigator.clipboard?.writeText(inviteLink)}
+              title={inviteLink}
+              style={{ ...inp, cursor: "pointer", whiteSpace: "nowrap" }}>
+              Copy link (single-use, 15 min)
+            </button>
+          )}
+        </div>
+      )}
+
+      {room && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.75)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+        }}>
+          <div style={{
+            width: "min(1100px, 96vw)", height: "min(720px, 92vh)", borderRadius: 14,
+            background: "var(--bg-primary)", border: "1px solid var(--border-subtle)", padding: 16,
+          }}>
+            <MeetRoom url={room.url} token={room.token} title={room.session.title}
+              recordIntent={room.session.record_intent}
+              recordingActive={room.session.recording_status === "recording"}
+              onToggleRecording={toggleRecording} sessionId={room.session.id}
+              onLeave={() => { setRoom(null); load(); }} />
+          </div>
+        </div>
+      )}
+      {playback && (
+        <div onClick={closeRecording} style={{
+          position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.85)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "min(960px, 96vw)", borderRadius: 14, background: "var(--bg-primary)",
+            border: "1px solid var(--border-subtle)", padding: 16,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>Sealed recording</span>
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                view-only · this access is audit-logged
+              </span>
+              <button onClick={closeRecording} style={{
+                background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16,
+              }}>✕</button>
+            </div>
+            <video src={playback.url} controls autoPlay
+              controlsList="nodownload noremoteplayback"
+              disablePictureInPicture
+              onContextMenu={(e) => e.preventDefault()}
+              style={{ width: "100%", maxHeight: "72vh", borderRadius: 8, background: "#000" }} />
+          </div>
+        </div>
+      )}
+      {sessions.length === 0 && providers.length > 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>No sessions yet.</div>
+      )}
       {msg && <div style={{ fontSize: 11, color: "var(--status-failed)", marginTop: 8 }}>{msg}</div>}
     </div>
   );

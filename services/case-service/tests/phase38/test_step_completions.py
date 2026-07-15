@@ -58,7 +58,7 @@ async def case_type(session) -> CaseTypeModel:
         name="Step Test Case", version="1.0.0",
         definition_json=CASE_TYPE_DEF, default_priority="medium",
     )
-    session.add(ct); await session.flush(); return ct
+    session.add(ct); await session.commit(); return ct
 
 
 @pytest_asyncio.fixture
@@ -70,7 +70,7 @@ async def case_(session, case_type) -> CaseInstanceModel:
         current_stage_id=STAGE_ID,
         created_by="worker-1",
     )
-    session.add(c); await session.flush(); return c
+    session.add(c); await session.commit(); return c
 
 
 @pytest_asyncio.fixture
@@ -84,7 +84,7 @@ async def case_no_stages(session) -> CaseInstanceModel:
         case_type_id=ct.id, case_type_version="1.0.0",
         status="open", priority="medium", data={}, created_by="w",
     )
-    session.add(c); await session.flush(); return c
+    session.add(c); await session.commit(); return c
 
 
 # ── Complete step ─────────────────────────────────────────────────────────────

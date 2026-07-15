@@ -4033,6 +4033,7 @@ class PortalCustomerModel(Base):
     verified:        Mapped[bool]            = mapped_column(Boolean, nullable=False, default=False)
     otp_code:        Mapped[str | None]      = mapped_column(String(64), nullable=True)   # SHA-256 hash
     otp_expires_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notify_email:    Mapped[bool]            = mapped_column(Boolean, nullable=False, default=True)  # P4 (mig 116)
     created_at:      Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_active_at:  Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -4048,6 +4049,69 @@ class PortalCustomerCaseLinkModel(Base):
     customer_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("portal_customers.id", ondelete="CASCADE"), primary_key=True)
     case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id",   ondelete="CASCADE"), primary_key=True)
     linked_at:   Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseMessageModel(Base):
+    """Portal v2 P4 (mig 116) — human case thread (worker ↔ customer).
+
+    author is a principal ("user:{id}" | "customer:{id}"); portal_visible
+    FALSE = internal worker note, never served to the portal.
+    """
+    __tablename__ = "case_messages"
+    __table_args__ = (
+        Index("idx_case_messages_case", "case_id", "created_at"),
+    )
+
+    id:             Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    case_id:        Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), nullable=False)
+    author:         Mapped[str]       = mapped_column(String(255), nullable=False)
+    author_name:    Mapped[str | None] = mapped_column(String(255), nullable=True)
+    body:           Mapped[str]       = mapped_column(Text, nullable=False)
+    portal_visible: Mapped[bool]      = mapped_column(Boolean, default=True, nullable=False)
+    created_at:     Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PortalCsatModel(Base):
+    """Portal v2 P5 (mig 117) — one post-resolution rating per case."""
+    __tablename__ = "portal_csat"
+
+    case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), primary_key=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("portal_customers.id", ondelete="CASCADE"), nullable=False)
+    rating:      Mapped[int]       = mapped_column(Integer, nullable=False)
+    comment:     Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PortalAskFeedbackModel(Base):
+    """Portal v2 P5 (mig 117) — pre-submit AI deflection feedback."""
+    __tablename__ = "portal_ask_feedback"
+    __table_args__ = (
+        Index("idx_portal_ask_feedback_tenant", "tenant_slug", "created_at"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_slug: Mapped[str]       = mapped_column(String(255), nullable=False)
+    question:    Mapped[str]       = mapped_column(Text, nullable=False)
+    helpful:     Mapped[bool]      = mapped_column(Boolean, nullable=False)
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PortalSubmissionRefModel(Base):
+    """Portal v2 P2 (mig 115) — offline-submission idempotency.
+
+    A PWA submission carries a client-generated UUID; replayed syncs
+    (double flush, two tabs, background-sync retry) resolve to the original
+    case instead of creating a duplicate. Prunable after 30 days.
+    """
+    __tablename__ = "portal_submission_refs"
+    __table_args__ = (
+        Index("idx_portal_submission_refs_created", "created_at"),
+    )
+
+    client_ref:  Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True)
+    tenant_slug: Mapped[str]       = mapped_column(String(255), nullable=False)
+    case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), nullable=False)
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class HxGuardTupleModel(Base):
@@ -4665,3 +4729,538 @@ class StorefrontAnalyticsEventModel(Base):
     data:       Mapped[dict]      = mapped_column(PortableJSON(), default=dict)
     session:    Mapped[str|None]  = mapped_column(String(128),  nullable=True)
     created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# ── HxDBMigrate — migrate an external source DB into Velaris (P1: connect + discover) ──
+
+class HxDBMigrateSourceModel(Base):
+    """A registered READ-ONLY external source database (migrate-INTO-Velaris).
+
+    Credentials are stored HxVault-encrypted ({'_enc': …}); host/port/db/user are plain.
+    source_type is a first-party allowlist value (postgresql | mysql | mariadb).
+    """
+
+    __tablename__ = "hxdbmigrate_sources"
+    __table_args__ = (
+        UniqueConstraint("name", "tenant_id", name="uq_hxdbmig_src_name_tenant"),
+        Index("ix_hxdbmig_src_tenant", "tenant_id"),
+    )
+
+    id:          Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    name:        Mapped[str]        = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str]        = mapped_column(String(32),  nullable=False)
+    host:        Mapped[str]        = mapped_column(String(255), nullable=False)
+    port:        Mapped[int]        = mapped_column(Integer,     nullable=False)
+    database:    Mapped[str]        = mapped_column(String(255), nullable=False)
+    username:    Mapped[str]        = mapped_column(String(255), nullable=False)
+    ssl_mode:    Mapped[str]        = mapped_column(String(16),  nullable=False, default="disable")
+    credentials: Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    tenant_id:   Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # P6 lifecycle: active -> cutover -> completed | (rollback -> active)
+    status:      Mapped[str]        = mapped_column(String(16), nullable=False, default="active")
+    cutover_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback_window_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=72)
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_connect_ok:   Mapped[bool | None]     = mapped_column(Boolean, nullable=True)
+    created_by:  Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:  Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:  Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class HxDBMigrateAnalysisModel(Base):
+    """A discovery analysis of a source: Schema Autobiography + data-quality scoring."""
+
+    __tablename__ = "hxdbmigrate_analyses"
+    __table_args__ = (
+        Index("ix_hxdbmig_an_source", "source_id"),
+        Index("ix_hxdbmig_an_tenant", "tenant_id"),
+        Index("ix_hxdbmig_an_created", "created_at"),
+    )
+
+    id:            Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    source_id:     Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    tenant_id:     Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status:        Mapped[str]        = mapped_column(String(32), default="complete")  # complete | failed
+    table_count:   Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0–100
+    pii_count:     Mapped[int | None] = mapped_column(Integer, nullable=True)  # sensitive columns (deep)
+    report:        Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    error:         Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by:    Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:    Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HxDBMigrateMigrationRunModel(Base):
+    """A P4 batch data-migration run: source table rows → Velaris cases."""
+
+    __tablename__ = "hxdbmigrate_migration_runs"
+    __table_args__ = (
+        Index("ix_hxdbmig_run_source", "source_id"),
+        Index("ix_hxdbmig_run_tenant", "tenant_id"),
+        Index("ix_hxdbmig_run_created", "created_at"),
+    )
+
+    id:             Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    source_id:      Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    tenant_id:      Mapped[str | None] = mapped_column(String(255), nullable=True)
+    table_name:     Mapped[str]        = mapped_column(String(255), nullable=False)
+    case_type_id:   Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    kind:           Mapped[str]        = mapped_column(String(16), default="migrate")   # migrate|sync|cutover|rollback
+    status:         Mapped[str]        = mapped_column(String(32), default="complete")  # complete|failed|dry_run
+    pii_mode:       Mapped[str]        = mapped_column(String(16), default="safe")       # safe|exclude_all|as_is
+    dry_run:        Mapped[bool]       = mapped_column(Boolean, default=False)
+    rows_read:      Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows_migrated:  Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows_updated:   Mapped[int | None] = mapped_column(Integer, nullable=True)
+    excluded_columns: Mapped[list]     = mapped_column(PortableJSON(), default=list)
+    error:          Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by:     Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HxDBMigrateRowLinkModel(Base):
+    """P5 identity spine: one source row → one Velaris case.
+
+    Unique on (source, table, source_pk) — sync upserts through it, and rollback
+    knows exactly which cases a source's migration created.
+    """
+
+    __tablename__ = "hxdbmigrate_row_links"
+    __table_args__ = (
+        UniqueConstraint("source_id", "table_name", "source_pk",
+                         name="uq_hxdbmig_link_row"),
+        Index("ix_hxdbmig_link_source", "source_id"),
+        Index("ix_hxdbmig_link_case",   "case_id"),
+        Index("ix_hxdbmig_link_tenant", "tenant_id"),
+    )
+
+    id:             Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    source_id:      Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    tenant_id:      Mapped[str | None] = mapped_column(String(255), nullable=True)
+    table_name:     Mapped[str]        = mapped_column(String(255), nullable=False)
+    source_pk:      Mapped[str]        = mapped_column(String(512), nullable=False)
+    case_id:        Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    case_type_id:   Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    row_checksum:   Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HxEvolveInsightModel(Base):
+    """An HxEvolve optimization insight — every proposal the system generated.
+
+    HxEvolve's ONLY write surface. Discarded proposals stay here for provenance
+    (§5) but are never surfaced; production config changes only ever happen
+    through a human-approved HxBranch merge (P2 records the branch id).
+    """
+
+    __tablename__ = "hxevolve_insights"
+    __table_args__ = (
+        Index("ix_hxevolve_ins_ct",      "case_type_id"),
+        Index("ix_hxevolve_ins_tenant",  "tenant_id"),
+        Index("ix_hxevolve_ins_status",  "status"),
+        Index("ix_hxevolve_ins_created", "created_at"),
+    )
+
+    id:             Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:      Mapped[str | None] = mapped_column(String(255), nullable=True)
+    case_type_id:   Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    signal:         Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    proposal:       Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    proposal_kind:  Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evidence:       Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    evidence_kind:  Mapped[str | None] = mapped_column(String(16), nullable=True)
+    replay_run_id:  Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    rationale:      Mapped[str | None] = mapped_column(Text, nullable=True)
+    status:         Mapped[str]        = mapped_column(String(32), default="surfaced")
+    branch_id:      Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    staged_rule_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    created_by:     Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HxEvolveConfigModel(Base):
+    """Per-case-type HxEvolve objective/guardrail configuration (§4).
+
+    Conservative defaults; scheduled scanning is opt-in per case type.
+    """
+
+    __tablename__ = "hxevolve_config"
+    __table_args__ = (
+        Index("ix_hxevolve_cfg_tenant",  "tenant_id"),
+        Index("ix_hxevolve_cfg_enabled", "scan_enabled"),
+    )
+
+    case_type_id:         Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True)
+    tenant_id:            Mapped[str | None] = mapped_column(String(255), nullable=True)
+    min_improvement:      Mapped[float]      = mapped_column(Float, default=0.10)
+    max_auto_ratio_rise:  Mapped[float]      = mapped_column(Float, default=0.15)
+    min_coverage:         Mapped[float]      = mapped_column(Float, default=0.7)
+    min_determinate:      Mapped[int]        = mapped_column(Integer, default=50)
+    scan_frequency_hours: Mapped[int]        = mapped_column(Integer, default=24)
+    scan_enabled:         Mapped[bool]       = mapped_column(Boolean, default=False)
+    # cumulative-drift guardrail (§6): re-check the holistic baseline after
+    # every N merged HxEvolve changes
+    drift_check_every_n_changes: Mapped[int] = mapped_column(Integer, default=3)
+    updated_by:           Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at:           Mapped[datetime]   = mapped_column(DateTime(timezone=True),
+                                                             default=_utcnow, onupdate=_utcnow)
+
+
+class HxEvolveBaselineModel(Base):
+    """HxEvolve cumulative-drift guardrail (§6): the holistic reference point.
+
+    Each replay proof only compares against the immediately previous config, so
+    a chain of individually-improving merges can compound into a regression.
+    This row pins the case-type's metrics when HxEvolve first saw it; after
+    every N merged changes the CURRENT metrics are compared against it — a
+    cumulative regression freezes further scans until an admin re-baselines.
+    """
+
+    __tablename__ = "hxevolve_baselines"
+
+    case_type_id:       Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True)
+    tenant_id:          Mapped[str | None] = mapped_column(String(255), nullable=True)
+    metrics:            Mapped[dict]       = mapped_column(PortableJSON(), nullable=False)
+    merged_at_baseline: Mapped[int]        = mapped_column(Integer, nullable=False, default=0)
+    checked_through:    Mapped[int]        = mapped_column(Integer, nullable=False, default=0)
+    frozen:             Mapped[bool]       = mapped_column(Boolean, nullable=False, default=False)
+    frozen_reason:      Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by:         Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:         Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    rebaselined_at:     Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReplayRunModel(Base):
+    """A HxReplay run (single-case or cohort counterfactual replay).
+
+    Replay output lives ONLY here + replay_results — never in real case tables.
+    """
+
+    __tablename__ = "replay_runs"
+    __table_args__ = (
+        Index("ix_replay_runs_tenant", "tenant_id"),
+        Index("ix_replay_runs_created", "created_at"),
+        Index("ix_replay_runs_status", "status"),
+    )
+
+    id:            Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:     Mapped[str | None] = mapped_column(String(255), nullable=True)
+    kind:          Mapped[str]        = mapped_column(String(16), default="single")   # single|cohort
+    status:        Mapped[str]        = mapped_column(String(32), default="pending")  # pending|running|complete|failed
+    branch_id:     Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    candidate:     Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    case_id:       Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    cohort_filter: Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    config_epoch:  Mapped[str]        = mapped_column(String(32), default="current+branch")
+    estimate:      Mapped[bool]       = mapped_column(Boolean, default=False)   # P3 opt-in
+    summary:       Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    anchored:      Mapped[bool]       = mapped_column(Boolean, default=False)
+    error:         Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by:    Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:    Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    started_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at:   Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReplayResultModel(Base):
+    """Per-case outcome of a replay run: baseline vs counterfactual + determinacy."""
+
+    __tablename__ = "replay_results"
+    __table_args__ = (
+        Index("ix_replay_results_run", "run_id"),
+        Index("ix_replay_results_case", "case_id"),
+    )
+
+    id:                     Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    run_id:                 Mapped[uuid.UUID]  = mapped_column(GUID(), ForeignKey("replay_runs.id", ondelete="CASCADE"), nullable=False)
+    case_id:                Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    tenant_id:              Mapped[str | None] = mapped_column(String(255), nullable=True)
+    determinacy:            Mapped[str]        = mapped_column(String(16), default="determinate")  # determinate|indeterminate
+    exclusion_reason:       Mapped[str | None] = mapped_column(Text, nullable=True)
+    divergence_point:       Mapped[str | None] = mapped_column(String(255), nullable=True)
+    baseline_metrics:       Mapped[dict]       = mapped_column(PortableJSON(), default=dict)
+    counterfactual_metrics: Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    trace:                  Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    created_at:             Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class RateCardModel(Base):
+    """Per-tenant cost rate (HxReplay P4 / Case Costing). role='*' = tenant default.
+
+    Commercially sensitive: read/write only through the HxGuard-gated costing API,
+    never exposed to portal/customer identities.
+    """
+
+    __tablename__ = "rate_cards"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "role", name="uq_rate_cards_tenant_role"),
+    )
+
+    id:          Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:   Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role:        Mapped[str]        = mapped_column(String(100), default="*")
+    hourly_rate: Mapped[float]      = mapped_column(Float, nullable=False)
+    currency:    Mapped[str]        = mapped_column(String(8), default="USD")
+    created_by:  Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:  Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MCPIdempotencyKeyModel(Base):
+    """HxNexus Operator (MCP) P2: idempotency record for a mutating tool call.
+
+    Scoped by (user_id, idempotency_key) so a caller's key namespace is private.
+    Claim-first: a 'pending' row is committed before the write executes, so a
+    concurrent duplicate cannot double-apply; it flips to 'done' with the stored
+    response once the write commits.
+    """
+
+    __tablename__ = "mcp_idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_mcp_idem_user_key"),
+        Index("ix_mcp_idem_created", "created_at"),
+    )
+
+    id:              Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    user_id:         Mapped[str]        = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str]        = mapped_column(String(255), nullable=False)
+    tool_name:       Mapped[str]        = mapped_column(String(100), nullable=False)
+    request_hash:    Mapped[str]        = mapped_column(String(64), nullable=False)
+    status:          Mapped[str]        = mapped_column(String(20), default="pending")
+    response_json:   Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    is_error:        Mapped[bool]       = mapped_column(Boolean, default=False)
+    created_at:      Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class MCPActionProposalModel(Base):
+    """HxNexus Operator (MCP) P3: a stateful action awaiting human confirmation.
+
+    The AI proposes; a human confirms. Execution re-checks authorization as the
+    CONFIRMER (who is accountable), and the row's status gates it to once.
+    """
+
+    __tablename__ = "mcp_action_proposals"
+    __table_args__ = (
+        Index("ix_mcp_prop_status", "status"),
+        Index("ix_mcp_prop_user", "user_id"),
+        Index("ix_mcp_prop_case", "case_id"),
+        Index("ix_mcp_prop_tenant", "tenant_id"),
+    )
+
+    id:             Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    user_id:        Mapped[str]        = mapped_column(String(255), nullable=False)
+    tenant_id:      Mapped[str | None] = mapped_column(String(255), nullable=True)  # proposer's tenant; scopes review/confirm
+    tool_name:      Mapped[str]        = mapped_column(String(100), nullable=False)
+    arguments_json: Mapped[dict]       = mapped_column(PortableJSON(), nullable=False)
+    case_id:        Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    summary:        Mapped[str | None] = mapped_column(Text, nullable=True)
+    status:         Mapped[str]        = mapped_column(String(20), default="pending")
+    result_json:    Mapped[dict | None] = mapped_column(PortableJSON(), nullable=True)
+    is_error:       Mapped[bool]       = mapped_column(Boolean, default=False)
+    decided_by:     Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_at:     Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at:     Mapped[datetime]   = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseTimeEntryModel(Base):
+    """§11 P2: an explicit, human-captured effort entry (timer or timesheet).
+
+    Wall-clock event durations (case_event_log) measure elapsed time; these
+    entries measure BILLABLE EFFORT — a worker juggling three cases logs what
+    each actually took. cost = billable time × role rate (rate_cards).
+    """
+
+    __tablename__ = "case_time_entries"
+    __table_args__ = (
+        Index("ix_time_entries_case", "case_id"),
+        Index("ix_time_entries_user", "user_id"),
+        Index("ix_time_entries_tenant", "tenant_id"),
+    )
+
+    id:               Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:        Mapped[str | None] = mapped_column(String(255), nullable=True)
+    case_id:          Mapped[uuid.UUID]  = mapped_column(GUID(), nullable=False)
+    user_id:          Mapped[str]        = mapped_column(String(255), nullable=False)
+    role:             Mapped[str | None] = mapped_column(String(100), nullable=True)   # rate-card lookup; NULL = tenant default '*'
+    source:           Mapped[str]        = mapped_column(String(20), nullable=False, default="timesheet")  # timer | timesheet
+    started_at:       Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at:         Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)      # NULL + source=timer = running
+    duration_seconds: Mapped[int]        = mapped_column(Integer, nullable=False, default=0)
+    billable:         Mapped[bool]       = mapped_column(Boolean, nullable=False, default=True)
+    note:             Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at:       Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class MCPTokenGrantModel(Base):
+    """HxNexus Operator (MCP) P4: an external-agent scoped-token grant.
+
+    The JWT is stateless (claims: token_use="mcp", mcp_scope, jti=this row's
+    id); this row is its server-side anchor — listing, audit, and INSTANT
+    revocation (the transport checks the row on every call). A grant is a
+    restriction of the grantor's own authority: authorization always runs as
+    the grantor, the grant only shrinks the tool surface.
+    """
+
+    __tablename__ = "mcp_token_grants"
+    __table_args__ = (
+        Index("ix_mcp_grant_user", "user_id"),
+        Index("ix_mcp_grant_expires", "expires_at"),
+    )
+
+    id:         Mapped[uuid.UUID]  = mapped_column(GUID(), primary_key=True, default=_new_uuid)  # = JWT jti
+    user_id:    Mapped[str]        = mapped_column(String(255), nullable=False)   # grantor
+    tenant_id:  Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tools:      Mapped[list]       = mapped_column(PortableJSON(), nullable=False)  # granted tool names
+    label:      Mapped[str | None] = mapped_column(String(255), nullable=True)     # e.g. which agent this is for
+    revoked:    Mapped[bool]       = mapped_column(Boolean, nullable=False, default=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expires_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseSessionModel(Base):
+    """HxMeet P1: a real-time session (meeting) attached to a case.
+
+    One provider-agnostic abstraction, two drivers: `off_platform` (P1 —
+    Teams/Zoom/Meet/generic connector creates the meeting, recording stays
+    with the provider) and `embedded` (P2+ — self-hosted LiveKit).
+    recording_document_id / audit_anchor_ref stay NULL until the embedded
+    driver's sealed-recording path (P3) lands.
+    """
+
+    __tablename__ = "case_sessions"
+    __table_args__ = (
+        Index("ix_case_sessions_case", "case_id"),
+        Index("ix_case_sessions_tenant", "tenant_id"),
+        Index("ix_case_sessions_status", "status"),
+    )
+
+    id:                    Mapped[uuid.UUID]      = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    case_id:               Mapped[uuid.UUID]      = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:             Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    driver:                Mapped[str]            = mapped_column(String(20), nullable=False, default="off_platform")  # off_platform | embedded
+    provider:              Mapped[str]            = mapped_column(String(50), nullable=False)   # teams | zoom | gmeet | generic (P2+: livekit)
+    connector_id:          Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)      # connector_registry row that created it
+    status:                Mapped[str]            = mapped_column(String(20), nullable=False, default="created")  # created | active | ended | cancelled
+    title:                 Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    external_meeting_id:   Mapped[str | None]     = mapped_column(Text, nullable=True)
+    join_url:              Mapped[str | None]     = mapped_column(Text, nullable=True)
+    scheduled_at:          Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_by:            Mapped[str]            = mapped_column(String(255), nullable=False)
+    started_at:            Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at:              Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # P3 sealed recording (mig 114): intent declared at start, per-join consent
+    # stamps on participants; none > recording > processing > sealed|failed.
+    record_intent:         Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
+    recording_status:      Mapped[str]            = mapped_column(String(20), nullable=False, default="none")
+    recording_egress_id:   Mapped[str | None]     = mapped_column(Text, nullable=True)
+    recording_document_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("documents.id"), nullable=True)
+    audit_anchor_ref:      Mapped[str | None]     = mapped_column(Text, nullable=True)
+    # P4a-live-2 sealed live transcript (mig 119) — the recording's twin:
+    # none > sealed|failed, sealed .hxsealed case document + chain anchor.
+    transcript_status:      Mapped[str]            = mapped_column(String(20), nullable=False, default="none")
+    transcript_document_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("documents.id"), nullable=True)
+    transcript_anchor_ref:  Mapped[str | None]     = mapped_column(Text, nullable=True)
+    created_at:            Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseSessionCaptionSegmentModel(Base):
+    """HxMeet P4a-live-2: staging for finalized live-caption segments of a
+    RECORD-INTENT session. Speaker comes from the verified room token, never
+    the client. Composed + tenant-DEK sealed on session end, then deleted —
+    plaintext conversation text never rests here longer than the session."""
+
+    __tablename__ = "case_session_caption_segments"
+    __table_args__ = (
+        Index("idx_caption_segments_session", "session_id", "spoken_at"),
+    )
+
+    id:         Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    session_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_sessions.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:  Mapped[str | None] = mapped_column(String(255), nullable=True)
+    speaker:    Mapped[str]       = mapped_column(String(255), nullable=False)
+    text:       Mapped[str]       = mapped_column(Text, nullable=False)
+    spoken_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseSessionParticipantModel(Base):
+    """HxMeet P2: a participant of a case session (embedded/LiveKit driver).
+
+    Created at invite time (guest) or first token mint (worker); joined_at /
+    left_at are stamped by LiveKit webhooks. Guest invites are single-use —
+    only the SHA-256 of the invite token is stored (same posture as the
+    portal-customer OTP) and it is consumed atomically on exchange.
+    consent_recorded_at stays NULL until the P3 sealed-recording path.
+    """
+
+    __tablename__ = "case_session_participants"
+    __table_args__ = (
+        Index("ix_csp_session", "session_id"),
+        Index("ix_csp_tenant", "tenant_id"),
+    )
+
+    id:                  Mapped[uuid.UUID]        = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    session_id:          Mapped[uuid.UUID]        = mapped_column(GUID(), ForeignKey("case_sessions.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:           Mapped[str | None]       = mapped_column(String(255), nullable=True)
+    identity:            Mapped[str]              = mapped_column(String(512), nullable=False)  # user:{id} | customer:{uuid} | email:{addr}
+    display_name:        Mapped[str | None]       = mapped_column(String(255), nullable=True)
+    role:                Mapped[str]              = mapped_column(String(20), nullable=False, default="guest")  # host | guest
+    invited_by:          Mapped[str | None]       = mapped_column(String(255), nullable=True)   # worker user_id (NULL for the host's own row)
+    invite_token_hash:   Mapped[str | None]       = mapped_column(String(64), nullable=True, unique=True)  # SHA-256, NULL for internal joins
+    invite_expires_at:   Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    token_used_at:       Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    joined_at:           Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    left_at:             Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    consent_recorded_at: Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)   # P3
+    created_at:          Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CaseSessionIntelligenceModel(Base):
+    """HxMeet P4a (mig 118) — one local-only analysis run per sealed session.
+
+    The transcript lives as a case document; summary/action items and the
+    model versions that produced them live here, so results stay
+    interpretable after model upgrades. Re-running replaces the row.
+    """
+    __tablename__ = "case_session_intelligence"
+
+    session_id:             Mapped[uuid.UUID]      = mapped_column(GUID(), ForeignKey("case_sessions.id", ondelete="CASCADE"), primary_key=True)
+    status:                 Mapped[str]            = mapped_column(String(20), nullable=False, default="pending")
+    transcript_document_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    summary:                Mapped[str | None]     = mapped_column(Text, nullable=True)
+    action_items:           Mapped[list]           = mapped_column(PortableJSON(), default=list)
+    language:               Mapped[str | None]     = mapped_column(String(16), nullable=True)
+    duration_seconds:       Mapped[int | None]     = mapped_column(Integer, nullable=True)
+    model_versions:         Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    error:                  Mapped[str | None]     = mapped_column(Text, nullable=True)
+    requested_by:           Mapped[str]            = mapped_column(String(255), nullable=False)
+    created_at:             Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    completed_at:           Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentVerificationModel(Base):
+    """HxMeet P4b (mig 118) — the document-first gate's evidence record.
+
+    Automated checks + the worker's checklist verdict for one uploaded
+    document. Multiple rows per document are allowed (re-verification);
+    the latest row is authoritative.
+    """
+    __tablename__ = "document_verifications"
+    __table_args__ = (
+        Index("idx_doc_verifications_case", "case_id", "created_at"),
+        Index("idx_doc_verifications_doc", "document_id"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    status:      Mapped[str]       = mapped_column(String(20), nullable=False, default="review")
+    checks:      Mapped[list]      = mapped_column(PortableJSON(), default=list)
+    verified_by: Mapped[str]       = mapped_column(String(255), nullable=False)
+    notes:       Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=_utcnow)

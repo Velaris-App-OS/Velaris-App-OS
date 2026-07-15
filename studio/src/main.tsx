@@ -1,4 +1,5 @@
 import React from "react";
+import { attemptRefresh } from "@/auth/tokenManager";
 import { AuthProvider } from "@/auth";
 import { PermissionsProvider, usePermissions } from "@/auth/PermissionsContext";
 import { ThemeProvider } from "@/theme/ThemeContext";
@@ -8,13 +9,21 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 
 // ── Global 401 interceptor ────────────────────────────────────────────────────
-// Monkey-patch fetch once at boot. Any API response with status 401 dispatches
-// a "velaris:unauthorized" event ONLY when there is an active session token,
-// so unauthenticated probes (SSO discovery, portal, etc.) are silently ignored.
-// Excluded paths: auth endpoints that legitimately return 401 to anonymous users.
+// Monkey-patch fetch once at boot. Access tokens are short-lived (15 min) by
+// design, so a 401 mid-session is NORMAL — it means "refresh me", not "log me
+// out". On a non-excluded 401 with an active session we run the (deduplicated)
+// refresh first and dispatch "velaris:unauthorized" only when the refresh
+// chain is actually dead (tokens cleared). Callers going through
+// request()/caseRequest() retry with the fresh token; other callers fail this
+// one call but the session survives.
+// Excluded paths: auth endpoints that legitimately return 401 to anonymous
+// users. /auth/real/refresh MUST stay excluded — attemptRefresh() posts to it
+// through this patched fetch, and re-entering would deadlock on its own
+// in-flight promise.
 const _EXCLUDED_401 = [
   "/auth/login",
   "/auth/real/login",
+  "/auth/real/refresh",   // attemptRefresh's own call — re-entry would deadlock
   "/auth/real/sso",       // SSO provider discovery — called from login page
   "/auth/real/forgot-password",
   "/auth/real/reset-password",
@@ -32,7 +41,14 @@ window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
     // Only treat as "session expired" when the user actually had a token
     const hasSession = !!localStorage.getItem("helix_token");
     if (!isExcluded && hasSession) {
-      window.dispatchEvent(new CustomEvent("velaris:unauthorized"));
+      const refreshed = await attemptRefresh();
+      // Logout when the chain is dead (tokens cleared) or there is nothing to
+      // refresh with (legacy token-only session). A failed refresh with the
+      // chain still intact is a transient (network/429) — keep the session.
+      if (!refreshed &&
+          (!localStorage.getItem("helix_token") || !localStorage.getItem("helix_refresh_token"))) {
+        window.dispatchEvent(new CustomEvent("velaris:unauthorized"));
+      }
     }
   }
   return response;
@@ -68,6 +84,7 @@ import PushAdmin from "@modules/push-admin/PushAdmin";
 import HxNexus from "@modules/hxnexus/HxNexus";
 import Portal, { PortalLogin } from "@modules/portal/Portal";
 import PortalAdmin from "@modules/portal/PortalAdmin";
+import MeetJoin from "@modules/portal/MeetJoin";
 import AccessGroupAdmin from "@modules/access-groups/AccessGroupAdmin";
 import HxStream from "@modules/hxstream/HxStream";
 import HelpCenter from "@modules/help/HelpCenter";
@@ -86,7 +103,11 @@ import Marketplace from "@modules/marketplace/Marketplace";
 import HxConnect from "@modules/hxconnect/HxConnect";
 import DevConn from "@modules/devconn/DevConn";
 import HxTest from "@modules/hxtest/HxTest";
+import HxCheckout from "@modules/hxcheckout/HxCheckout";
+import HxStorefront from "@modules/hxstorefront/HxStorefront";
 import HxMigrate from "@modules/hxmigrate/HxMigrate";
+import HxDBMigrate from "@modules/hxdbmigrate/HxDBMigrate";
+import HxReplay from "@modules/hxreplay/HxReplay";
 import HxDeploy from "@modules/hxdeploy/HxDeploy";
 import HxWork from "@modules/hxwork/HxWork";
 import HxCanvas from "@modules/hxcanvas/HxCanvas";
@@ -137,6 +158,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           {/* ── DevOps ── */}
           <Route path="/deploy"        element={<PermRoute path="/deploy"       pageName="HxDeploy">    <HxDeploy />    </PermRoute>} />
           <Route path="/hxmigrate"    element={<PermRoute path="/hxmigrate"    pageName="HxMigrate">   <HxMigrate />   </PermRoute>} />
+          <Route path="/hxdbmigrate"  element={<PermRoute path="/hxdbmigrate"  pageName="HxDBMigrate"> <HxDBMigrate /> </PermRoute>} />
+          <Route path="/hxreplay"     element={<PermRoute path="/hxreplay"     pageName="HxReplay">    <HxReplay />    </PermRoute>} />
           <Route path="/scout"        element={<PermRoute path="/scout"        pageName="Scout">        <Scout />        </PermRoute>} />
           <Route path="/scout-ai"     element={<PermRoute path="/scout-ai"     pageName="Scout AI">     <ScoutAI />      </PermRoute>} />
           <Route path="/orchestrator" element={<PermRoute path="/orchestrator" pageName="Orchestrator"> <Orchestrator /> </PermRoute>} />
@@ -147,6 +170,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="/hxbridge"  element={<PermRoute path="/hxbridge"  pageName="HxBridge">       <HxBridge />  </PermRoute>} />
           <Route path="/devconn"   element={<PermRoute path="/devconn"   pageName="Dev Connectors">  <DevConn />   </PermRoute>} />
           <Route path="/testsuite" element={<PermRoute path="/testsuite" pageName="Test Suite">       <HxTest />   </PermRoute>} />
+          <Route path="/hxcheckout" element={<PermRoute path="/hxcheckout" pageName="HxCheckout">      <HxCheckout /></PermRoute>} />
+          <Route path="/hxstorefront" element={<PermRoute path="/hxstorefront" pageName="HxStorefront"><HxStorefront /></PermRoute>} />
           <Route path="/hxsync"    element={<PermRoute path="/hxsync"    pageName="HxSync">          <HxSync />    </PermRoute>} />
           <Route path="/hxfusion"  element={<PermRoute path="/hxfusion"  pageName="HxFusion">        <HxFusion />  </PermRoute>} />
 
@@ -175,6 +200,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <Route path="/portal/:slug/login" element={<PortalLogin />} />
         <Route path="/portal/:slug" element={<Portal />} />
         <Route path="/portal/:slug/*" element={<Portal />} />
+        {/* Public HxMeet guest join — single-use invite link, no auth */}
+        <Route path="/meet/join" element={<MeetJoin />} />
 </Routes>
     </PermissionsProvider></BrowserRouter></FeatureFlagsProvider></AuthProvider></ThemeProvider>
   </React.StrictMode>

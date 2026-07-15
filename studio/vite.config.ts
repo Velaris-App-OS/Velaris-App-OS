@@ -60,6 +60,22 @@ export default defineConfig({
         target: "http://localhost:8200",
         changeOrigin: true,
       },
+      "/api/v1/hxdbmigrate": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
+      "/api/v1/hxevolve": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
+      "/api/v1/hxreplay": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
+      "/api/v1/costing": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
       "/api/v1/cases": {
         target: "http://localhost:8200",
         changeOrigin: true,
@@ -355,6 +371,18 @@ export default defineConfig({
         target: "http://localhost:8200",
         changeOrigin: true,
       },
+      "/api/v1/meet": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+        ws: true,  // P4a-live caption stream
+      },
+      "/api/v1/variables": {
+        target: "http://localhost:8200",
+        changeOrigin: true,
+      },
+      // Catch-all LAST: anything not matched above goes to the engine (8100)
+      // with /api stripped. A new case-service router MUST be allowlisted
+      // above, or its browser calls silently 404 on the engine.
       "/api": {
         target: "http://localhost:8100",
         changeOrigin: true,

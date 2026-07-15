@@ -53,10 +53,19 @@ class OllamaBackend:
         try:
             body: dict = {
                 "model": self._model,
-                "prompt": f"{system}\n\n{prompt}" if system else prompt,
+                "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": temperature, "num_predict": max_tokens},
+                # num_ctx: Ollama's 2048 default silently truncates long case
+                # contexts (RAG/case-QA prompts + the governed system prompt).
+                "options": {"temperature": temperature, "num_predict": max_tokens,
+                            "num_ctx": 8192},
             }
+            # The system prompt must ride Ollama's `system` field so the chat
+            # template places it in the system turn — concatenated into the
+            # user prompt, small models treat the governance text as user
+            # content and over-refuse.
+            if system:
+                body["system"] = system
             async with httpx.AsyncClient(timeout=180.0) as c:
                 r = await c.post(f"{self._url}/api/generate", json=body)
                 r.raise_for_status()

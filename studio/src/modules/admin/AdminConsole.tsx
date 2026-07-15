@@ -42,7 +42,7 @@ type Tab = "overview" | "audit" | "queues" | "webhooks" | "rules" | "calendars" 
 const TAB_LABELS: Record<Tab, string> = {
   overview: "Overview", audit: "Audit", queues: "Queues",
   webhooks: "Webhooks", rules: "Business Rules", calendars: "Calendars",
-  permissions: "Permissions", marketplace: "Marketplace Sources", // hidden — see tab render below
+  permissions: "Permissions", marketplace: "Marketplace Sources",
 };
 
 export default function AdminConsole() {
@@ -55,8 +55,7 @@ export default function AdminConsole() {
         display: "flex", gap: 2, marginBottom: "var(--space-xl)",
         borderBottom: "1px solid var(--border-subtle)", paddingBottom: 0,
       }}>
-        {(["overview", "audit", "queues", "webhooks", "rules", "calendars", "permissions"] as Tab[]).map(t => (
-          // "marketplace" tab hidden — re-enable by adding it back to the array above
+        {(["overview", "audit", "queues", "webhooks", "rules", "calendars", "permissions", "marketplace"] as Tab[]).map(t => (
           <button key={t} onClick={() => setTab(t)} style={{
             padding: "10px 16px", fontSize: 12, fontWeight: 500, fontFamily: "var(--font-mono)",
             textTransform: "uppercase", letterSpacing: "0.04em", border: "none", cursor: "pointer",
@@ -1433,31 +1432,59 @@ function PermissionsTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The matrix is long (50+ components) — a filter makes any one findable.
+  const [filter, setFilter] = useState("");
+  const visibleModules = modules.filter(m =>
+    m.label.toLowerCase().includes(filter.toLowerCase()) ||
+    m.path.toLowerCase().includes(filter.toLowerCase()));
 
-  // Seed draft from context whenever permissions load
+  // Seed a draft row for EVERY component so the matrix is authoritative:
+  // a component the admin has never configured is currently open-to-all, so
+  // it seeds with every role ticked (committing preserves today's visibility).
+  // The admin then unticks whoever should NOT see it; unticking every role
+  // restricts the component to admins only. Explicitly configured components
+  // keep their saved roles.
   useEffect(() => {
-    setDraft({ ...permissions });
-  }, [permissions]);
+    if (!roles.length) return;
+    const seeded: Record<string, string[]> = {};
+    for (const { path } of modules) {
+      seeded[path] = permissions[path] ?? [...roles];
+    }
+    setDraft(seeded);
+    // modules is derived from NAV_DATA each render; roles/permissions drive this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permissions, roles]);
 
-  // Load roles from Access Directory — only network call needed now
+  // Load roles from Access Directory. If that call fails or returns nothing,
+  // fall back to the roles already referenced by saved permissions (so the
+  // matrix never renders column-less), then to a sensible default set — and
+  // surface the failure instead of silently swallowing it.
   useEffect(() => {
     if (!token) return;
+    const sortRoles = (names: string[]) => [...new Set(names)].sort((a, b) => {
+      const aAdmin = a.toLowerCase().includes("admin");
+      const bAdmin = b.toLowerCase().includes("admin");
+      if (aAdmin && !bAdmin) return -1;
+      if (!aAdmin && bAdmin) return 1;
+      return a.localeCompare(b);
+    });
+    const fallbackRoles = () => {
+      const fromPerms = Object.values(permissions ?? {}).flat() as string[];
+      return sortRoles(fromPerms.length ? fromPerms : ALL_ROLES);
+    };
     fetch("/api/v1/access-roles", { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : [])
+      .then(r => { if (!r.ok) throw new Error(`access-roles → ${r.status}`); return r.json(); })
       .then((rolesData: any[]) => {
-        const names = rolesData.map((r: any) => r.name);
-        names.sort((a: string, b: string) => {
-          const aAdmin = a.toLowerCase().includes("admin");
-          const bAdmin = b.toLowerCase().includes("admin");
-          if (aAdmin && !bAdmin) return -1;
-          if (!aAdmin && bAdmin) return 1;
-          return a.localeCompare(b);
-        });
-        setRoles(names);
+        const names = (rolesData ?? []).map((r: any) => r.name).filter(Boolean);
+        setRoles(names.length ? sortRoles(names) : fallbackRoles());
+        if (!names.length) setError("No roles returned by Access Directory — showing a fallback set.");
       })
-      .catch(() => {})
+      .catch((e) => {
+        setRoles(fallbackRoles());
+        setError(`Could not load roles (${e.message}) — showing a fallback set.`);
+      })
       .finally(() => setLoadingMeta(false));
-  }, [token]);
+  }, [token, permissions]);
 
   const toggle = useCallback((path: string, role: string) => {
     setDraft(prev => {
@@ -1503,6 +1530,14 @@ function PermissionsTab() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <input
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+            placeholder="Filter components…"
+            style={{ padding: "7px 12px", fontSize: 12, borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-default)", background: "var(--bg-input)",
+              color: "var(--text-primary)", width: 200 }}
+          />
           {saved && <span style={{ fontSize: 12, color: "var(--status-completed)" }}>Saved</span>}
           {error && <span style={{ fontSize: 12, color: "var(--status-failed)" }}>{error}</span>}
           <button
@@ -1526,18 +1561,23 @@ function PermissionsTab() {
           <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%", minWidth: 600 }}>
             <thead>
               <tr>
-                <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)", minWidth: 180, position: "sticky", left: 0, background: "var(--bg-root)", zIndex: 1 }}>
+                <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", textTransform: "uppercase", borderBottom: "1px solid var(--border-subtle)", minWidth: 180, position: "sticky", left: 0, background: "var(--bg-root)", zIndex: 1 }}>
                   Components
                 </th>
                 {roles.map(role => (
-                  <th key={role} style={{ padding: "8px 4px", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)", width: colW, minWidth: colW }}>
+                  <th key={role} title={role} style={{ padding: "8px 6px", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", borderBottom: "1px solid var(--border-subtle)", width: colW, minWidth: colW, whiteSpace: "nowrap" }}>
                     {role.replace(/_/g, " ").toUpperCase()}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {modules.map(({ path, label }, i) => {
+              {visibleModules.length === 0 && (
+                <tr><td colSpan={roles.length + 1} style={{ padding: "16px 12px", color: "var(--text-muted)", fontSize: 12 }}>
+                  No components match “{filter}”.
+                </td></tr>
+              )}
+              {visibleModules.map(({ path, label }, i) => {
                 const rowRoles = draft[path] ?? [];
                 return (
                   <tr key={path} style={{ background: i % 2 === 0 ? "transparent" : "var(--bg-elevated)" }}>
@@ -1564,6 +1604,7 @@ function PermissionsTab() {
 
       <div style={{ marginTop: "var(--space-lg)", padding: "10px 14px", background: "var(--bg-elevated)", borderRadius: "var(--radius-sm)", fontSize: 12, color: "var(--text-muted)" }}>
         <strong style={{ color: "var(--text-secondary)" }}>Admin</strong> always has access to everything regardless of this matrix.
+        Tick a role to let it see a component; <strong style={{ color: "var(--text-secondary)" }}>untick every role to restrict a component to admins only</strong>.
       </div>
     </div>
   );

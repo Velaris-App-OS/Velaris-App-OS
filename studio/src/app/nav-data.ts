@@ -33,7 +33,7 @@ export const NAV_DATA: NavEntry[] = [
   {
     path: "/cases",
     label: "Cases",
-    description: "Case list | Create case | Search & filter | Case timeline | Status tracking | Bulk actions",
+    description: "Case list | Create case | Search & filter | Case timeline | Status tracking | Bulk actions | Real-time case sessions",
     section: "Workspace",
     roles: [],
   },
@@ -205,6 +205,20 @@ export const NAV_DATA: NavEntry[] = [
     roles: ["devops", "admin"],
   },
   {
+    path: "/hxdbmigrate",
+    label: "HxDBMigrate",
+    description: "Connect a source database | Schema Autobiography | Data-quality scoring | MySQL / MariaDB / PostgreSQL sources",
+    section: "DevOps",
+    roles: ["admin"],
+  },
+  {
+    path: "/hxreplay",
+    label: "HxReplay",
+    description: "Counterfactual case replay | Fork real history at a decision point | Cohort what-if deltas | Determinacy coverage",
+    section: "DevOps",
+    roles: ["admin"],
+  },
+  {
     path: "/scout",
     label: "Scout",
     description: "Legacy BPM scanner | Compatibility analysis | Migration assessment | Artifact classification | Effort estimate",
@@ -226,7 +240,7 @@ export const NAV_DATA: NavEntry[] = [
     roles: ["devops", "admin"],
   },
 
-  // ── Marketplace — hidden until v1.2.0 release (controlled by scheduled_releases flag) ──
+  // ── Marketplace — visibility controlled by the `marketplace` scheduled_releases flag ──
   {
     path:        "/marketplace",
     label:       "Marketplace",
@@ -264,6 +278,20 @@ export const NAV_DATA: NavEntry[] = [
     description: "Platform test suites | Component & Security tests | Run history | Marketplace conformance gate | Structural checks | HxTest AI generation (marketplace add-on)",
     section: "Integration",
     roles: ["admin"],
+  },
+  {
+    path: "/hxcheckout",
+    label: "HxCheckout",
+    description: "Commerce integration | Order intake API | Webhook mode (Shopify/WooCommerce/Magento/BigCommerce) | Service tokens | Order board | Returns & complaints | Marketplace app",
+    section: "Integration",
+    roles: ["integration", "admin"],
+  },
+  {
+    path: "/hxstorefront",
+    label: "HxStorefront",
+    description: "Hosted store builder | Products & variants | Categories | Inventory | Promotions | Theme & page builder | Public storefront | Orders via HxCheckout | Marketplace app",
+    section: "Integration",
+    roles: ["integration", "admin"],
   },
   {
     path: "/hxsync",
@@ -344,7 +372,7 @@ export const NAV_DATA: NavEntry[] = [
   {
     path: "/admin",
     label: "Admin Console",
-    description: "System settings | Audit logs | Queues | Webhooks | Business rules | Calendars | Component permissions",
+    description: "System settings | Audit logs | Queues | Webhooks | Business rules | Calendars | Component permissions | Marketplace sources",
     section: "Admin",
     roles: ["admin"],
   },

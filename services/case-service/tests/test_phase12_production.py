@@ -15,12 +15,13 @@ import pytest
 
 class TestHealthEndpoints:
     async def test_health(self, client):
+        # /health is served by the P23 observability router (registered first;
+        # it shadows the older api/health.py route) — assert the live contract
         resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert data["service"] == "helix-case-service"
-        assert "uptime_seconds" in data
+        assert data["service"] == "case-service"
         assert "timestamp" in data
 
     async def test_ready(self, client):

@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { hxStream } from "@shared/realtime/hxstream-singleton";
-import { getAccessToken, getRefreshToken, setTokens, clearTokens, attemptRefresh, getDeviceId, setDeviceId } from "./tokenManager";
+import { getAccessToken, getRefreshToken, setTokens, clearTokens, attemptRefresh, getDeviceId, setDeviceId, scheduleProactiveRefresh, ACCESS_KEY } from "./tokenManager";
 
 /* ═══════════════════════════════════════════════════════════════════
    Auth Context — manages authentication state across the app
    ═══════════════════════════════════════════════════════════════════ */
+
+export interface AccessPrivilege { resource: string; actions: string[] }
 
 export interface AuthUser {
   user_id: string;
@@ -16,6 +18,7 @@ export interface AuthUser {
   is_designer: boolean;
   is_case_worker: boolean;
   tenant_id?: string | null;
+  active_access_group?: { privileges?: AccessPrivilege[] } | null;
 }
 
 interface AuthState {
@@ -26,11 +29,12 @@ interface AuthState {
   login: (username: string, password?: string) => Promise<void>;
   logout: () => void;
   hasRole: (role: string) => boolean;
+  hasPrivilege: (resource: string, action: string) => boolean;
 }
 
 const AuthCtx = createContext<AuthState>({
   user: null, token: null, loading: true, error: null,
-  login: async () => {}, logout: () => {}, hasRole: () => false,
+  login: async () => {}, logout: () => {}, hasRole: () => false, hasPrivilege: () => false,
 });
 
 export function useAuth() { return useContext(AuthCtx); }
@@ -51,12 +55,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const u = await fetchMe(saved);
         setToken(saved); setUser(u); hxStream.init(u.user_id);
+        scheduleProactiveRefresh();
       } catch {
         const newToken = await attemptRefresh();
         if (newToken) {
           try {
             const u = await fetchMe(newToken);
             setToken(newToken); setUser(u); hxStream.init(u.user_id);
+            scheduleProactiveRefresh();
             return;
           } catch { /* fall through to clearTokens */ }
         }
@@ -82,6 +88,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("velaris:unauthorized", handle);
     return () => window.removeEventListener("velaris:unauthorized", handle);
+  }, []);
+
+  // Cross-tab sync: localStorage is shared, so a token rotation or logout in
+  // another tab must update this one too — otherwise this tab keeps using a
+  // stale access token (and races the shared single-use refresh token).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== ACCESS_KEY) return;
+      if (e.newValue) {
+        setToken(e.newValue);
+        scheduleProactiveRefresh();
+      } else {
+        // Real logout elsewhere — propagate.
+        hxStream.destroy();
+        setUser(null);
+        setToken(null);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const fetchMe = async (t: string): Promise<AuthUser> => {
@@ -150,8 +176,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return user.roles.includes(role);
   }, [user]);
 
+  // Mirrors the backend's has_privilege: admin/superadmin get everything;
+  // otherwise the active access group's privilege list is checked, honouring
+  // the "*" wildcard for both resource and action.
+  const hasPrivilege = useCallback((resource: string, action: string) => {
+    if (!user) return false;
+    if (user.is_admin || user.roles.includes("superadmin")) return true;
+    const privs = user.active_access_group?.privileges ?? [];
+    return privs.some(p =>
+      (p.resource === "*" || p.resource === resource) &&
+      (p.actions?.includes("*") || p.actions?.includes(action)));
+  }, [user]);
+
   return (
-    <AuthCtx.Provider value={{ user, token, loading, error, login, logout, hasRole }}>
+    <AuthCtx.Provider value={{ user, token, loading, error, login, logout, hasRole, hasPrivilege }}>
       {children}
     </AuthCtx.Provider>
   );

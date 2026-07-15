@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["hxgraph"])
 
 
+def _tenant(user: AuthenticatedUser) -> str | None:
+    """Caller's tenant for graph visibility. None (platform operator / no
+    tenant) sees everything — pre-scoping behaviour, so single-tenant setups
+    and Studio are unaffected."""
+    return str(user.tenant_id) if user.tenant_id else None
+
+
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
 @router.post("/sync")
@@ -90,7 +97,8 @@ async def list_nodes(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    stmt = select(GraphNodeModel)
+    from case_service.hxgraph.query import _vis_clause
+    stmt = select(GraphNodeModel).where(_vis_clause(_tenant(user)))
     if node_type:
         stmt = stmt.where(GraphNodeModel.node_type == node_type)
     if q:
@@ -106,8 +114,9 @@ async def get_node(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    from case_service.hxgraph.query import _find_node
-    node = await _find_node(session, node_id)
+    from case_service.hxgraph.query import _find_node, _visible
+    tenant = _tenant(user)
+    node = await _find_node(session, node_id, tenant)
     if not node:
         raise HTTPException(404, f"Node '{node_id}' not found")
 
@@ -118,21 +127,16 @@ async def get_node(
         select(GraphEdgeModel).where(GraphEdgeModel.to_node_id == node.id)
     )).scalars().all()
 
-    async def _nb(edge_id, is_outgoing):
-        nid = edge_id
-        nb = await session.get(GraphNodeModel, nid)
-        return nb
-
     out_nbs = []
     for e in outgoing:
         nb = await session.get(GraphNodeModel, e.to_node_id)
-        if nb:
+        if _visible(nb, tenant):
             out_nbs.append({**_node_dict(nb), "edge_type": e.edge_type, "weight": e.weight})
 
     in_nbs = []
     for e in incoming:
         nb = await session.get(GraphNodeModel, e.from_node_id)
-        if nb:
+        if _visible(nb, tenant):
             in_nbs.append({**_node_dict(nb), "edge_type": e.edge_type, "weight": e.weight})
 
     return {
@@ -148,8 +152,8 @@ async def get_impact(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    result = await impact_nodes(session, node_id)
-    if not result and not await _node_exists(session, node_id):
+    result = await impact_nodes(session, node_id, tenant_id=_tenant(user))
+    if not result and not await _node_exists(session, node_id, _tenant(user)):
         raise HTTPException(404, f"Node '{node_id}' not found")
     return {"node_id": node_id, "depends_on_this": result, "count": len(result)}
 
@@ -163,7 +167,7 @@ async def get_path(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    path = await path_between(session, from_, to)
+    path = await path_between(session, from_, to, tenant_id=_tenant(user))
     if path is None:
         return {"found": False, "from": from_, "to": to, "path": []}
     return {"found": True, "from": from_, "to": to, "length": len(path), "path": path}
@@ -175,7 +179,7 @@ async def get_explain(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    return await explain_node(session, concept)
+    return await explain_node(session, concept, tenant_id=_tenant(user))
 
 
 @router.get("/similar")
@@ -185,7 +189,7 @@ async def get_similar(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    results = await similar_nodes(session, concept, top_k=top_k)
+    results = await similar_nodes(session, concept, top_k=top_k, tenant_id=_tenant(user))
     return {"concept": concept, "results": results}
 
 
@@ -198,7 +202,7 @@ async def nl_query(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    return await query_graph(session, body.question)
+    return await query_graph(session, body.question, tenant_id=_tenant(user))
 
 
 # ── Report + Export + Visualize ───────────────────────────────────────────────
@@ -209,7 +213,7 @@ async def get_report(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Graphify-equivalent GRAPH_REPORT.md in markdown."""
-    md = await graph_report(session)
+    md = await graph_report(session, tenant_id=_tenant(user))
     return PlainTextResponse(content=md, media_type="text/markdown")
 
 
@@ -219,7 +223,7 @@ async def get_export(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """graph.json equivalent — all nodes and edges as JSON."""
-    return await graph_export(session)
+    return await graph_export(session, tenant_id=_tenant(user))
 
 
 @router.get("/visualize", response_class=HTMLResponse)
@@ -228,12 +232,12 @@ async def get_visualize(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """graph.html equivalent — interactive D3.js force-directed visualizer."""
-    html = await graph_html(session)
+    html = await graph_html(session, tenant_id=_tenant(user))
     return HTMLResponse(content=html)
 
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
-async def _node_exists(session: AsyncSession, node_id: str) -> bool:
+async def _node_exists(session: AsyncSession, node_id: str, tenant_id: str | None = None) -> bool:
     from case_service.hxgraph.query import _find_node
-    return bool(await _find_node(session, node_id))
+    return bool(await _find_node(session, node_id, tenant_id))

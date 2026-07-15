@@ -133,20 +133,43 @@ def activate_key(full_key: str, key_id: str, mac: str, machine_id: str) -> dict:
 # ── Superadmin creation ───────────────────────────────────────────────────────
 
 def create_superadmin_sync(username: str, password: str, email: str) -> None:
-    """Create superadmin in helix_users table (synchronous via psycopg2)."""
-    import psycopg2
+    """Create superadmin in helix_users — dialect-aware (psycopg2 / pymysql).
+
+    Both drivers use %s placeholders and accept TRUE/FALSE/NOW(); the one portability
+    trap is server-side defaults. The Postgres migrations give id/failed_attempts/
+    timestamps DEFAULTs, but the MySQL baseline (generated from ORM metadata, whose
+    defaults are Python-side) does not — so every NOT NULL column is supplied
+    explicitly here, which is correct on both backends.
+    """
     from urllib.parse import urlparse
 
-    # Parse DATABASE_URL (strip async driver prefix if present)
-    db_url = DATABASE_URL.replace("+asyncpg", "").replace("+aiosqlite", "")
-    parsed = urlparse(db_url)
-    conn = psycopg2.connect(
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/"),
-        user=parsed.username,
-        password=parsed.password,
+    # Strip the SQLAlchemy +driver suffix; dispatch on the dialect.
+    db_url = (
+        DATABASE_URL.replace("+asyncpg", "").replace("+aiosqlite", "")
+        .replace("+aiomysql", "").replace("+pymysql", "")
     )
+    parsed = urlparse(db_url)
+    is_mysql = (parsed.scheme or "").startswith("mysql")
+    if is_mysql:
+        import pymysql
+        # Password from the URL, else VELARIS_DB_PASSWORD — avoids urlparse choking
+        # on a BYO password with @ : / # special chars.
+        conn = pymysql.connect(
+            host=parsed.hostname or "localhost",
+            port=parsed.port or 3306,
+            database=parsed.path.lstrip("/"),
+            user=parsed.username,
+            password=parsed.password or os.environ.get("VELARIS_DB_PASSWORD", ""),
+        )
+    else:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=parsed.hostname or "localhost",
+            port=parsed.port or 5432,
+            dbname=parsed.path.lstrip("/"),
+            user=parsed.username,
+            password=parsed.password,
+        )
     cur = conn.cursor()
 
     # Check if superadmin already exists
@@ -166,9 +189,12 @@ def create_superadmin_sync(username: str, password: str, email: str) -> None:
 
     cur.execute("""
         INSERT INTO helix_users
-          (username, email, display_name, password_hash, roles, is_superadmin, is_active)
-        VALUES (%s, %s, %s, %s, %s, TRUE, TRUE)
+          (id, username, email, display_name, password_hash, roles,
+           is_superadmin, is_active, failed_attempts, password_change_required,
+           mfa_enabled, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, TRUE, TRUE, 0, FALSE, FALSE, NOW(), NOW())
     """, (
+        str(uuid.uuid4()),
         username,
         email or f"{username}@velaris.local",
         "Superadmin",

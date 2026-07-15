@@ -102,6 +102,9 @@ async def _sync_case_types(session: AsyncSession) -> None:
     for ct in case_types:
         defn = ct.definition_json or {}
         stages = defn.get("stages", [])
+        # Tenant-owned case types tag their whole node family so graph reads
+        # can be scoped; global case types (tenant_id NULL) stay platform-wide.
+        ct_tenant = str(ct.tenant_id) if ct.tenant_id else None
 
         ct_node = await _upsert_node(
             session, "case_type",
@@ -114,6 +117,7 @@ async def _sync_case_types(session: AsyncSession) -> None:
                 "version": ct.version,
                 "description": ct.description or "",
             },
+            tenant_id=ct_tenant,
         )
 
         for stage in stages:
@@ -131,6 +135,7 @@ async def _sync_case_types(session: AsyncSession) -> None:
                     "step_count": len(steps),
                     "sla_hours": stage.get("sla_hours"),
                 },
+                tenant_id=ct_tenant,
             )
             await _upsert_edge(session, ct_node, stage_node, "has_stage")
 
@@ -151,6 +156,7 @@ async def _sync_case_types(session: AsyncSession) -> None:
                         "form_id": step.get("form_id"),
                         "required": step.get("required", True),
                     },
+                    tenant_id=ct_tenant,
                 )
                 await _upsert_edge(session, stage_node, step_node, "has_step")
 

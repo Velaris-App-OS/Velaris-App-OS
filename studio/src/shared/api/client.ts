@@ -20,17 +20,20 @@ function authHeaders(token?: string): Record<string, string> {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  // ...options is spread FIRST: a caller passing its own `headers` must merge
+  // with (not replace) the auth header — replacing it drops Authorization and
+  // the resulting 401 force-logs-out the user via the global interceptor.
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
     ...options,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
   });
 
   if (res.status === 401) {
     const newToken = await attemptRefresh();
     if (newToken) {
       const retry = await fetch(`${BASE}${path}`, {
-        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
         ...options,
+        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
       });
       if (retry.status === 401) {
         window.dispatchEvent(new Event("velaris:unauthorized"));
@@ -181,17 +184,19 @@ import type {
 const CASE_BASE = "/api/v1";
 
 async function caseRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  // Same spread order as request(): options first, headers last — a caller's
+  // `headers` must never replace the merged object and drop Authorization.
   const res = await fetch(`${CASE_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
     ...options,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
   });
 
   if (res.status === 401) {
     const newToken = await attemptRefresh();
     if (newToken) {
       const retry = await fetch(`${CASE_BASE}${path}`, {
-        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
         ...options,
+        headers: { "Content-Type": "application/json", ...authHeaders(newToken), ...options?.headers },
       });
       if (retry.status === 401) {
         window.dispatchEvent(new Event("velaris:unauthorized"));
@@ -571,7 +576,7 @@ export async function getCaseVariables(caseId: string): Promise<{
 }
 
 export async function listCaseShares(caseId: string): Promise<
-  { user_id: string; relation: string; created_by: string | null; created_at: string | null }[]
+  { user_id: string; relation: string; username?: string | null; display_name?: string | null; created_by: string | null; created_at: string | null }[]
 > {
   return caseRequest(`/cases/${caseId}/shares`);
 }
@@ -587,6 +592,249 @@ export async function shareCase(caseId: string, userId: string, relation: string
 export async function unshareCase(caseId: string, userId: string, relation: string): Promise<void> {
   await caseRequest(`/cases/${caseId}/shares?user_id=${encodeURIComponent(userId)}&relation=${encodeURIComponent(relation)}`, {
     method: "DELETE",
+  });
+}
+
+/* ── HxMeet — real-time case sessions ─────────────────────────── */
+
+export interface CaseSession {
+  id: string;
+  case_id: string;
+  driver: string;
+  provider: string;
+  status: string;
+  record_intent?: boolean;
+  recording_status?: string;   // none | recording | processing | sealed | failed
+  recording_document_id?: string | null;
+  transcript_status?: string;  // none | sealed | failed (P4a-live-2)
+  transcript_document_id?: string | null;
+  title: string | null;
+  join_url: string | null;
+  external_meeting_id: string | null;
+  started_by: string;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string | null;
+}
+
+export interface MeetProvider {
+  connector_id: string;
+  name: string;
+  provider: string;
+  is_default: boolean;
+}
+
+export interface MeetRoomToken {
+  url: string;
+  token: string;
+  room: string;
+  identity: string;
+  display_name?: string | null;
+  title?: string | null;
+  session_id?: string;
+  record_intent?: boolean;
+}
+
+export interface MeetGuestInvite {
+  participant_id: string;
+  identity: string;
+  invite_token: string;
+  join_path: string;
+  expires_at: string;
+}
+
+export interface MeetParticipant {
+  id: string;
+  identity: string;
+  display_name: string | null;
+  role: string;
+  invited_by: string | null;
+  joined_at: string | null;
+  left_at: string | null;
+}
+
+export async function listMeetProviders(): Promise<{
+  driver: string; embedded_available: boolean; providers: MeetProvider[];
+}> {
+  return caseRequest(`/meet/providers`);
+}
+
+export async function getMeetSessionToken(sessionId: string): Promise<MeetRoomToken> {
+  return caseRequest(`/meet/sessions/${sessionId}/token`, { method: "POST" });
+}
+
+export async function startMeetRecording(sessionId: string): Promise<CaseSession> {
+  return caseRequest(`/meet/sessions/${sessionId}/recording/start`, { method: "POST" });
+}
+
+export async function stopMeetRecording(sessionId: string): Promise<CaseSession> {
+  return caseRequest(`/meet/sessions/${sessionId}/recording/stop`, { method: "POST" });
+}
+
+export async function verifyMeetRecording(sessionId: string): Promise<{
+  verified: boolean; sha256?: string; sealed_sha256?: string | null; anchor_ref?: string; reason?: string;
+}> {
+  return caseRequest(`/meet/sessions/${sessionId}/recording/verify`);
+}
+
+// ── HxMeet P4a — session intelligence (local transcription + summary) ──
+
+export type SessionIntelligence = {
+  status: "none" | "pending" | "running" | "completed" | "failed";
+  transcript_document_id?: string | null;
+  summary?: string | null;
+  action_items?: string[];
+  language?: string | null;
+  duration_seconds?: number | null;
+  model_versions?: Record<string, string>;
+  error?: string | null;
+  completed_at?: string | null;
+};
+
+export async function runSessionIntelligence(sessionId: string): Promise<{ status: string }> {
+  return caseRequest(`/meet/sessions/${sessionId}/intelligence`, { method: "POST" });
+}
+
+export async function getSessionIntelligence(sessionId: string): Promise<SessionIntelligence> {
+  return caseRequest(`/meet/sessions/${sessionId}/intelligence`);
+}
+
+// ── HxMeet P4b — document verification (the document-first KYC gate) ──
+
+export type DocCheck = { name: string; result: "pass" | "fail" | "skipped"; detail: string };
+
+export async function verifyDocument(documentId: string, body: {
+  status: "passed" | "failed" | "review";
+  mrz_line2?: string; expiry_date?: string;
+  checklist?: Record<string, boolean>; notes?: string;
+}): Promise<{ id: string; status: string; checks: DocCheck[] }> {
+  return caseRequest(`/documents/${documentId}/verify`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function listDocumentVerifications(documentId: string): Promise<{
+  verifications: { id: string; status: string; checks: DocCheck[]; verified_by: string; notes: string | null; created_at: string | null }[];
+}> {
+  return caseRequest(`/documents/${documentId}/verifications`);
+}
+
+/** Public, non-consuming invite preview — recording notice before consent. */
+export async function previewMeetGuestInvite(inviteToken: string): Promise<{
+  title: string | null; display_name: string | null; record_intent: boolean;
+}> {
+  const res = await fetch(`/api/v1/meet/guest/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ invite_token: inviteToken }),
+  });
+  if (!res.ok) throw new ApiError(res.status, "This invite link is invalid, already used, or expired.");
+  return res.json();
+}
+
+export async function inviteMeetGuest(
+  sessionId: string,
+  body: { customer_id?: string; email?: string; display_name?: string },
+): Promise<MeetGuestInvite> {
+  return caseRequest(`/meet/sessions/${sessionId}/invites`, {
+    method: "POST", body: JSON.stringify(body),
+  });
+}
+
+export async function listMeetParticipants(
+  sessionId: string,
+): Promise<{ participants: MeetParticipant[] }> {
+  return caseRequest(`/meet/sessions/${sessionId}/participants`);
+}
+
+/** Public guest exchange — no auth header on purpose (guests have no account). */
+export async function exchangeMeetGuestToken(inviteToken: string): Promise<MeetRoomToken> {
+  const res = await fetch(`/api/v1/meet/guest/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ invite_token: inviteToken }),
+  });
+  if (!res.ok) throw new ApiError(res.status, res.status === 404
+    ? "This invite link is invalid, already used, or expired."
+    : "Could not join the session.");
+  return res.json();
+}
+
+export async function listCaseSessions(caseId: string): Promise<{ sessions: CaseSession[] }> {
+  return caseRequest(`/meet/cases/${caseId}/sessions`);
+}
+
+export async function startCaseSession(
+  caseId: string,
+  body: { title?: string; provider?: string; connector_id?: string },
+): Promise<CaseSession> {
+  return caseRequest(`/meet/cases/${caseId}/sessions`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function endCaseSession(sessionId: string, cancelled = false): Promise<CaseSession> {
+  return caseRequest(`/meet/sessions/${sessionId}/end?cancelled=${cancelled}`, { method: "POST" });
+}
+
+/** Sealed-recording stream for the in-Studio player (meet.recording.view).
+ * Returns a blob object-URL — caller MUST URL.revokeObjectURL() when done. */
+export async function fetchRecordingUrl(sessionId: string): Promise<string> {
+  const res = await fetch(`/api/v1/meet/sessions/${sessionId}/recording`, {
+    headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || res.statusText);
+  }
+  return URL.createObjectURL(await res.blob());
+}
+
+/** Sealed live transcript, unsealed server-side (meet.recording.view; every
+ * fetch is audited like a recording view). Returns plain text. */
+export async function fetchSessionTranscript(sessionId: string): Promise<string> {
+  const res = await fetch(`/api/v1/meet/sessions/${sessionId}/transcript`, {
+    headers: { ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || res.statusText);
+  }
+  return res.text();
+}
+
+export async function verifySessionTranscript(sessionId: string): Promise<{
+  verified: boolean; sha256?: string; sealed_sha256?: string; anchor_ref?: string; reason?: string;
+}> {
+  return caseRequest(`/meet/sessions/${sessionId}/transcript/verify`);
+}
+
+// ── HxNexus case-scoped Q&A ────────────────────────────────────────
+
+export type CaseAskResult = {
+  answer: string;
+  sources: { sid: string; kind: string; label: string }[];
+  withheld: string[];
+  external_ai: boolean;
+};
+
+export async function askCase(caseId: string, question: string): Promise<CaseAskResult> {
+  return caseRequest(`/hxnexus/cases/${caseId}/ask`, {
+    method: "POST", body: JSON.stringify({ question }),
+  });
+}
+
+// ── Case messages (Portal v2 P4 — worker ↔ customer thread) ────────
+
+export type CaseMessage = {
+  id: string; author: string; author_name: string | null;
+  body: string; portal_visible: boolean; created_at: string | null;
+};
+
+export async function listCaseMessages(caseId: string): Promise<{ messages: CaseMessage[] }> {
+  return caseRequest(`/cases/${caseId}/messages`);
+}
+
+export async function postCaseMessage(caseId: string, body: string, portalVisible = true): Promise<CaseMessage> {
+  return caseRequest(`/cases/${caseId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ body, portal_visible: portalVisible }),
   });
 }
 

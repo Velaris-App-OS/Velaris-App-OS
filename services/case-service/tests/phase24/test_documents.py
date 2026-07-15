@@ -248,7 +248,7 @@ async def test_19_api_download(client: AsyncClient, session, seeded_case, tmp_pa
     from case_service.api.routers import documents as docs_router_mod
     docs_router_mod.service = DocumentService(backend=LocalFSBackend(tmp_path / "dl_docs"))
 
-    files = {"file": ("data.bin", b"raw-bytes", "application/octet-stream")}
+    files = {"file": ("data.txt", b"raw-bytes", "text/plain")}  # .bin blocked by upload allowlist
     data = {"case_id": str(seeded_case.id)}
     r = await client.post("/api/v1/documents/upload", files=files, data=data)
     doc_id = r.json()["id"]

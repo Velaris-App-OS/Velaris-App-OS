@@ -118,8 +118,9 @@ def test_12_build_message_id_uniqueness():
     a = build_message_id(cid)
     b = build_message_id(cid)
     assert a != b
-    assert a.startswith("<helix-")
-    assert "@helix.local>" in a
+    # current format: <case-XXXXXXXX-nonce@domain> (domain from HELIX_AUTH_EMAIL_DOMAIN)
+    assert a.startswith("<case-")
+    assert a.endswith(">") and "@" in a
 
 
 @pytest.mark.asyncio
@@ -275,7 +276,7 @@ async def test_23_send_with_inline_subject_body(session, account, case, monkeypa
     )
     assert msg.status == "sent"
     assert sent and "[HELIX-" in sent[0]  # subject got tagged
-    assert msg.message_id and msg.message_id.startswith("<helix-")
+    assert msg.message_id and msg.message_id.startswith("<case-")
 
 
 @pytest.mark.asyncio

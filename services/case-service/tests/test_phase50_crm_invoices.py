@@ -78,8 +78,8 @@ async def test_crm_sync_unknown_case_returns_400(client: AsyncClient, session: A
 
 @pytest.mark.asyncio
 async def test_crm_record_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_sf(session)
-    case = await _crm_case(client); await session.commit()
+    reg = await _reg_sf(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _crm_case(client)
 
     rec = CrmSyncRecordModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="crm_step",
@@ -100,8 +100,8 @@ async def test_crm_record_created_and_retrievable(client: AsyncClient, session: 
 
 @pytest.mark.asyncio
 async def test_crm_pending_record_shows_error_on_failure(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_sf(session)
-    case = await _crm_case(client); await session.commit()
+    reg = await _reg_sf(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _crm_case(client)
 
     rec = CrmSyncRecordModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="crm_step",
@@ -142,8 +142,8 @@ async def test_invoice_unknown_case_returns_400(client: AsyncClient, session: As
 
 @pytest.mark.asyncio
 async def test_invoice_record_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_xero(session)
-    case = await _inv_case(client); await session.commit()
+    reg = await _reg_xero(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _inv_case(client)
 
     inv = InvoiceRecordModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="inv_step",
@@ -167,8 +167,8 @@ async def test_invoice_record_created_and_retrievable(client: AsyncClient, sessi
 
 @pytest.mark.asyncio
 async def test_invoice_url_returned(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_xero(session)
-    case = await _inv_case(client); await session.commit()
+    reg = await _reg_xero(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _inv_case(client)
 
     inv = InvoiceRecordModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="inv_step",
@@ -186,8 +186,8 @@ async def test_invoice_url_returned(client: AsyncClient, session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_multiple_invoices_same_case(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_xero(session)
-    case = await _inv_case(client); await session.commit()
+    reg = await _reg_xero(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _inv_case(client)
 
     for i in range(3):
         session.add(InvoiceRecordModel(

@@ -128,12 +128,83 @@ class Settings(BaseSettings):
     storage_master_key: str = ""
     # <<< P24 document storage
 
+    # >>> HxMeet P1 (real-time case sessions)
+    # Platform-default session driver. P1 ships off_platform only (Teams/Zoom/
+    # Meet/generic connector creates the meeting); embedded (LiveKit) is P2.
+    # Per-tenant override lives in tenant.settings["meet"] (driver / provider /
+    # connector_id).
+    meet_driver: str = Field(default="off_platform", validation_alias="VELARIS_CASE_MEET_DRIVER")
+    # <<< HxMeet P1
+
+    # >>> HxMeet P2 (embedded driver — self-hosted LiveKit)
+    # The embedded driver is available only when all three LiveKit settings
+    # are set; otherwise selecting it fails closed with 501. The API secret
+    # is server-side only — the browser only ever sees a minted, room-scoped,
+    # short-TTL access token.
+    livekit_url: str = Field(default="", validation_alias="VELARIS_CASE_LIVEKIT_URL")
+    livekit_api_key: str = Field(default="", validation_alias="VELARIS_CASE_LIVEKIT_API_KEY")
+    livekit_api_secret: str = Field(default="", validation_alias="VELARIS_CASE_LIVEKIT_API_SECRET")
+    # TTLs: room access tokens are minted per join, minutes-lived; guest
+    # invite links are single-use and expire independently.
+    meet_token_ttl_seconds: int = Field(default=300, validation_alias="VELARIS_CASE_MEET_TOKEN_TTL")
+    meet_guest_invite_ttl_seconds: int = Field(default=900, validation_alias="VELARIS_CASE_MEET_GUEST_INVITE_TTL")
+    # <<< HxMeet P2
+
+    # >>> HxMeet P4a (session intelligence) — local Whisper model size
+    meet_whisper_model: str = Field(default="base", validation_alias="VELARIS_CASE_MEET_WHISPER_MODEL")
+    # <<< HxMeet P4a
+
+    # >>> HxMeet P4a-live (streaming captions)
+    # ASR engine selection: auto probes the machine (NVIDIA>CUDA, AMD/Intel
+    # GPU>whisper.cpp Vulkan, else CPU lag mode); override only to pin for
+    # support (auto | cuda | vulkan | rocm | cpu).
+    meet_asr_backend: str = Field(default="auto", validation_alias="VELARIS_CASE_MEET_ASR_BACKEND")
+    # Live model = the latency/accuracy dial; post-session P4a keeps its own.
+    meet_asr_live_model: str = Field(default="small", validation_alias="VELARIS_CASE_MEET_ASR_LIVE_MODEL")
+    # <<< HxMeet P4a-live
+
+    # >>> HxMeet P3 (sealed recording)
+    # Shared directory where the LiveKit egress worker drops finished
+    # recordings and case-service picks them up for sealing (sha256 >
+    # tenant-DEK seal > case document > audit chain). The file is deleted
+    # after ingest. Empty = recording endpoints fail closed with 501.
+    meet_recordings_dir: str = Field(default="", validation_alias="VELARIS_CASE_MEET_RECORDINGS_DIR")
+    # HTTP base of the LiveKit server for Egress API calls (Twirp). Defaults
+    # to livekit_url with ws>http scheme swap when unset.
+    livekit_http_url: str = Field(default="", validation_alias="VELARIS_CASE_LIVEKIT_HTTP_URL")
+    # <<< HxMeet P3
+
     # >>> HxGuard Phase B (env: HELIX_CASE_HXGUARD_CASE_ENFORCEMENT)
     # off    = case-level ReBAC checks skipped entirely
     # shadow = evaluated + would-be denials audited, requests pass (default)
     # enforce = denials return 403
     hxguard_case_enforcement: str = "shadow"
     # <<< HxGuard Phase B
+
+    # >>> HxNexus Operator (MCP) P1
+    # ai_tools=False exposes only the deterministic tool profile (tools/list
+    # omits AI-backed tools and calling one is rejected) — MCP keeps working
+    # where AI egress is disabled or the LLM backend is down.
+    mcp_ai_tools: bool = Field(default=True, validation_alias="VELARIS_CASE_MCP_AI_TOOLS")
+    mcp_rate_per_min: int = Field(default=30, validation_alias="VELARIS_CASE_MCP_RATE_PER_MIN")
+    # P2 writes are opt-in: mutating tools are hidden from tools/list AND
+    # rejected on call until an operator turns them on. "AI that acts" is the
+    # riskier surface, so default-off is the safe posture.
+    mcp_writes_enabled: bool = Field(default=False, validation_alias="VELARIS_CASE_MCP_WRITES_ENABLED")
+    # P3 stateful lifecycle actions (advance/status/close/create) — separate,
+    # higher-risk opt-in; and by default they require human confirmation (the
+    # AI proposes, a human executes) until the injection posture is proven.
+    mcp_stateful_enabled: bool = Field(default=False, validation_alias="VELARIS_CASE_MCP_STATEFUL_ENABLED")
+    mcp_confirm_stateful: bool = Field(default=True, validation_alias="VELARIS_CASE_MCP_CONFIRM_STATEFUL")
+    mcp_proposal_ttl_minutes: int = Field(default=60, validation_alias="VELARIS_CASE_MCP_PROPOSAL_TTL_MINUTES")
+    # P4 external agents: per-tool short-lived scoped tokens. Master switch is
+    # default-off AND acts as a kill switch — turning it off instantly rejects
+    # every outstanding scoped token, not just new mints.
+    mcp_external_tokens_enabled: bool = Field(default=False, validation_alias="VELARIS_CASE_MCP_EXTERNAL_TOKENS_ENABLED")
+    mcp_external_rate_per_min: int = Field(default=15, validation_alias="VELARIS_CASE_MCP_EXTERNAL_RATE_PER_MIN")
+    mcp_token_default_ttl_minutes: int = Field(default=30, validation_alias="VELARIS_CASE_MCP_TOKEN_DEFAULT_TTL_MINUTES")
+    mcp_token_max_ttl_minutes: int = Field(default=60, validation_alias="VELARIS_CASE_MCP_TOKEN_MAX_TTL_MINUTES")
+    # <<< HxNexus Operator (MCP) P1
 
     # >>> P32 scaling
     redis_enabled: bool = False

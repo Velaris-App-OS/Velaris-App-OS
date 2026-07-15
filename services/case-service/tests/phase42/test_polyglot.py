@@ -151,7 +151,7 @@ class TestCompare:
 class TestAutodoc:
     async def test_business_guide_template_no_llm(self, session):
         content = await get_business_guide(session, force=True)
-        assert "HELIX" in content
+        assert "Velaris" in content   # rebrand 2026-05-17
         assert "Business Guide" in content
 
     async def test_dev_guide_template_no_llm(self, session):
@@ -250,7 +250,7 @@ class TestPolyglotAPI:
         finally:
             _clear()
         assert r.status_code == 200
-        assert "HELIX" in r.text
+        assert "Velaris" in r.text   # rebrand 2026-05-17
 
     async def test_developer_guide_endpoint(self, client: AsyncClient, session):
         _override()

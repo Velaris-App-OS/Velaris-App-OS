@@ -79,8 +79,8 @@ async def test_sms_unknown_case_returns_400(client: AsyncClient, session: AsyncS
 
 @pytest.mark.asyncio
 async def test_sms_record_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_twilio(session)
-    case = await _sms_case(client); await session.commit()
+    reg  = await _reg_twilio(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _sms_case(client)
 
     row = SmsMessageModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sms_step",
@@ -101,8 +101,8 @@ async def test_sms_record_created_and_retrievable(client: AsyncClient, session: 
 
 @pytest.mark.asyncio
 async def test_sms_failed_record_shows_error(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_twilio(session)
-    case = await _sms_case(client); await session.commit()
+    reg  = await _reg_twilio(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _sms_case(client)
 
     row = SmsMessageModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sms_step",
@@ -119,8 +119,8 @@ async def test_sms_failed_record_shows_error(client: AsyncClient, session: Async
 
 @pytest.mark.asyncio
 async def test_multiple_sms_same_case(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_twilio(session)
-    case = await _sms_case(client); await session.commit()
+    reg  = await _reg_twilio(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _sms_case(client)
 
     for i in range(3):
         session.add(SmsMessageModel(
@@ -137,8 +137,8 @@ async def test_multiple_sms_same_case(client: AsyncClient, session: AsyncSession
 @pytest.mark.asyncio
 async def test_sms_connector_type_isolation(client: AsyncClient, session: AsyncSession):
     """Slack connector not used for SMS."""
-    await _reg_slack(session)
-    case = await _sms_case(client); await session.commit()
+    await _reg_slack(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _sms_case(client)
     r = await client.post(f"/api/v1/comms/sms/cases/{case['id']}/send",
                           json={"step_id": "sms_step", "to_number": "+447700900000", "body": "Hi"})
     assert r.status_code in (400, 502)
@@ -171,8 +171,8 @@ async def test_slack_unknown_case_returns_400(client: AsyncClient, session: Asyn
 
 @pytest.mark.asyncio
 async def test_slack_record_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_slack(session)
-    case = await _slack_case(client); await session.commit()
+    reg  = await _reg_slack(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _slack_case(client)
 
     row = SlackNotificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="slack_step",
@@ -192,8 +192,8 @@ async def test_slack_record_created_and_retrievable(client: AsyncClient, session
 
 @pytest.mark.asyncio
 async def test_slack_failed_record_shows_error(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_slack(session)
-    case = await _slack_case(client); await session.commit()
+    reg  = await _reg_slack(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _slack_case(client)
 
     row = SlackNotificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="slack_step",
@@ -208,8 +208,8 @@ async def test_slack_failed_record_shows_error(client: AsyncClient, session: Asy
 
 @pytest.mark.asyncio
 async def test_slack_with_channel(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_slack(session)
-    case = await _slack_case(client); await session.commit()
+    reg  = await _reg_slack(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _slack_case(client)
 
     row = SlackNotificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="slack_step",
@@ -224,8 +224,8 @@ async def test_slack_with_channel(client: AsyncClient, session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_multiple_slack_same_case(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_slack(session)
-    case = await _slack_case(client); await session.commit()
+    reg  = await _reg_slack(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _slack_case(client)
 
     for i in range(4):
         session.add(SlackNotificationModel(
@@ -242,8 +242,8 @@ async def test_multiple_slack_same_case(client: AsyncClient, session: AsyncSessi
 @pytest.mark.asyncio
 async def test_slack_connector_type_isolation(client: AsyncClient, session: AsyncSession):
     """Twilio connector not used for Slack."""
-    await _reg_twilio(session)
-    case = await _slack_case(client); await session.commit()
+    await _reg_twilio(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _slack_case(client)
     r = await client.post(f"/api/v1/comms/slack/cases/{case['id']}/send",
                           json={"step_id": "slack_step", "message": "Hello"})
     assert r.status_code in (400, 502)

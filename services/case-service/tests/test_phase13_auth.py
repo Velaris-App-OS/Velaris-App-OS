@@ -83,27 +83,46 @@ class TestJWTHandler:
         assert info["username"] == "Test"
 
 
+async def _mk_login_user(session, username: str, roles: list[str], password: str = "S3cure-pass!") -> str:
+    """Real-auth era: login validates against helix_users with a bcrypt hash."""
+    from case_service.api.routers.auth_real import _hash_password
+    from case_service.db.models import HelixUserModel
+    session.add(HelixUserModel(
+        username=username, email=f"{username}@test.local",
+        password_hash=_hash_password(password), roles=roles, is_active=True,
+    ))
+    await session.commit()
+    return password
+
+
 class TestAuthAPI:
-    async def test_dev_login(self, client):
-        resp = await client.post("/api/v1/auth/login", json={
-            "username": "admin",
-        })
+    async def test_login_requires_password(self, client):
+        # the passwordless dev login is gone — schema demands a password
+        resp = await client.post("/api/v1/auth/login", json={"username": "admin"})
+        assert resp.status_code == 422
+
+    async def test_real_login(self, client, session):
+        pw = await _mk_login_user(session, "p13-admin", ["admin"])
+        resp = await client.post("/api/v1/auth/login",
+                                 json={"username": "p13-admin", "password": pw})
         assert resp.status_code == 200
         data = resp.json()
         assert "access_token" in data
-        assert data["user"]["user_id"] == "admin"
         assert "admin" in data["user"]["roles"]
 
-    async def test_dev_login_different_roles(self, client):
-        resp = await client.post("/api/v1/auth/login", json={"username": "designer"})
+    async def test_login_different_roles(self, client, session):
+        pw = await _mk_login_user(session, "p13-designer", ["designer"])
+        resp = await client.post("/api/v1/auth/login",
+                                 json={"username": "p13-designer", "password": pw})
         assert resp.status_code == 200
         assert "designer" in resp.json()["user"]["roles"]
         assert "admin" not in resp.json()["user"]["roles"]
 
-    async def test_dev_login_worker(self, client):
-        resp = await client.post("/api/v1/auth/login", json={"username": "worker"})
-        assert resp.status_code == 200
-        assert "case_worker" in resp.json()["user"]["roles"]
+    async def test_login_wrong_password_401(self, client, session):
+        await _mk_login_user(session, "p13-worker", ["case_worker"])
+        resp = await client.post("/api/v1/auth/login",
+                                 json={"username": "p13-worker", "password": "wrong"})
+        assert resp.status_code == 401
 
     async def test_get_me_dev_mode(self, client):
         resp = await client.get("/api/v1/auth/me")
@@ -122,8 +141,10 @@ class TestAuthAPI:
         assert "designer" in role_ids
         assert "case_worker" in role_ids
 
-    async def test_login_returns_valid_token(self, client):
-        login = await client.post("/api/v1/auth/login", json={"username": "admin"})
+    async def test_login_returns_valid_token(self, client, session):
+        pw = await _mk_login_user(session, "p13-token-user", ["admin"])
+        login = await client.post("/api/v1/auth/login",
+                                  json={"username": "p13-token-user", "password": pw})
         token = login.json()["access_token"]
 
         # Use token to call /me

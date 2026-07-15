@@ -198,6 +198,17 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # MCP scoped tokens (P4 external agents) are single-purpose: they are only
+    # accepted by the MCP transport's own dependency. Everywhere else — REST,
+    # proposals confirm/reject, token minting — they fail closed, so a leaked
+    # agent token cannot touch any other surface.
+    if claims.get("token_use") == "mcp":
+        raise HTTPException(
+            status_code=401,
+            detail="Scoped MCP token is not valid on this endpoint",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # P37 enrichment + security checks (is_active + revoked session)
     try:
         from case_service.db.session import get_session_factory

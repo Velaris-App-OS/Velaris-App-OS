@@ -70,6 +70,10 @@ ACTION_ROLES: dict[str, set[str]] = {
     "connector.namespace.register":  {"admin", "integration"},
     "devconn.namespace.register":    {"admin", "integration", "developer"},
     "case.rule.apply":               set(),     # any authenticated user
+    "rules.write":                   {"admin", "designer"},  # rule CRUD gates automation behavior
+    "replay.run":                    {"admin"},  # HxReplay cohort replay = bulk case read
+    "costing.rates":                 {"admin"},  # rate cards are commercially sensitive
+    "mcp.tokens.mint":               {"admin", "designer"},  # P4 scoped external-agent tokens
 }
 
 #: grant-backed actions: resolved against namespace_grants, not roles.
@@ -139,6 +143,14 @@ CASE_ACTIONS: dict[str, set[str]] = {
     "case.read":   {"assignee", "editor", "viewer"},
     "case.update": {"assignee", "editor"},
     "case.share":  {"editor"},
+    "meet.start":  {"assignee", "editor"},   # HxMeet: start/end a live session = case work
+    "meet.join":   {"assignee", "editor", "viewer"},  # HxMeet P2: join an embedded session in-tab
+    "meet.recording.view": {"assignee", "editor"},    # HxMeet P3: download/verify a sealed recording
+    "messages.read":  {"assignee", "editor", "viewer"},  # Portal v2 P4: read the case thread
+    "messages.write": {"assignee", "editor"},            # Portal v2 P4: post to the case thread
+    "meet.intelligence.run": {"assignee", "editor"},     # HxMeet P4a: analyze a sealed recording
+    "docs.verify":    {"assignee", "editor"},            # HxMeet P4b: record a document verification
+    "cases.ask":      {"assignee", "editor", "viewer"},  # HxNexus case Q&A: read-derived
 }
 
 

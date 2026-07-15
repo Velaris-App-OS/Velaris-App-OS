@@ -54,6 +54,20 @@ dev = [
     "httpx>=0.28.0",
     "aiosqlite>=0.20.0",
 ]
+# DB SDK — per-backend drivers, installed only for the chosen backend (BYO model).
+# PostgreSQL (asyncpg) is a core dependency since it is the default backend.
+mysql = [
+    "aiomysql>=0.2.0",   # async driver for the running service
+    "pymysql>=1.1.0",    # sync driver for migrations / admin scripts
+]
+# HxMeet P4a — local session transcription. Optional: the endpoint fail-closes
+# with 501 when it's absent, so a base install stays lean (no ML weights).
+intelligence = [
+    "faster-whisper>=1.0.0",
+    # P4a-live streaming captions — the portable engine (build with
+    # GGML_VULKAN=1 for AMD/Intel GPU; the CPU wheel still works, lag mode).
+    "pywhispercpp>=1.5.0",
+]
 
 [build-system]
 requires = ["hatchling"]

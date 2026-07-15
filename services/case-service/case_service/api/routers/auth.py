@@ -38,6 +38,9 @@ class UserInfoResponse(BaseModel):
     is_admin: bool
     is_designer: bool
     is_case_worker: bool
+    # Active access group + its privilege list, so the UI can gate controls on
+    # the same privileges the backend enforces (e.g. case_type update/delete).
+    active_access_group: dict | None = None
 
 
 @router.post("/login", response_model=LoginResponse)

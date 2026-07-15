@@ -268,6 +268,59 @@ async def document_qa(
     return {"case_id": str(case_id), **result}
 
 
+# ─── Case-scoped Q&A (ask everything on one case) ────────────────────
+
+class AskRequest(BaseModel):
+    question: str
+
+
+@router.post("/cases/{case_id}/ask")
+async def case_ask(
+    case_id: uuid.UUID,
+    body: AskRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Ask a question against the WHOLE case — variables, timeline, messages,
+    document text, verifications, and (permission-gated) sealed transcripts.
+
+    Sovereignty is a per-tenant choice: `tenant.settings["ai"].egress` is
+    `local_only` (default — forced local Ollama) or `external_allowed`
+    (tenant consented to external processing; egress is pseudonymized,
+    minimized, and audited). Feature itself is opt-in via `ai.case_qa`."""
+    from case_service import hxguard
+    from case_service.hxnexus.case_qa import ask_case
+
+    _check_global_rate(current_user)
+    try:
+        validate_message_length(body.question)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    case = await session.get(CaseInstanceModel, case_id)
+    if case is None or (case.tenant_id is not None and
+                        str(case.tenant_id) != (current_user.tenant_id or "default")):
+        raise HTTPException(404, "Case not found")
+    await hxguard.require_case(session, current_user, "cases.ask", case_id)
+
+    # Transcript feed rides the same gate as viewing the recording.
+    try:
+        await hxguard.require_case(session, current_user, "meet.recording.view", case_id)
+        can_view_transcripts = True
+    except HTTPException:
+        can_view_transcripts = False
+
+    try:
+        result = await ask_case(session, case=case, question=body.question,
+                                user=current_user,
+                                can_view_transcripts=can_view_transcripts)
+    except PermissionError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    return {"case_id": str(case_id), **result}
+
+
 # ─── Chat ─────────────────────────────────────────────────────────────
 
 @router.post("/chat")
@@ -299,6 +352,29 @@ async def hxnexus_chat(
             current_user.user_id, scan.signals,
         )
 
+    # Case-attached chat gets the case's assembled context — same gatherer
+    # and permission model as /cases/{id}/ask (transcripts only with
+    # meet.recording.view; withheld sources are disclosed to the model).
+    case_context = None
+    if body.case_id:
+        from case_service import hxguard
+        from case_service.hxnexus.case_qa import _gather_sources
+
+        case = await _assert_case_access(body.case_id, current_user, session)
+        try:
+            await hxguard.require_case(session, current_user, "meet.recording.view", body.case_id)
+            can_view_transcripts = True
+        except HTTPException:
+            can_view_transcripts = False
+        try:
+            sources, withheld = await _gather_sources(
+                session, case, current_user, can_view_transcripts=can_view_transcripts)
+            case_context = "\n\n".join(f"[{s['sid']}] {s['label']}\n{s['text']}" for s in sources)
+            if withheld:
+                case_context += f"\n\nWithheld (no permission): {'; '.join(withheld)}"
+        except Exception as exc:
+            log.warning("chat case-context gathering failed for %s: %s", body.case_id, exc)
+
     result = await chat(
         session,
         conversation_id=body.conversation_id,
@@ -307,6 +383,7 @@ async def hxnexus_chat(
         message=body.message,
         tenant_id=getattr(current_user, "tenant_id", None),
         use_cloud=body.use_cloud,
+        case_context=case_context,
     )
     return result
 

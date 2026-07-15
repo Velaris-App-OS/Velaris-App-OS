@@ -142,8 +142,8 @@ async def test_verify_unknown_case_returns_400(client: AsyncClient, session: Asy
 
 @pytest.mark.asyncio
 async def test_verification_row_created(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_onfido(session)
-    case = await _kyc_case(client); await session.commit()
+    reg = await _reg_onfido(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _kyc_case(client)
 
     iv = IdentityVerificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="id_step",
@@ -176,8 +176,8 @@ def _onfido_webhook(check_id: str, action: str = "check.completed", result: str 
 
 @pytest.mark.asyncio
 async def test_onfido_webhook_clear_completes_step(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_onfido(session)
-    case = await _kyc_case(client); await session.commit()
+    reg = await _reg_onfido(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _kyc_case(client)
 
     iv = IdentityVerificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="id_step",
@@ -200,8 +200,8 @@ async def test_onfido_webhook_clear_completes_step(client: AsyncClient, session:
 
 @pytest.mark.asyncio
 async def test_onfido_webhook_consider_does_not_auto_complete(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_onfido(session)
-    case = await _kyc_case(client); await session.commit()
+    reg = await _reg_onfido(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _kyc_case(client)
 
     iv = IdentityVerificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="id_step",
@@ -223,8 +223,8 @@ async def test_onfido_webhook_consider_does_not_auto_complete(client: AsyncClien
 
 @pytest.mark.asyncio
 async def test_onfido_invalid_hmac_rejected(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_onfido(session)
-    case = await _kyc_case(client); await session.commit()
+    reg = await _reg_onfido(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _kyc_case(client)
 
     iv = IdentityVerificationModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="id_step",
@@ -276,8 +276,8 @@ async def test_esign_unknown_case_returns_400(client: AsyncClient, session: Asyn
 
 @pytest.mark.asyncio
 async def test_esign_row_retrievable(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_docusign(session)
-    case = await _esign_case(client); await session.commit()
+    reg = await _reg_docusign(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _esign_case(client)
 
     es = ESignRequestModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sign_step",
@@ -305,8 +305,8 @@ def _ds_webhook(envelope_id: str, event: str = "envelope-completed") -> bytes:
 
 @pytest.mark.asyncio
 async def test_docusign_completed_updates_status(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_docusign(session)
-    case = await _esign_case(client); await session.commit()
+    reg = await _reg_docusign(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _esign_case(client)
 
     es = ESignRequestModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sign_step",
@@ -328,8 +328,8 @@ async def test_docusign_completed_updates_status(client: AsyncClient, session: A
 
 @pytest.mark.asyncio
 async def test_docusign_declined_updates_status(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_docusign(session)
-    case = await _esign_case(client); await session.commit()
+    reg = await _reg_docusign(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _esign_case(client)
 
     es = ESignRequestModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sign_step",
@@ -349,8 +349,8 @@ async def test_docusign_declined_updates_status(client: AsyncClient, session: As
 
 @pytest.mark.asyncio
 async def test_docusign_invalid_hmac_rejected(client: AsyncClient, session: AsyncSession):
-    reg = await _reg_docusign(session)
-    case = await _esign_case(client); await session.commit()
+    reg = await _reg_docusign(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _esign_case(client)
 
     es = ESignRequestModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="sign_step",

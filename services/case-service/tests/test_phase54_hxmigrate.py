@@ -84,7 +84,7 @@ async def test_start_run_servicenow(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_start_run_invalid_platform(client: AsyncClient):
     r = await client.post("/api/v1/hxmigrate/run", data={
-        "source_platform": "oracle",
+        "source_platform": "not-a-bpm-vendor",   # oracle is now a supported vendor (12-vendor v2)
     }, files={"file": ("f.xml", b"<x/>", "application/xml")})
     assert r.status_code == 400
 
@@ -145,10 +145,11 @@ async def test_run_stage_names_correct(client: AsyncClient):
     }, files={"file": ("t.xml", PEGA_XML, "application/xml")})
     r2 = await client.get(f"/api/v1/hxmigrate/runs/{r.json()['run_id']}")
     names = [s["stage_name"] for s in r2.json()["stages"]]
+    # v2 pipeline stage names
     assert "Scout Assessment" in names
-    assert "Scout AI Analysis" in names
-    assert "BPM Generation" in names
-    assert "Orchestrator Project" in names
+    assert "AI Analysis" in names
+    assert "Resolution & Validation" in names
+    assert "Creator (Generate)" in names
     assert "App Registry Package" in names
 
 

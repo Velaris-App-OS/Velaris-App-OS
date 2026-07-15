@@ -41,6 +41,22 @@ AUTO_UPDATE=$(_read_yaml "auto_update" "false")
 UPDATE_WINDOW=$(_read_yaml "update_window" "")
 MANIFEST_BRANCH=$(_read_yaml "manifest_branch" "main")
 
+# ── Backend guard ────────────────────────────────────────────────
+# This updater assumes the bundled Postgres topology: it starts the `helix-db`
+# container and runs migrations via `docker exec … psql` against migrations/postgresql/.
+# MySQL/MariaDB installs are bring-your-own external DBs (different client, consolidated
+# baseline — no incremental upgrade track), so a Postgres-only run here would execute
+# psql against a container that doesn't exist. Fail fast with guidance rather than a
+# confusing mid-upgrade failure. Automated MySQL/MariaDB upgrades are a known limitation.
+_DB_BACKEND=$(_read_yaml "database" "postgresql")
+if [ "$_DB_BACKEND" != "postgresql" ]; then
+  echo "ERROR: update-velaris.sh supports Postgres installs only." >&2
+  echo "  Detected backend '$_DB_BACKEND' (bring-your-own external DB)." >&2
+  echo "  Automated upgrades for MySQL/MariaDB are not yet supported — apply schema" >&2
+  echo "  changes to your database manually, then restart services. (Known limitation.)" >&2
+  exit 1
+fi
+
 # PUO Phase 1: UI-approved update request written by Studio (platform_updates.py)
 # Phase 2: requests may carry scheduled_for (next after-hours slot from the
 # /admin business calendar) — the agent waits for that exact moment.
@@ -425,7 +441,7 @@ SQL
 
 APPLIED=0; SKIPPED=0
 
-for migration_file in $(find "$HELIX_DIR/migrations" -name "*.sql" | sort); do
+for migration_file in $(find "$HELIX_DIR/migrations/postgresql" -maxdepth 1 -name "*.sql" | sort); do
   filename="$(basename "$migration_file")"
   EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
     -c "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")

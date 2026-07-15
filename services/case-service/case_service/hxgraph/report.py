@@ -18,11 +18,30 @@ from case_service.db.models import GraphNodeModel, GraphEdgeModel
 from case_service.hxgraph.community import detect_communities, community_hubs
 
 
+async def _fetch_visible(
+    session: AsyncSession, tenant_id: str | None,
+) -> tuple[list[GraphNodeModel], list[GraphEdgeModel]]:
+    """All nodes/edges visible to this caller (see query._vis_clause).
+
+    Edges are kept only when BOTH endpoints are visible, so an export can't
+    leak a hidden node's id through an edge reference.
+    """
+    from case_service.hxgraph.query import _vis_clause
+    nodes = (await session.execute(
+        select(GraphNodeModel).where(_vis_clause(tenant_id))
+    )).scalars().all()
+    edges = (await session.execute(select(GraphEdgeModel))).scalars().all()
+    if tenant_id is not None:
+        visible_ids = {n.id for n in nodes}
+        edges = [e for e in edges
+                 if e.from_node_id in visible_ids and e.to_node_id in visible_ids]
+    return list(nodes), list(edges)
+
+
 # ── Graph Report (graphify GRAPH_REPORT.md equivalent) ───────────────────────
 
-async def graph_report(session: AsyncSession) -> str:
-    nodes = (await session.execute(select(GraphNodeModel))).scalars().all()
-    edges = (await session.execute(select(GraphEdgeModel))).scalars().all()
+async def graph_report(session: AsyncSession, tenant_id: str | None = None) -> str:
+    nodes, edges = await _fetch_visible(session, tenant_id)
 
     node_ids = [str(n.id) for n in nodes]
     edge_pairs = [(str(e.from_node_id), str(e.to_node_id)) for e in edges]
@@ -125,9 +144,8 @@ async def graph_report(session: AsyncSession) -> str:
 
 # ── JSON Export (graph.json equivalent) ──────────────────────────────────────
 
-async def graph_export(session: AsyncSession) -> dict:
-    nodes = (await session.execute(select(GraphNodeModel))).scalars().all()
-    edges = (await session.execute(select(GraphEdgeModel))).scalars().all()
+async def graph_export(session: AsyncSession, tenant_id: str | None = None) -> dict:
+    nodes, edges = await _fetch_visible(session, tenant_id)
 
     return {
         "meta": {
@@ -163,8 +181,8 @@ async def graph_export(session: AsyncSession) -> dict:
 
 # ── HTML Visualizer (graph.html equivalent — D3.js force-directed) ────────────
 
-async def graph_html(session: AsyncSession) -> str:
-    data = await graph_export(session)
+async def graph_html(session: AsyncSession, tenant_id: str | None = None) -> str:
+    data = await graph_export(session, tenant_id)
     data_json = json.dumps(data)
 
     return f"""<!DOCTYPE html>

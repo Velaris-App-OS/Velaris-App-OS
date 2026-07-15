@@ -30,7 +30,9 @@ from case_service.core.rules_evaluator import (
 )
 from case_service.db import repository as repo
 from case_service.auth.dependencies import get_current_user
+from case_service.auth.models import AuthenticatedUser
 from case_service.db.session import get_session
+from case_service.hxguard import service as hxguard
 
 router = APIRouter(prefix="/rules", tags=["rules"], dependencies=[Depends(get_current_user)])
 
@@ -67,6 +69,7 @@ async def create_rule(
     body: RuleCreate,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    _user: AuthenticatedUser = Depends(hxguard.guard("rules.write")),
 ):
     _validate_expression_rule(body.rule_type, body.definition_json)
     rule = await repo.create_rule(
@@ -174,6 +177,7 @@ async def update_rule(
     body: RuleUpdate,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    _user: AuthenticatedUser = Depends(hxguard.guard("rules.write")),
 ):
     rule = await repo.get_rule(session, rule_id)
     if rule is None:
@@ -202,6 +206,7 @@ async def delete_rule(
     rule_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    _user: AuthenticatedUser = Depends(hxguard.guard("rules.write")),
 ):
     rule = await repo.get_rule(session, rule_id)         # capture target before delete
     deleted = await repo.delete_rule(session, rule_id)

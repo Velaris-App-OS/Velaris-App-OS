@@ -11,3 +11,7 @@ from . import slack_connector       # noqa: F401  — P51 Slack
 from . import docling_connector     # noqa: F401  — P52 doc extraction
 from . import s3_connector          # noqa: F401  — P52 cloud storage
 from . import http_custom_connector # noqa: F401  — P53 custom HTTP
+from . import teams_connector        # noqa: F401  — HxMeet P1
+from . import zoom_connector         # noqa: F401  — HxMeet P1
+from . import gmeet_connector        # noqa: F401  — HxMeet P1
+from . import meet_generic_connector # noqa: F401  — HxMeet P1

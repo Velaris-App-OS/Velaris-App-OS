@@ -103,6 +103,7 @@ def test_07_extract_html():
 
 
 def test_08_extract_pdf_fitz(monkeypatch):
+    pytest.importorskip("fitz")   # PyMuPDF optional in some envs
     mock_page = MagicMock()
     mock_page.get_text.return_value = "PDF content here"
     mock_doc = MagicMock()

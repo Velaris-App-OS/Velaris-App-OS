@@ -110,6 +110,39 @@ if [ -n "$_CURRENT_VER" ]; then
   fi
 fi
 
+# ── DB SDK: select the database backend early ────────────────────
+# Steps 3/4/4b and the superadmin gate branch on this. PostgreSQL keeps the exact
+# original docker-exec/psql path (bundled container). MySQL is a BYO external DB:
+# reached over the network by a throwaway mysql:8 client container (no host mysql
+# binary needed; password via MYSQL_PWD, never on the command line, from
+# VELARIS_DB_PASSWORD/OpenBao — never velaris.yaml plaintext).
+DATABASE_BACKEND=$(_yaml_val "database" "postgresql")
+# DB_FAMILY normalises the runner path: MariaDB reuses the entire MySQL path (same
+# migrations/mysql baseline, schema_migrations DDL, manifest, client protocol) and
+# differs only in the client image. All MySQL-path branches below test DB_FAMILY.
+case "$DATABASE_BACKEND" in
+  postgresql)    DB_FAMILY=postgresql ;;
+  mysql|mariadb) DB_FAMILY=mysql ;;
+  *)
+    red "STARTUP BLOCKED: unsupported database backend '$DATABASE_BACKEND' in velaris.yaml (allowed: postgresql, mysql, mariadb)."
+    exit 1
+    ;;
+esac
+export DATABASE_BACKEND
+if [ "$DB_FAMILY" = "mysql" ]; then
+  DB_HOST=$(_yaml_val "db_host" "127.0.0.1")
+  DB_PORT=$(_yaml_val "db_port" "3306")
+  DB_NAME=$(_yaml_val "db_name" "velaris")
+  DB_USER=$(_yaml_val "db_user" "velaris")
+  DB_PASSWORD="${VELARIS_DB_PASSWORD:-}"
+  # The mysql:8 client speaks to both MySQL 8 and MariaDB 10.6+/11 servers (the mariadb
+  # image dropped the `mysql` command, so mysql:8 is the portable client for both).
+  mysql_client() {
+    docker run --rm -i --network host -e MYSQL_PWD="$DB_PASSWORD" mysql:8 \
+      mysql --connect-timeout=10 -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$@"
+  }
+fi
+
 # ── Guard: Docker accessible? ────────────────────────────────────
 if ! docker info &>/dev/null 2>&1; then
   red "ERROR: Docker not accessible. Run setup-velaris.sh first, then log out/in."
@@ -163,20 +196,63 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# ── Step 3: Wait for PostgreSQL ──────────────────────────────────
-echo "▶ Waiting for PostgreSQL (port 5432)..."
-for i in $(seq 1 20); do
-  if docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q 2>/dev/null; then
-    green "  ✓ PostgreSQL ready"; break
-  fi
-  [ "$i" -eq 20 ] && { red "  ✗ PostgreSQL not ready — check: docker logs $DB_CONTAINER"; exit 1; }
-  sleep 1
-done
+# ── Step 3: Wait for the database ────────────────────────────────
+if [ "$DB_FAMILY" = "mysql" ]; then
+  echo "▶ Waiting for MySQL ($DB_HOST:$DB_PORT)..."
+  for i in $(seq 1 20); do
+    if mysql_client -e "SELECT 1" >/dev/null 2>&1; then
+      green "  ✓ MySQL ready"; break
+    fi
+    [ "$i" -eq 20 ] && { red "  ✗ MySQL not ready at $DB_HOST:$DB_PORT — check the DB and VELARIS_DB_PASSWORD"; exit 1; }
+    sleep 1
+  done
+else
+  echo "▶ Waiting for PostgreSQL (port 5432)..."
+  for i in $(seq 1 20); do
+    if docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q 2>/dev/null; then
+      green "  ✓ PostgreSQL ready"; break
+    fi
+    [ "$i" -eq 20 ] && { red "  ✗ PostgreSQL not ready — check: docker logs $DB_CONTAINER"; exit 1; }
+    sleep 1
+  done
+fi
 echo ""
 
 # ── Step 4: Run all migrations ────────────────────────────────────
 echo "▶ Running database migrations..."
 
+if [ "$DB_FAMILY" = "mysql" ]; then
+  # MySQL track: the consolidated baseline under migrations/mysql/ (Velaris ships
+  # fresh on MySQL — no incremental PG files). schema_migrations is the MySQL
+  # variant (VARCHAR PK / DATETIME(6) / INSERT IGNORE).
+  # Ensure the database exists, as utf8mb4 — required for correctness (emoji/non-Latin
+  # text) and for the InnoDB 3072-byte key-limit math the schema is bounded against.
+  # Idempotent; a no-op if a DBA pre-created it. Issued without a default DB selected.
+  mysql_client -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_client "$DB_NAME" -e "CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename   VARCHAR(255) PRIMARY KEY,
+  applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);"
+  APPLIED=0; SKIPPED=0
+  for migration_file in $(find "$HELIX_DIR/migrations/mysql" -maxdepth 1 -name "*.sql" | sort); do
+    filename="$(basename "$migration_file")"
+    EXISTS=$(mysql_client "$DB_NAME" -N -e "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")
+    if [ "$EXISTS" = "1" ]; then
+      echo "    skip  $filename"; SKIPPED=$((SKIPPED + 1)); continue
+    fi
+    echo -n "    apply $filename ... "
+    if mysql_client "$DB_NAME" < "$migration_file" 2>/tmp/migration_err.log; then
+      mysql_client "$DB_NAME" -e "INSERT IGNORE INTO schema_migrations(filename) VALUES('$filename');"
+      green "✓"; APPLIED=$((APPLIED + 1))
+    else
+      red "FAILED"; cat /tmp/migration_err.log
+      red "  Migration failed — stopping."; exit 1
+    fi
+  done
+  echo ""
+  green "  ✓ Migrations: $APPLIED applied, $SKIPPED already up-to-date"
+  echo ""
+else
 docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename   TEXT PRIMARY KEY,
@@ -186,7 +262,7 @@ SQL
 
 APPLIED=0; SKIPPED=0; FAILED=0
 
-for migration_file in $(find "$HELIX_DIR/migrations" -name "*.sql" | sort); do
+for migration_file in $(find "$HELIX_DIR/migrations/postgresql" -maxdepth 1 -name "*.sql" | sort); do
   filename="$(basename "$migration_file")"
   EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
     -c "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")
@@ -207,21 +283,35 @@ done
 echo ""
 green "  ✓ Migrations: $APPLIED applied, $SKIPPED already up-to-date"
 echo ""
+fi
 
 # ── Step 4b: Sync release manifest ───────────────────────────────
 # Counts INSERT statements in releases/manifest.sql and compares against
 # rows in scheduled_releases. If they differ, new features have been added
 # since the last run — applies the manifest (ON CONFLICT DO NOTHING skips
 # existing rows, only inserts new ones).
-MANIFEST_FILE="$HELIX_DIR/releases/manifest.sql"
+# MySQL uses the dialect sibling manifest.mysql.sql (UUID() / ON DUPLICATE KEY).
+if [ "$DB_FAMILY" = "mysql" ]; then
+  MANIFEST_FILE="$HELIX_DIR/releases/manifest.mysql.sql"
+else
+  MANIFEST_FILE="$HELIX_DIR/releases/manifest.sql"
+fi
 if [ -f "$MANIFEST_FILE" ]; then
   MANIFEST_COUNT=$(grep -c "^INSERT" "$MANIFEST_FILE" 2>/dev/null || echo 0)
-  DB_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-    -c "SELECT COUNT(*) FROM scheduled_releases;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+  if [ "$DB_FAMILY" = "mysql" ]; then
+    DB_COUNT=$(mysql_client "$DB_NAME" -N -e "SELECT COUNT(*) FROM scheduled_releases;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+  else
+    DB_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
+      -c "SELECT COUNT(*) FROM scheduled_releases;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+  fi
   if [ "$MANIFEST_COUNT" -ne "$DB_COUNT" ]; then
     echo "▶ Syncing release manifest ($DB_COUNT features in DB, $MANIFEST_COUNT in manifest)..."
-    if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
-        < "$MANIFEST_FILE" 2>/tmp/manifest_err.log; then
+    if [ "$DB_FAMILY" = "mysql" ]; then
+      _man_ok=0; mysql_client "$DB_NAME" < "$MANIFEST_FILE" 2>/tmp/manifest_err.log && _man_ok=1
+    else
+      _man_ok=0; docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q < "$MANIFEST_FILE" 2>/tmp/manifest_err.log && _man_ok=1
+    fi
+    if [ "$_man_ok" = "1" ]; then
       green "  ✓ Release manifest synced — $((MANIFEST_COUNT - DB_COUNT)) new feature(s) activated"
     else
       yellow "  ⚠ Release manifest sync had warnings:"; cat /tmp/manifest_err.log
@@ -236,7 +326,14 @@ fi
 # GATE 2: Superadmin DB presence check
 # ════════════════════════════════════════════════════════════════════
 echo "▶ Verifying superadmin account…"
-DATABASE_URL="postgresql://helix:${VELARIS_DB_PASSWORD:-helix_dev_password}@localhost:5432/helix" \
+if [ "$DB_FAMILY" = "mysql" ]; then
+  # No password in the URL — check_superadmin.py reads VELARIS_DB_PASSWORD from the
+  # env (sourced from .env above), so a special-char password can't corrupt the URL.
+  SUPERADMIN_DB_URL="mysql://${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+else
+  SUPERADMIN_DB_URL="postgresql://helix:${VELARIS_DB_PASSWORD:-helix_dev_password}@localhost:5432/helix"
+fi
+DATABASE_URL="$SUPERADMIN_DB_URL" \
   uv run python "$HELIX_DIR/scripts/check_superadmin.py" || {
   echo ""
   red "╔═══════════════════════════════════════════════════════╗"
@@ -256,12 +353,26 @@ echo ""
 
 # ── Step 5: Set environment variables ────────────────────────────
 export HELIX_SERVICE_REGISTRY='{"order-service":"http://localhost:3001","notification-service":"http://localhost:3002"}'
-green "  ✓ Environment ready"
+
+# DB SDK: the database backend was already detected, allowlist-gated, and exported
+# near the top (so Steps 3/4/4b/Gate-2 could branch). The Python layer
+# (case_service.db.backends) enforces the same allowlist — fail-closed both sides.
+green "  ✓ Environment ready (database: $DATABASE_BACKEND)"
 
 # ── Step 5b: Check Ollama ─────────────────────────────────────────
 echo "▶ Checking Ollama (HxNexus AI backend, port 11434)..."
 if curl -s --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
-  green "  ✓ Ollama online — HxNexus ready"
+  # An online Ollama with NO models pulled makes every AI feature (chat,
+  # case Q&A, session summaries) fail soft with empty answers — warn loudly.
+  MODEL_COUNT=$(curl -s --max-time 2 http://localhost:11434/api/tags \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
+  if [ "$MODEL_COUNT" = "0" ]; then
+    yellow "  ⚠ Ollama online but NO models pulled — HxNexus answers will be empty."
+    yellow "    Pull the defaults:  docker exec docker-compose-ollama-1 ollama pull ${HELIX_CASE_AI_OLLAMA_MODEL:-llama3.2}"
+    yellow "                        docker exec docker-compose-ollama-1 ollama pull ${HELIX_CASE_AI_OLLAMA_EMBED_MODEL:-nomic-embed-text}"
+  else
+    green "  ✓ Ollama online ($MODEL_COUNT model(s)) — HxNexus ready"
+  fi
 else
   yellow "  ⚠ Ollama not reachable — HxNexus will show offline"
 fi

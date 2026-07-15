@@ -72,13 +72,27 @@
 
 ---
 
+## What's new in 2.1.0
+
+- **HxMeet** — real-time case sessions: embedded video/screen-share (self-hosted LiveKit) or Teams/Zoom/Meet via connectors; single-use guest invites; consent-gated **sealed recordings and live transcripts** (tenant-key encrypted, audit-chain anchored, verifiable); GPU live captions (Whisper, auto-detected CUDA/Vulkan); post-session AI summaries; document-first KYC verification.
+- **HxNexus case Q&A** — ask anything about a case (variables, timeline, messages, documents, transcripts) with cited answers. Sovereignty-first: local models by default, external providers only by explicit tenant consent (pseudonymized + audited).
+- **HxNexus Operator (MCP)** — a governed MCP tool surface so external AI agents can read (and, opt-in, write) platform state with scoped tokens and human-confirm proposals.
+- **Marketplace** — install apps and connector packages (official / verified / community tiers, out-of-process execution, capability grants).
+- **Portal v2** — customer portal rework: offline-capable PWA with queued submissions, worker↔customer messaging, CSAT, customer workflow steps.
+- **HxReplay** — counterfactual case replay with cohort what-ifs and case costing (rate cards, timers, billing export).
+- **HxEvolve** — process-drift detection that mines deviations and proposes replay-proven, human-approved process changes.
+- **HxDBMigrate** — migrate legacy databases: schema analysis, case-type generation, polling sync, one-click cutover with rollback window, signed compliance certificate.
+- **HxDraft** — draft-first configuration changes with diff cards and human merge.
+
+---
+
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Studio (Vite + React)                          :5173          │
 │  Case designer · HxGraph visualiser · HxNexus AI · Marketplace │
-│  Test Suite · portals · analytics · HxDeploy · HxWork          │
+│  Test Suite · portals · analytics · HxDeploy · HxWork · HxMeet │
 └───────────────────────────┬──────────────────────────────────┘
                             │  HTTPS
 ┌───────────────────────────▼──────────────────────────────────┐
@@ -90,13 +104,16 @@
 │  Case Service (FastAPI + SQLAlchemy)            :8201          │
 │  ├── Cases, stages, steps, assignments, SLA, queues            │
 │  ├── Auth (JWT RS256, bcrypt, MFA, passkeys, RBAC + ABAC, SSO)  │
-│  ├── HxNexus (multi-provider AI)                               │
+│  ├── HxNexus (multi-provider AI, case Q&A, HxDraft, MCP)       │
+│  ├── HxMeet (embedded video, live captions, sealed             │
+│  │           recordings & transcripts, document-first KYC)     │
 │  ├── HxGraph (in-process knowledge graph)                      │
 │  ├── HxVault (per-tenant encryption, crypto-shredding)         │
 │  ├── HxDbManager (guarded DB operations)                       │
 │  ├── Marketplace + Test Suite / HxTest                         │
-│  ├── Customer Accounts (portal identity)                       │
+│  ├── Customer Accounts + Portal v2 (offline PWA, messaging)    │
 │  ├── HxDeploy · HxWork · HxStream · HxShield                   │
+│  ├── HxReplay · HxEvolve · HxDBMigrate                         │
 │  ├── HxFusion / HxConnect (integrations)                       │
 │  ├── HxAnalytics / HxSync / HxGlobal                           │
 │  └── Customer portal + multi-tenant + compliance               │
@@ -115,6 +132,7 @@
 │  ├── MinIO                       :9000  (console :9001)        │
 │  ├── OpenBao (secrets manager)                                 │
 │  ├── Ollama (local AI backend)   :11434                        │
+│  ├── LiveKit SFU + egress (HxMeet video/recording)  :7880      │
 │  └── Mailpit (SMTP dev)          :1025  (UI :8025)             │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -132,7 +150,8 @@
 | Database | PostgreSQL 16 (+ pgvector) |
 | Cache / realtime | Valkey 8 (Redis-compatible) |
 | Object storage | MinIO (S3-compatible) |
-| AI (HxNexus) | Ollama (local default), Anthropic Claude, OpenAI, Google Gemini, Groq, Mistral, DeepSeek, Azure — or any OpenAI-compatible endpoint |
+| AI (HxNexus) | Ollama (local default), Anthropic Claude, OpenAI, Google Gemini, Groq, Mistral, DeepSeek, Azure — or any OpenAI-compatible endpoint. Sovereignty-first: per-tenant `local_only` (any open-weight model) vs consented external, pseudonymized + audited |
+| Real-time sessions (HxMeet) | Self-hosted LiveKit SFU + egress; Whisper live captions (auto-detected GPU: CUDA / Vulkan); recordings & transcripts sealed to the case (tenant DEK + audit-chain anchor) |
 | Auth | JWT RS256 (RSA-2048), bcrypt, TOTP MFA, WebAuthn passkeys, RBAC + ABAC, SSO (SAML / OIDC) |
 | Secrets | OpenBao — envelope-encrypted, rendered into the app at startup |
 | Encryption at rest | HxVault per-tenant DEK (AES-256-GCM, crypto-shredding) |

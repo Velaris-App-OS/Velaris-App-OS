@@ -1263,7 +1263,7 @@ async def ai_generate_sql(
     schema_lines = [f"  {r['table_name']}({r['cols']})" for r in await insp.schema_summary(session)]
     schema_ctx = "Database schema:\n" + "\n".join(schema_lines)
 
-    dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
+    dialect_name = {"postgresql": "PostgreSQL", "mysql": "MySQL", "mariadb": "MariaDB"}[insp.name]
     system = (
         f"You are a {dialect_name} expert. Given the database schema below and a user question, "
         f"generate a correct, safe, read-only SQL SELECT query for {dialect_name}. "
@@ -1325,7 +1325,7 @@ async def ai_optimise_query(
         raise HTTPException(400, f"EXPLAIN failed: {exc}")
 
     import json as _json, re as _re
-    _dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
+    _dialect_name = {"postgresql": "PostgreSQL", "mysql": "MySQL", "mariadb": "MariaDB"}[insp.name]
     system = (
         f"You are a {_dialect_name} query optimisation expert. "
         "Analyse the EXPLAIN plan and return a JSON object with: "
@@ -1385,7 +1385,7 @@ async def get_index_advice(
     slow = stats["queries"]
 
     import json as _json
-    _dialect_name = "MySQL" if insp.name == "mysql" else "PostgreSQL"
+    _dialect_name = {"postgresql": "PostgreSQL", "mysql": "MySQL", "mariadb": "MariaDB"}[insp.name]
     system = (
         f"You are a {_dialect_name} indexing expert. Given the top 20 slowest queries, "
         "recommend indexes that would have the greatest impact. "

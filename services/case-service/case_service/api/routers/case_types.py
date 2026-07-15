@@ -108,12 +108,18 @@ async def list_case_types(
 async def get_case_type(
     case_type_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     ct = await repo.get_case_type(session, case_type_id)
     if ct is None:
         raise HTTPException(
             status_code=404, detail="Case type not found"
         )
+    # Read-side mirror of the write rule: a tenant-owned case type is invisible
+    # outside its tenant (404, anti-oracle). Global case types (tenant_id NULL)
+    # and tenant-less callers (platform operators) behave exactly as before.
+    if ct.tenant_id is not None and user.tenant_id and str(ct.tenant_id) != str(user.tenant_id):
+        raise HTTPException(status_code=404, detail="Case type not found")
     return ct
 
 

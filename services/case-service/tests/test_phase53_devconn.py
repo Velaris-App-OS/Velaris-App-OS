@@ -83,13 +83,13 @@ async def test_build_connector_with_bearer_auth(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_list_rules_empty(client: AsyncClient):
-    r = await client.get("/api/v1/devconn/rules")
+    r = await client.get("/api/v1/devconn/connectors/inbound")
     assert r.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_create_rule_with_case_id_field(client: AsyncClient):
-    r = await client.post("/api/v1/devconn/rules", json={
+    r = await client.post("/api/v1/devconn/connectors/inbound", json={
         "name": "Route by case_id",
         "case_id_field": "data.helix_case_id",
         "field_updates": {"status": "data.status"},
@@ -104,7 +104,7 @@ async def test_create_rule_with_case_id_field(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_create_rule_with_match_fields(client: AsyncClient):
-    r = await client.post("/api/v1/devconn/rules", json={
+    r = await client.post("/api/v1/devconn/connectors/inbound", json={
         "name": "Match by reference",
         "match_case_field": "reference_number",
         "match_payload_field": "order.ref",
@@ -119,18 +119,18 @@ async def test_create_rule_with_match_fields(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_delete_rule(client: AsyncClient):
-    r = await client.post("/api/v1/devconn/rules", json={"name": "To Delete", "field_updates": {}})
+    r = await client.post("/api/v1/devconn/connectors/inbound", json={"name": "To Delete", "field_updates": {}})
     rule_id = r.json()["id"]
-    d = await client.delete(f"/api/v1/devconn/rules/{rule_id}")
+    d = await client.delete(f"/api/v1/devconn/connectors/inbound/{rule_id}")
     assert d.status_code == 204
-    rules = (await client.get("/api/v1/devconn/rules")).json()
+    rules = (await client.get("/api/v1/devconn/connectors/inbound")).json()
     assert not any(rule["id"] == rule_id for rule in rules)
 
 
 @pytest.mark.asyncio
 async def test_rule_listed_after_create(client: AsyncClient):
-    await client.post("/api/v1/devconn/rules", json={"name": "Rule Alpha", "field_updates": {"a": "b.c"}})
-    r = await client.get("/api/v1/devconn/rules")
+    await client.post("/api/v1/devconn/connectors/inbound", json={"name": "Rule Alpha", "field_updates": {"a": "b.c"}})
+    r = await client.get("/api/v1/devconn/connectors/inbound")
     assert any(rule["name"] == "Rule Alpha" for rule in r.json())
 
 
@@ -147,8 +147,8 @@ async def test_receive_webhook_no_match(client: AsyncClient, session: AsyncSessi
 
 @pytest.mark.asyncio
 async def test_receive_webhook_matches_case_by_id(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_custom(session)
-    case = await _webhook_case(client); await session.commit()
+    reg = await _reg_custom(session); await session.commit()  # commit BEFORE client calls (they roll back the shared connection)
+    case = await _webhook_case(client)
 
     rule = WebhookReceiverRuleModel(
         tenant_id="t1", connector_id=reg.id,
@@ -166,10 +166,11 @@ async def test_receive_webhook_matches_case_by_id(client: AsyncClient, session: 
 
 @pytest.mark.asyncio
 async def test_receive_webhook_unknown_connector(client: AsyncClient):
+    # hardened: an unknown connector id is 404 (the unguessable UUID is the
+    # gate for secretless connectors — a guessed id must learn nothing)
     r = await client.post(f"/api/v1/devconn/webhooks/receive/{uuid.uuid4()}",
                           json={"payload": "test"})
-    assert r.status_code == 202
-    assert r.json()["status"] in ("no_match", "received")
+    assert r.status_code == 404
 
 
 # ── Events ────────────────────────────────────────────────────────────────────

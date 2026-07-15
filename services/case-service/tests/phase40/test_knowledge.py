@@ -97,7 +97,7 @@ class TestOverview:
 
     async def test_platform_name(self, client: AsyncClient):
         r = await client.get("/api/v1/knowledge/overview")
-        assert r.json()["platform"] == "HELIX BPM"
+        assert r.json()["platform"] == "Velaris BPM"   # rebrand 2026-05-17
 
     async def test_stats_contains_expected_keys(self, client: AsyncClient):
         r = await client.get("/api/v1/knowledge/overview")
@@ -145,11 +145,14 @@ class TestCaseTypes:
         data = r.json()
         assert data["total"] >= 1
 
-    async def test_plain_english_contains_name(self, client: AsyncClient, session, case_type):
+    async def test_plain_english_auto_summary(self, client: AsyncClient, session, case_type):
+        # a case type without a description gets the auto-summary ("N stages:
+        # <names>. M SLA rule(s) applied.") — the name lives in the `name`
+        # field, not inside the summary text
         r = await client.get("/api/v1/knowledge/case-types")
         ct = next(c for c in r.json()["case_types"] if c["name"] == "Insurance Claim")
-        assert "Insurance Claim" in ct["plain_english"]
         assert "2 stage" in ct["plain_english"]
+        assert ct["stage_count"] == 2
 
     async def test_stages_and_steps_structured(self, client: AsyncClient, session, case_type):
         r = await client.get("/api/v1/knowledge/case-types")

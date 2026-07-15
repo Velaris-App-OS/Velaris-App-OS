@@ -354,3 +354,115 @@ class TestGraphAPI:
         assert r.status_code == 200
         assert "nodes" in r.json()
         assert "edges" in r.json()
+
+
+# ── Tenant scoping (P4 prerequisite: graph never leaks across tenants) ────────
+# Tenant-owned case types tag their node family; tenant callers see global +
+# their own nodes; tenant-less callers (platform operators) see everything —
+# the pre-scoping behaviour, so existing single-tenant setups are unaffected.
+
+class TestTenantScoping:
+    async def _seed_two_tenants(self, session):
+        from case_service.db.models import TenantModel
+
+        t_a = TenantModel(slug=f"ten-a-{uuid.uuid4().hex[:8]}", name="Tenant A")
+        t_b = TenantModel(slug=f"ten-b-{uuid.uuid4().hex[:8]}", name="Tenant B")
+        session.add_all([t_a, t_b])
+        await session.flush()
+
+        stages = [{"id": "s1", "name": "Stage One",
+                   "steps": [{"id": "st1", "type": "user_task", "label": "Step One"}]}]
+        ct_a = CaseTypeModel(name="Tenant A Secret Process", version="1.0",
+                             definition_json={"stages": stages}, tenant_id=t_a.id)
+        ct_b = CaseTypeModel(name="Tenant B Secret Process", version="1.0",
+                             definition_json={"stages": stages}, tenant_id=t_b.id)
+        ct_g = CaseTypeModel(name="Global Shared Process", version="1.0",
+                             definition_json={"stages": stages})
+        session.add_all([ct_a, ct_b, ct_g])
+        await session.flush()
+        await sync_graph(session)
+        return str(t_a.id), str(t_b.id), ct_a, ct_b, ct_g
+
+    async def test_sync_tags_node_family_with_tenant(self, session):
+        tid_a, _, ct_a, _, ct_g = await self._seed_two_tenants(session)
+        ct_node = (await session.execute(select(GraphNodeModel).where(
+            GraphNodeModel.name == f"case_type:{ct_a.id}"))).scalar_one()
+        assert ct_node.tenant_id == tid_a
+        stage_node = (await session.execute(select(GraphNodeModel).where(
+            GraphNodeModel.name == f"stage:{ct_a.id}:s1"))).scalar_one()
+        assert stage_node.tenant_id == tid_a
+        step_node = (await session.execute(select(GraphNodeModel).where(
+            GraphNodeModel.name == f"step:{ct_a.id}:s1:st1"))).scalar_one()
+        assert step_node.tenant_id == tid_a
+        # global case type stays untagged
+        g_node = (await session.execute(select(GraphNodeModel).where(
+            GraphNodeModel.name == f"case_type:{ct_g.id}"))).scalar_one()
+        assert g_node.tenant_id is None
+
+    async def test_find_node_scoped(self, session):
+        tid_a, tid_b, ct_a, _, ct_g = await self._seed_two_tenants(session)
+        from case_service.hxgraph.query import _find_node
+        name = f"case_type:{ct_a.id}"
+        assert await _find_node(session, name, tid_a) is not None       # own
+        assert await _find_node(session, name, tid_b) is None           # foreign
+        assert await _find_node(session, name, None) is not None        # operator
+        # global node visible to everyone
+        gname = f"case_type:{ct_g.id}"
+        assert await _find_node(session, gname, tid_b) is not None
+
+    async def test_similar_nodes_scoped(self, session):
+        tid_a, tid_b, *_ = await self._seed_two_tenants(session)
+        # no-LLM text fallback path
+        res_b = await similar_nodes(session, "Tenant A Secret", tenant_id=tid_b)
+        assert all("Tenant A Secret" not in r["label"] for r in res_b)
+        res_a = await similar_nodes(session, "Tenant A Secret", tenant_id=tid_a)
+        assert any("Tenant A Secret" in r["label"] for r in res_a)
+        res_op = await similar_nodes(session, "Tenant A Secret", tenant_id=None)
+        assert any("Tenant A Secret" in r["label"] for r in res_op)
+
+    async def test_export_scoped_and_edges_pruned(self, session):
+        tid_a, tid_b, ct_a, ct_b, ct_g = await self._seed_two_tenants(session)
+        from case_service.hxgraph.report import graph_export
+        exp_a = await graph_export(session, tenant_id=tid_a)
+        labels = {n["label"] for n in exp_a["nodes"]}
+        assert "Tenant A Secret Process" in labels
+        assert "Tenant B Secret Process" not in labels
+        assert "Global Shared Process" in labels
+        # no edge may reference a node outside the visible set
+        visible_ids = {n["id"] for n in exp_a["nodes"]}
+        for e in exp_a["edges"]:
+            assert e["from"] in visible_ids and e["to"] in visible_ids
+        # operator export unchanged (sees all three)
+        exp_op = await graph_export(session, tenant_id=None)
+        labels_op = {n["label"] for n in exp_op["nodes"]}
+        assert {"Tenant A Secret Process", "Tenant B Secret Process",
+                "Global Shared Process"} <= labels_op
+
+    async def test_path_cannot_tunnel_through_hidden_nodes(self, session):
+        tid_a, tid_b, ct_a, *_ = await self._seed_two_tenants(session)
+        start = f"case_type:{ct_a.id}"
+        end = f"step:{ct_a.id}:s1:st1"
+        assert await path_between(session, start, end, tenant_id=tid_a) is not None
+        assert await path_between(session, start, end, tenant_id=tid_b) is None
+
+    async def test_rest_case_type_get_cross_tenant_404(self, client, session):
+        tid_a, tid_b, ct_a, *_ = await self._seed_two_tenants(session)
+        await session.commit()
+
+        def _tenant_user(tid):
+            u = _admin()
+            u.tenant_id = tid
+            return u
+
+        try:
+            app.dependency_overrides[get_current_user] = lambda: _tenant_user(tid_a)
+            r_own = await client.get(f"/api/v1/case-types/{ct_a.id}")
+            app.dependency_overrides[get_current_user] = lambda: _tenant_user(tid_b)
+            r_foreign = await client.get(f"/api/v1/case-types/{ct_a.id}")
+            app.dependency_overrides[get_current_user] = lambda: _admin()  # tenant-less
+            r_operator = await client.get(f"/api/v1/case-types/{ct_a.id}")
+        finally:
+            _clear()
+        assert r_own.status_code == 200
+        assert r_foreign.status_code == 404     # anti-oracle
+        assert r_operator.status_code == 200    # unchanged for tenant-less callers

@@ -63,26 +63,26 @@ _CAMUNDA_BPMN = b"""<?xml version="1.0" encoding="UTF-8"?>
 </definitions>"""
 
 _PEGA_FLOW_XML = b"""<?xml version="1.0"?>
-<pega:FlowRule xmlns:pega="http://pega.com">
-  <pega:Shape type="ASSIGNMENT" label="Review Document" />
-  <pega:Shape type="APPROVAL" label="Manager Approval" />
+<pega:FlowRule xmlns:pega="http://pega.com" name="Claim">
+  <pega:FlowShape id="s1" type="ASSIGNMENT" pyLabel="Review Document" />
+  <pega:FlowShape id="s2" type="APPROVAL" pyLabel="Manager Approval" />
 </pega:FlowRule>"""
 
 _PEGA_SECTION_XML = b"""<?xml version="1.0"?>
-<Section>
-  <Field fieldID="ClaimAmount" type="Decimal" />
-  <Field fieldID="ClaimDate" type="Date" />
-  <Field fieldID="Description" type="TextArea" />
+<Section name="ClaimDetails">
+  <Field name="ClaimAmount" type="Decimal" />
+  <Field name="ClaimDate" type="Date" />
+  <Field name="Description" type="TextArea" />
 </Section>"""
 
 _PEGA_SLA_XML = b"""<?xml version="1.0"?>
-<SLARule>
-  <Goal hours="8" />
-  <Deadline hours="24" />
+<SLARule name="ClaimSLA">
+  <pyGoal pyValue="8" pyUnit="hours" />
+  <pyDeadline pyValue="24" pyUnit="hours" />
 </SLARule>"""
 
 _PEGA_AG_XML = b"""<?xml version="1.0"?>
-<AccessGroup>
+<AccessGroup name="Claims">
   <Roles>
     <Role name="ClaimsAdjuster" />
     <Role name="Supervisor" />
@@ -170,8 +170,9 @@ class TestCamundaParser:
         processes = result.get("BpmnProcess", [])
         assert len(processes) == 1
         procs = processes[0]["processes"]
-        assert any(s["name"] == "Insurance Claim" for s in procs)
-        steps = procs[0]["steps"]
+        assert any(p["name"] == "Insurance Claim" for p in procs)
+        # bpmn2 parser groups steps under stages
+        steps = [s for stage in procs[0]["stages"] for s in stage["steps"]]
         assert any(s["step_type"] == "user_task" for s in steps)
         assert any(s["step_type"] == "automated" for s in steps)
 
@@ -180,15 +181,17 @@ class TestAppianParser:
     def test_parse_process_model(self):
         content = """<?xml version="1.0"?>
 <processModel name="Loan Approval">
-  <UserInputTask name="Submit Application"/>
-  <AutomatedTask name="Credit Check"/>
-  <ApprovalTask name="Manager Approval"/>
+  <node type="userinput" name="Submit Application"/>
+  <node type="script" name="Credit Check"/>
+  <node type="approval" name="Manager Approval"/>
 </processModel>""".encode()
         files = [{"rule_type": "ProcessModel", "name": "LoanApproval.xml", "content": content.decode()}]
         result = appian.parse_files(files)
         models = result.get("ProcessModel", [])
-        assert models[0]["name"] == "LoanApproval"
-        assert any(s["step_type"] == "user_task" for s in models[0]["steps"])
+        assert models[0]["name"] == "Loan Approval"     # root name attr wins
+        steps = [s for stage in models[0]["stages"] for s in stage["steps"]]
+        assert any(s["step_type"] == "user_task" for s in steps)
+        assert any(s["step_type"] == "approval" for s in steps)
 
 
 # ── Generator tests ───────────────────────────────────────────────────────────
@@ -230,12 +233,15 @@ class TestGenerator:
         assert form["slug"] == "claim-details"
         assert len(form["schema"]["fields"]) == 1
 
-    def test_generates_migration_sql(self):
+    def test_generates_sla_definitions(self):
+        # migration_sql was removed in HxMigrate v2 — objects are written via
+        # the ORM apply path; generate() emits native definitions only
         result = generate(self._mapped())
-        sql = result["migration_sql"]
-        assert "BEGIN;" in sql
-        assert "COMMIT;" in sql
-        assert "Claim SLA" in sql
+        assert "migration_sql" not in result
+        sla = result["sla_rules"][0]
+        assert sla["name"] == "Claim SLA"
+        assert sla["goal_seconds"] == 8 * 3600
+        assert sla["deadline_seconds"] == 24 * 3600
 
     def test_slug_normalises_spaces(self):
         assert _slug("Insurance Claim 2024") == "insurance-claim-2024"

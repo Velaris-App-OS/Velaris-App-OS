@@ -71,6 +71,7 @@ export default function AppLayout() {
           title={navEntry?.label ?? BRAND.name}
           description={navEntry?.description}
           icon={navEntry ? getNavIcon(navEntry.path) : undefined}
+          path={navEntry?.path}
         />
         <div style={{ flex: 1, overflow: "auto" }}>
           <Outlet />

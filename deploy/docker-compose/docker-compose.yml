@@ -103,6 +103,66 @@ services:
       - ../../models:/models:ro
     entrypoint: ["/bin/bash", "/models/.ollama-init.sh"]
     
+  # ── HxMeet P2 — embedded driver (self-hosted LiveKit SFU, Apache-2.0) ──
+  livekit:
+    image: livekit/livekit-server:v1.13
+    container_name: velaris-livekit
+    # Host networking on purpose (same pattern as the gateway):
+    #  (a) WebRTC media needs UDP ports on the host interface, and host-mode
+    #      ports stay under UFW — bridge-published ports bypass it (the
+    #      2026-06-19 incident class);
+    #  (b) webhooks must reach the loopback-only API gateway (127.0.0.1:8200).
+    # Signalling binds all interfaces so browsers on OTHER devices can join;
+    # UFW gates exposure (allow 7880-7881/tcp + 50700-50720/udp from LAN only).
+    network_mode: host
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - 0.0.0.0
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50700
+          port_range_end: 50720
+          use_external_ip: false
+        # P3: egress dispatch runs over the existing Valkey (loopback-published).
+        redis:
+          address: 127.0.0.1:6379
+        # Defaults exist only so a fresh install can `compose up openbao`
+        # before the first secrets-render (compose interpolates the whole
+        # file). They bind loopback-only, and case-service without the
+        # rendered VELARIS_CASE_LIVEKIT_* vars keeps the embedded driver
+        # fail-closed (501) — mismatched keys can't mint a joinable token.
+        keys:
+          ${VELARIS_CASE_LIVEKIT_API_KEY:-devkey}: ${VELARIS_CASE_LIVEKIT_API_SECRET:-devsecret_replace_me_00000000000000}
+        webhook:
+          api_key: ${VELARIS_CASE_LIVEKIT_API_KEY:-devkey}
+          urls:
+            - http://127.0.0.1:8200/api/v1/meet/webhook/livekit
+    restart: unless-stopped
+
+  # ── HxMeet P3 — recording egress worker (separate Apache-2.0 service) ──
+  # Renders the room in headless Chrome and writes the MP4 to /out — the
+  # shared dir case-service ingests from (sha256 > tenant-DEK seal > case
+  # document > audit chain, then the file is deleted). Host networking for
+  # the same reasons as livekit; SYS_ADMIN is required by Chrome's sandbox.
+  livekit-egress:
+    image: livekit/egress:v1.13
+    container_name: velaris-livekit-egress
+    network_mode: host
+    cap_add: [SYS_ADMIN]
+    environment:
+      EGRESS_CONFIG_BODY: |
+        redis:
+          address: 127.0.0.1:6379
+        api_key: ${VELARIS_CASE_LIVEKIT_API_KEY:-devkey}
+        api_secret: ${VELARIS_CASE_LIVEKIT_API_SECRET:-devsecret_replace_me_00000000000000}
+        ws_url: ws://127.0.0.1:7880
+        insecure: true
+    volumes:
+      - ${VELARIS_CASE_MEET_RECORDINGS_DIR:-/tmp/velaris-recordings}:/out
+    restart: unless-stopped
+
 #  case-service:
 #    build: ../../services/case-service
 #    ports: ["8200:8200"]

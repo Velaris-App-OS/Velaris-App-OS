@@ -79,8 +79,8 @@ async def test_extract_unknown_case_returns_400(client: AsyncClient, session: As
 
 @pytest.mark.asyncio
 async def test_extraction_record_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_docling(session)
-    case = await _extract_case(client); await session.commit()
+    reg  = await _reg_docling(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _extract_case(client)
 
     row = DocExtractionJobModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="ext_step",
@@ -102,8 +102,8 @@ async def test_extraction_record_created_and_retrievable(client: AsyncClient, se
 
 @pytest.mark.asyncio
 async def test_extraction_failed_shows_error(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_docling(session)
-    case = await _extract_case(client); await session.commit()
+    reg  = await _reg_docling(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _extract_case(client)
 
     row = DocExtractionJobModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="ext_step",
@@ -118,8 +118,8 @@ async def test_extraction_failed_shows_error(client: AsyncClient, session: Async
 
 @pytest.mark.asyncio
 async def test_extraction_fields_count(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_docling(session)
-    case = await _extract_case(client); await session.commit()
+    reg  = await _reg_docling(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _extract_case(client)
 
     fields = {f"field_{i}": f"value_{i}" for i in range(10)}
     row = DocExtractionJobModel(
@@ -135,8 +135,8 @@ async def test_extraction_fields_count(client: AsyncClient, session: AsyncSessio
 
 @pytest.mark.asyncio
 async def test_multiple_extractions_same_case(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_docling(session)
-    case = await _extract_case(client); await session.commit()
+    reg  = await _reg_docling(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _extract_case(client)
 
     for i in range(3):
         session.add(DocExtractionJobModel(
@@ -153,8 +153,8 @@ async def test_multiple_extractions_same_case(client: AsyncClient, session: Asyn
 @pytest.mark.asyncio
 async def test_doc_connector_type_isolation(client: AsyncClient, session: AsyncSession):
     """S3 connector not used for extraction."""
-    await _reg_s3(session)
-    case = await _extract_case(client); await session.commit()
+    await _reg_s3(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _extract_case(client)
     r = await client.post(f"/api/v1/docintel/cases/{case['id']}/extract",
                           json={"step_id": "ext_step", "source_url": "https://example.com/doc.pdf"})
     assert r.status_code in (400, 502)
@@ -187,8 +187,8 @@ async def test_storage_unknown_case_returns_400(client: AsyncClient, session: As
 
 @pytest.mark.asyncio
 async def test_storage_route_created_and_retrievable(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_s3(session)
-    case = await _storage_case(client); await session.commit()
+    reg  = await _reg_s3(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _storage_case(client)
 
     row = DocStorageRouteModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="store_step",
@@ -213,8 +213,8 @@ async def test_storage_route_created_and_retrievable(client: AsyncClient, sessio
 
 @pytest.mark.asyncio
 async def test_storage_uploaded_status(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_s3(session)
-    case = await _storage_case(client); await session.commit()
+    reg  = await _reg_s3(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _storage_case(client)
 
     row = DocStorageRouteModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="store_step",
@@ -231,8 +231,8 @@ async def test_storage_uploaded_status(client: AsyncClient, session: AsyncSessio
 
 @pytest.mark.asyncio
 async def test_storage_failed_shows_error(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_s3(session)
-    case = await _storage_case(client); await session.commit()
+    reg  = await _reg_s3(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _storage_case(client)
 
     row = DocStorageRouteModel(
         tenant_id="t1", case_id=uuid.UUID(case["id"]), step_id="store_step",
@@ -247,8 +247,8 @@ async def test_storage_failed_shows_error(client: AsyncClient, session: AsyncSes
 
 @pytest.mark.asyncio
 async def test_multiple_storage_routes_same_case(client: AsyncClient, session: AsyncSession):
-    reg  = await _reg_s3(session)
-    case = await _storage_case(client); await session.commit()
+    reg  = await _reg_s3(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _storage_case(client)
 
     for i in range(3):
         session.add(DocStorageRouteModel(
@@ -265,8 +265,8 @@ async def test_multiple_storage_routes_same_case(client: AsyncClient, session: A
 @pytest.mark.asyncio
 async def test_storage_connector_type_isolation(client: AsyncClient, session: AsyncSession):
     """Docling connector not used for storage."""
-    await _reg_docling(session)
-    case = await _storage_case(client); await session.commit()
+    await _reg_docling(session); await session.commit()   # commit BEFORE client calls — they roll back the shared connection
+    case = await _storage_case(client)
     r = await client.post(f"/api/v1/docintel/cases/{case['id']}/store",
                           json={"step_id": "store_step", "document_name": "doc.pdf"})
     assert r.status_code in (400, 502)

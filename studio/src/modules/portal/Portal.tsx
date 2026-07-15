@@ -6,15 +6,21 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { BRAND } from "@/branding";
+import { useFeatureFlags } from "@/app/FeatureFlagsContext";
+import CaseDetail from "./CaseDetail";
+import { clearCustomerToken, setNotifyEmail, slideSession } from "./portalApi";
+import { flushPending, listPending, onQueueChange, queueSubmission, registerPortalPwa } from "./portalOffline";
+import { PortalFormField, getCaseTypeForm, postAskFeedback } from "./portalApi";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type PortalConfig = {
   slug: string; name: string; welcome_text: string;
   brand_color: string; logo_text: string; enabled: boolean;
+  logo_url: string | null;
   case_types: { id: string; name: string; description: string; default_priority: string }[];
 };
-type SubmitResult = { tracking_token: string; case_id: string; message: string };
+type SubmitResult = { tracking_token: string; case_id: string; message: string; offline?: boolean };
 type TrackResult  = {
   case_id: string; subject: string; status: string; priority: string;
   case_type_name: string; submitted_at: string; updated_at: string; resolved_at: string | null;
@@ -46,16 +52,9 @@ type SLAInfo = {
 } | null;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
-const STATUS_CFG: Record<string, { color: string; bg: string; icon: string; label: string }> = {
-  new:         { color: "#0d9488", bg: "#eef2ff", icon: "🆕", label: "New" },
-  open:        { color: "#3b82f6", bg: "#eff6ff", icon: "📂", label: "Open" },
-  in_progress: { color: "#f59e0b", bg: "#fffbeb", icon: "⚙️", label: "In Progress" },
-  pending:     { color: "#0f766e", bg: "#f5f3ff", icon: "⏳", label: "Pending" },
-  resolved:    { color: "#22c55e", bg: "#f0fdf4", icon: "✅", label: "Resolved" },
-  closed:      { color: "#6b7280", bg: "#f9fafb", icon: "🔒", label: "Closed" },
-  cancelled:   { color: "#ef4444", bg: "#fef2f2", icon: "❌", label: "Cancelled" },
-};
+// Shared visual vocabulary (C, STATUS_CFG, StatusBadge, date helpers) lives in
+// portalUi.tsx — imported below so CaseDetail and future views stay consistent.
+import { C, STATUS_CFG, StatusBadge, sl, fmtDate, fmtDateTime, darken } from "./portalUi";
 
 const STATUS_RAIL = ["new", "open", "in_progress", "pending", "resolved"];
 
@@ -70,28 +69,9 @@ const ACTION_ICON: Record<string, string> = {
   document_uploaded: "📎", case_resolved: "✅", case_closed: "🔒", case_reopened: "🔓",
 };
 
-function sl(s: string) { return s.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()); }
-function fmtDate(iso: string | null) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
-function fmtDateTime(iso: string | null) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-}
-function darken(hex: string, amt: number): string {
-  try {
-    const n = parseInt(hex.replace("#", ""), 16);
-    const r = Math.max(0, Math.min(255, (n >> 16) + amt));
-    const g = Math.max(0, Math.min(255, ((n >> 8) & 0xff) + amt));
-    const b = Math.max(0, Math.min(255, (n & 0xff) + amt));
-    return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-  } catch { return hex; }
-}
-
 // ── Main Component ────────────────────────────────────────────────────────────
 
-type View = "home" | "submit" | "track" | "dashboard" | "timeline" | "login" | "account";
+type View = "home" | "submit" | "track" | "dashboard" | "timeline" | "login" | "account" | "case";
 
 type CustomerProfile = {
   id: string; display_name: string;
@@ -107,6 +87,7 @@ type CustomerCase = {
 
 export default function Portal() {
   const { slug } = useParams<{ slug: string }>();
+  const { isEnabled } = useFeatureFlags();
   const [config, setConfig]   = useState<PortalConfig | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [view, setView]       = useState<View>("home");
@@ -160,6 +141,16 @@ export default function Portal() {
   const [chatBusy, setChatBusy]       = useState(false);
   const [chatCaseId, setChatCaseId]   = useState<string | null>(null);
 
+  // Portal v2 (P1) — logged-in case-detail page
+  const [openCaseId, setOpenCaseId] = useState<string | null>(null);
+
+  // Portal v2 (P2) — offline submission queue
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Portal v2 (P5) — Form Builder fields attached to the selected case type
+  const [formFields, setFormFields] = useState<PortalFormField[]>([]);
+  const [formData, setFormData] = useState<Record<string, string>>({});
+
   // P65 — Customer account auth
   const [custToken, setCustToken]         = useState<string | null>(null);
   const [custProfile, setCustProfile]     = useState<CustomerProfile | null>(null);
@@ -202,9 +193,21 @@ export default function Portal() {
       .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return r.json(); })
       .then(setConfig)
       .catch(e => setLoadErr(e.message));
-    // Restore customer session from localStorage
+    // Restore customer session from localStorage, then slide the 24h window
+    // once per page load so active customers never expire mid-visit.
     const stored = localStorage.getItem(`helix_cust_${slug}`);
-    if (stored) setCustToken(stored);
+    if (stored) {
+      setCustToken(stored);
+      slideSession(slug).then(() => {
+        const fresh = localStorage.getItem(`helix_cust_${slug}`);
+        setCustToken(fresh);   // null when the token turned out to be expired
+      });
+    }
+    // Portal v2 (P2): installable PWA + auto-flush of the offline queue.
+    registerPortalPwa(slug);
+    const refreshCount = () => listPending(slug).then(rows => setPendingCount(rows.length)).catch(() => {});
+    refreshCount();
+    return onQueueChange(refreshCount);
   }, [slug]);
 
   // Load customer profile whenever we have a token
@@ -224,6 +227,12 @@ export default function Portal() {
       .then(d => setCustCases(d.cases ?? []))
       .catch(() => setCustCases([]));
   }, [view, custToken, slug]);
+
+  useEffect(() => {
+    if (!slug || !caseTypeId) { setFormFields([]); return; }
+    getCaseTypeForm(slug, caseTypeId).then(setFormFields).catch(() => setFormFields([]));
+    setFormData({});
+  }, [slug, caseTypeId]);
 
   useEffect(() => {
     if (view === "track" && trackToken && !trackResult && !tracking)
@@ -250,9 +259,14 @@ export default function Portal() {
   }
 
   function custLogout() {
-    localStorage.removeItem(`helix_cust_${slug}`);
-    setCustToken(null); setCustProfile(null); setCustCases(null);
+    if (slug) clearCustomerToken(slug);
+    setCustToken(null); setCustProfile(null); setCustCases(null); setOpenCaseId(null);
     go("home");
+  }
+
+  function openCase(caseId: string) {
+    setOpenCaseId(caseId);
+    setView("case");
   }
 
   async function handleAuthSubmitEmail(e: React.FormEvent) {
@@ -318,15 +332,31 @@ export default function Portal() {
     if (!caseTypeId || !name.trim() || !email.trim() || !subject.trim() || !description.trim()) {
       setSubmitErr("All fields are required."); return;
     }
+    const missing = formFields.filter(f => f.required && !String(formData[f.key] ?? "").trim());
+    if (missing.length) {
+      setSubmitErr(`Please fill in: ${missing.map(f => f.label).join(", ")}`); return;
+    }
     setSubmitting(true); setSubmitErr(null);
+    const payload = { case_type_id: caseTypeId, submitter_name: name, submitter_email: email,
+                      subject, description, priority,
+                      ...(formFields.length ? { extra_data: formData } : {}) };
     try {
       const r = await fetch(`/api/v1/portal/${slug}/submit`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ case_type_id: caseTypeId, submitter_name: name, submitter_email: email, subject, description, priority }),
+        body: JSON.stringify(payload),
       });
       if (!r.ok) throw new Error(await r.text());
       setSubmitResult(await r.json());
-    } catch (err: any) { setSubmitErr(err.message); }
+    } catch (err: any) {
+      // fetch rejects with TypeError only on network failure — HTTP errors
+      // throw plain Error above, so real rejections are never queued.
+      if (slug && (err instanceof TypeError || !navigator.onLine)) {
+        await queueSubmission(slug, payload);
+        setSubmitResult({ tracking_token: "", case_id: "", message: "", offline: true });
+      } else {
+        setSubmitErr(err.message);
+      }
+    }
     finally { setSubmitting(false); }
   }
 
@@ -498,8 +528,10 @@ export default function Portal() {
     ["submit",    "Submit Request",                                    "📝"],
     ["track",     "Track Status",                                      "🔍"],
     ["dashboard", "My Requests",                                       "📋"],
-    // P65 HIDDEN — uncomment to enable Customer Accounts
-    // [custToken ? "account" : "login", custToken ? (custProfile?.display_name ?? "My Account") : "Login / Register", custToken ? "👤" : "🔑"],
+    // P65 Customer Accounts — gated on the `customer_accounts` release flag
+    ...(isEnabled("customer_accounts")
+      ? [[custToken ? "account" : "login", custToken ? (custProfile?.display_name ?? "My Account") : "Login / Register", custToken ? "👤" : "🔑"] as [View, string, string]]
+      : []),
   ];
 
   return (
@@ -513,9 +545,12 @@ export default function Portal() {
           <div style={{
             width: 48, height: 48, borderRadius: 12, background: "rgba(255,255,255,0.22)",
             display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: 22, fontWeight: 800, flexShrink: 0,
+            fontSize: 22, fontWeight: 800, flexShrink: 0, overflow: "hidden",
           }}>
-            {config.logo_text.charAt(0).toUpperCase()}
+            {config.logo_url
+              ? <img src={config.logo_url} alt={config.logo_text}
+                     style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : config.logo_text.charAt(0).toUpperCase()}
           </div>
           <div>
             <div style={{ fontWeight: 800, fontSize: 19, letterSpacing: "-0.02em" }}>{config.logo_text}</div>
@@ -524,7 +559,7 @@ export default function Portal() {
         </div>
 
         {view !== "timeline" && !submitResult && (
-          <div style={{ maxWidth: 780, margin: "0 auto", padding: "14px 20px 0", display: "flex", gap: 2, overflowX: "auto" }}>
+          <div className="ptopnav" style={{ maxWidth: 780, margin: "0 auto", padding: "14px 20px 0", display: "flex", gap: 2, overflowX: "auto" }}>
             {NAV.map(([v, label, icon]) => (
               <button key={v} onClick={() => go(v)} style={{
                 padding: "9px 16px", border: "none",
@@ -544,6 +579,22 @@ export default function Portal() {
 
       {/* ── Body ────────────────────────────────────────────────── */}
       <main style={{ maxWidth: 780, margin: "0 auto", padding: "28px 20px 60px" }}>
+
+        {/* Portal v2 (P2): queued offline submissions awaiting sync */}
+        {pendingCount > 0 && (
+          <div style={{
+            ...C.card, marginBottom: 20, padding: "12px 18px", background: "#fffbeb",
+            border: "1px solid #fcd34d", display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <span style={{ fontSize: 18 }}>📴</span>
+            <div style={{ flex: 1, fontSize: 13, color: "#92400e" }}>
+              <strong>{pendingCount}</strong> request{pendingCount > 1 ? "s" : ""} saved on this device —
+              will submit automatically when you're online.
+            </div>
+            <button onClick={() => slug && flushPending(slug)}
+              style={{ ...C.secondary, padding: "6px 12px", fontSize: 12 }}>Retry now</button>
+          </div>
+        )}
 
         {/* ════ HOME ════════════════════════════════════════════════════════ */}
         {view === "home" && (
@@ -649,13 +700,13 @@ export default function Portal() {
                           {askAnswer}
                         </div>
                         <div style={{ display: "flex", gap: 8 }}>
-                          <button onClick={() => setAskDone(true)}
+                          <button onClick={() => { if (slug) postAskFeedback(slug, askQ, true); setAskDone(true); }}
                             style={{ ...C.primary("#16a34a"), padding: "6px 14px", fontSize: 12 }}>
                             ✓ That helped
                           </button>
-                          <button onClick={() => { setAskAnswer(null); setAskQ(""); }}
+                          <button onClick={() => { if (slug) postAskFeedback(slug, askQ, false); setAskAnswer(null); setAskQ(""); }}
                             style={{ ...C.secondary, padding: "6px 14px", fontSize: 12 }}>
-                            Ask again
+                            Didn't help — ask again
                           </button>
                         </div>
                       </>
@@ -729,6 +780,31 @@ export default function Portal() {
                   <textarea value={description} onChange={e => setDesc(e.target.value)}
                     placeholder="Please describe your request in detail…"
                     rows={5} style={{ ...C.input, resize: "vertical" }} required />
+
+                  {/* Portal v2 (P5): case-type form (Form Builder) */}
+                  {formFields.map(f => (
+                    <div key={f.key}>
+                      <div style={C.label}>{f.label}{f.required ? " *" : ""}</div>
+                      {f.type === "textarea" ? (
+                        <textarea rows={3} value={formData[f.key] ?? ""} placeholder={f.placeholder}
+                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
+                          style={{ ...C.input, resize: "vertical" }} />
+                      ) : f.type === "select" && f.options.length > 0 ? (
+                        <select value={formData[f.key] ?? ""}
+                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
+                          style={C.input}>
+                          <option value="">Select…</option>
+                          {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      ) : (
+                        <input type={["number", "date", "email"].includes(f.type) ? f.type : "text"}
+                          value={formData[f.key] ?? ""} placeholder={f.placeholder}
+                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
+                          style={C.input} />
+                      )}
+                    </div>
+                  ))}
+
                   <div style={C.label}>Priority</div>
                   <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
                     {(["low", "medium", "high"] as const).map(p => (
@@ -758,7 +834,24 @@ export default function Portal() {
         )}
 
         {/* ════ SUCCESS ═════════════════════════════════════════════════════ */}
-        {submitResult && (
+        {submitResult?.offline && (
+          <div style={{ ...C.card, textAlign: "center", borderTop: "4px solid #f59e0b" }}>
+            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#fffbeb", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 16px" }}>
+              📴
+            </div>
+            <div style={{ fontWeight: 800, fontSize: 22, color: "#111827", marginBottom: 8 }}>Saved on this device</div>
+            <div style={{ color: "#6b7280", fontSize: 14, marginBottom: 8, lineHeight: 1.6 }}>
+              You're offline right now, so your request is stored safely on this device.
+              It will be submitted <strong>automatically</strong> the moment your connection returns — nothing else to do.
+            </div>
+            <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 24 }}>
+              Note: the request lives only in this browser until it syncs.
+            </div>
+            <button onClick={() => { setSubmitResult(null); go("home"); }} style={C.primary(brand)}>Done</button>
+          </div>
+        )}
+
+        {submitResult && !submitResult.offline && (
           <div style={{ ...C.card, textAlign: "center", borderTop: `4px solid ${brand}` }}>
             <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f0fdf4", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 16px" }}>
               ✅
@@ -1309,6 +1402,24 @@ export default function Portal() {
                     <div style={C.metaLabel}>Total Cases</div>
                     <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginTop: 4 }}>{custProfile.case_count}</div>
                   </div>
+                  <div>
+                    <div style={C.metaLabel}>Email Updates</div>
+                    <button onClick={async () => {
+                      const next = !(custProfile as any).notify_email;
+                      try {
+                        await setNotifyEmail(slug!, next);
+                        setCustProfile({ ...(custProfile as any), notify_email: next });
+                      } catch { /* leave as-is */ }
+                    }} style={{
+                      marginTop: 4, padding: "4px 12px", borderRadius: 14, fontSize: 12, fontWeight: 700,
+                      cursor: "pointer",
+                      border: `1px solid ${(custProfile as any).notify_email ? brand : "#d1d5db"}`,
+                      background: (custProfile as any).notify_email ? brand + "15" : "#fff",
+                      color: (custProfile as any).notify_email ? brand : "#6b7280",
+                    }}>
+                      {(custProfile as any).notify_email ? "On — we'll email you replies" : "Off"}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div>
@@ -1372,10 +1483,8 @@ export default function Portal() {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                       <StatusBadge status={c.status} />
-                      {c.tracking_token && (
-                        <button onClick={() => { setTrackToken(c.tracking_token!); setTrackResult(null); go("track"); }}
-                          style={{ ...C.secondary, padding: "6px 12px", fontSize: 12 }}>Track</button>
-                      )}
+                      <button onClick={() => openCase(c.case_id)}
+                        style={{ ...C.primary(brand), padding: "6px 14px", fontSize: 12 }}>View</button>
                     </div>
                   </div>
                 ))}
@@ -1384,11 +1493,41 @@ export default function Portal() {
           </div>
         )}
 
+        {/* ════ CASE DETAIL (Portal v2, logged-in) ══════════════════════════ */}
+        {view === "case" && slug && openCaseId && (
+          <CaseDetail slug={slug} caseId={openCaseId} brand={brand}
+            onBack={() => { setOpenCaseId(null); go("account"); }}
+            onAuthLost={() => { custLogout(); go("login"); }} />
+        )}
+
       </main>
 
-      <footer style={{ textAlign: "center", padding: "20px 16px", color: "#c4c9d4", fontSize: 12, borderTop: "1px solid #f1f3f5" }}>
+      <footer style={{ textAlign: "center", padding: "20px 16px 84px", color: "#c4c9d4", fontSize: 12, borderTop: "1px solid #f1f3f5" }}>
         Powered by <strong style={{ color: "#9ca3af" }}>{BRAND.name}</strong> BPM Platform
       </footer>
+
+      {/* ── Mobile bottom nav (Portal v2) ─────────────────────────── */}
+      <nav className="pbottomnav" style={{
+        position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 100,
+        background: "#fff", borderTop: "1px solid #eaecf0",
+        boxShadow: "0 -2px 10px rgba(0,0,0,0.06)",
+        justifyContent: "space-around", padding: "6px 4px calc(6px + env(safe-area-inset-bottom))",
+      }}>
+        {NAV.map(([v, label, icon]) => {
+          const active = view === v || (v === "account" && view === "case");
+          return (
+            <button key={v} onClick={() => go(v)} style={{
+              border: "none", background: "none", cursor: "pointer",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+              padding: "4px 10px", minWidth: 56,
+              color: active ? brand : "#9ca3af", fontWeight: active ? 700 : 500, fontSize: 10,
+            }}>
+              <span style={{ fontSize: 18 }}>{icon}</span>
+              {label.length > 14 ? label.split(" ")[0] : label}
+            </button>
+          );
+        })}
+      </nav>
     </Shell>
   );
 }
@@ -1400,25 +1539,20 @@ function Shell({ brand: _brand, children }: { brand: string; children: React.Rea
     <div style={{ minHeight: "100vh", background: "#f5f7fa", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif", overflowX: "hidden", boxSizing: "border-box" }}>
       <style>{`
         @keyframes pspin { to { transform: rotate(360deg); } }
+        @keyframes pshimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
         *, *::before, *::after { box-sizing: border-box; }
+        /* Studio's global.css pins html/body/#root to height:100% +
+           overflow:hidden for the app shell's internal scrolling. The public
+           portal is a normal document — restore natural page scrolling here,
+           or everything below the first viewport is unreachable. */
+        html, body, #root { height: auto !important; overflow: auto !important; }
+        .pbottomnav { display: none; }
+        @media (max-width: 719px) {
+          .pbottomnav { display: flex; }
+          .ptopnav { display: none !important; }
+        }
       `}</style>
       {children}
-    </div>
-  );
-}
-
-function StatusBadge({ status, large }: { status: string; large?: boolean }) {
-  const sc = STATUS_CFG[status] ?? { color: "#6b7280", bg: "#f9fafb", icon: "•", label: sl(status) };
-  return (
-    <div style={{
-      display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0,
-      padding: large ? "6px 14px" : "4px 10px",
-      borderRadius: 20, background: sc.bg, color: sc.color,
-      fontSize: large ? 13 : 11, fontWeight: 700,
-      border: `1px solid ${sc.color}28`,
-    }}>
-      <span style={{ fontSize: large ? 14 : 11 }}>{sc.icon}</span>
-      {sc.label}
     </div>
   );
 }
@@ -1629,15 +1763,3 @@ export function PortalLogin() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const C = {
-  card:       { background: "#fff", borderRadius: 12, border: "1px solid #eaecf0", padding: 24, boxShadow: "0 1px 4px rgba(0,0,0,0.05)" } as React.CSSProperties,
-  cardTitle:  { fontSize: 18, fontWeight: 800, marginBottom: 20, color: "#111827", letterSpacing: "-0.02em" } as React.CSSProperties,
-  label:      { display: "block", fontSize: 11, fontWeight: 700, color: "#374151", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" } as React.CSSProperties,
-  input:      { display: "block", width: "100%", padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, marginBottom: 16, boxSizing: "border-box", fontFamily: "inherit", outline: "none" } as React.CSSProperties,
-  primary:    (color: string) => ({ padding: "10px 20px", border: "none", borderRadius: 8, cursor: "pointer", background: color, color: "#fff", fontWeight: 700, fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6 } as React.CSSProperties),
-  secondary:  { padding: "10px 20px", border: "1px solid #d1d5db", borderRadius: 8, cursor: "pointer", background: "#fff", color: "#374151", fontWeight: 600, fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6 } as React.CSSProperties,
-  ghost:      { padding: "6px 0", border: "none", background: "none", cursor: "pointer", fontWeight: 500, fontSize: 13 } as React.CSSProperties,
-  err:        { color: "#ef4444", fontSize: 13, marginBottom: 12 } as React.CSSProperties,
-  metaLabel:  { fontSize: 10, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 } as React.CSSProperties,
-  sectionLabel:{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 } as React.CSSProperties,
-};

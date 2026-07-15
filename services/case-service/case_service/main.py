@@ -86,6 +86,14 @@ from case_service.api.routers.case_variables import router as case_variables_rou
 from case_service.api.routers.portal_customers import public_router as portal_customers_public_router, admin_router as portal_customers_admin_router  # P65
 from case_service.api.routers.releases import router as releases_router, release_cron  # P66
 from case_service.api.routers.hxdbmanager import router as hxdbmanager_router          # P67
+from case_service.api.routers.hxdbmigrate import router as hxdbmigrate_router          # HxDBMigrate
+from case_service.api.routers.hxreplay import router as hxreplay_router                # HxReplay
+from case_service.api.routers.costing import router as costing_router                  # Case Costing
+from case_service.api.routers.meet import router as meet_router                        # HxMeet P1
+from case_service.api.routers.messages import router as messages_router                # Portal v2 P4
+from case_service.api.routers.hxdraft import router as hxdraft_router                  # HxDraft
+from case_service.api.routers.hxevolve import router as hxevolve_router                # HxEvolve
+from case_service.api.routers.hxmcp import router as hxmcp_router                      # HxNexus Operator (MCP)
 from starlette.middleware.cors import CORSMiddleware
 
 from case_service.api.health import router as health_router
@@ -402,6 +410,8 @@ async def lifespan(app: FastAPI):
         from case_service.security.credential_monitor import credential_expiry_monitor
         _asyncio.create_task(credential_expiry_monitor())
         _asyncio.create_task(release_cron())
+        from case_service.hxevolve.pipeline import hxevolve_cron
+        _asyncio.create_task(hxevolve_cron())
         logger.info("Credential expiry monitor started")
     except Exception as _e:
         logger.warning("Credential expiry monitor unavailable: %s", _e)
@@ -577,6 +587,14 @@ def create_app() -> FastAPI:
     app.include_router(devconn_router,   prefix=prefix)   # P53
     app.include_router(hxmigrate_router, prefix=prefix)   # P54
     app.include_router(hxdeploy_router,  prefix=prefix)   # P55
+    app.include_router(hxdbmigrate_router, prefix=prefix)  # HxDBMigrate
+    app.include_router(hxreplay_router, prefix=prefix)      # HxReplay
+    app.include_router(costing_router, prefix=prefix)        # Case Costing
+    app.include_router(meet_router, prefix=prefix)           # HxMeet P1
+    app.include_router(messages_router, prefix=prefix)       # Portal v2 P4 case messages
+    app.include_router(hxdraft_router, prefix=prefix)         # HxDraft
+    app.include_router(hxevolve_router, prefix=prefix)        # HxEvolve
+    app.include_router(hxmcp_router, prefix=prefix)            # HxNexus Operator (MCP)
     app.include_router(hxwork_router,    prefix=prefix)   # P56
     app.include_router(hxcanvas_router,  prefix=prefix)   # P57
     app.include_router(hxdocs_router,    prefix=prefix)   # P58

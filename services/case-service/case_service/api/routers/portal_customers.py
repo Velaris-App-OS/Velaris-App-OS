@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from case_service.auth.dependencies import get_current_user
+from case_service.auth.dependencies import require_role
 from case_service.auth.models import AuthenticatedUser
 from case_service.db.models import (
     TenantModel,
@@ -51,10 +51,12 @@ def _require_customer_accounts():
 
 
 public_router = APIRouter(
+    prefix="/portal",
     tags=["portal-customers-public"],
     dependencies=[Depends(_require_customer_accounts)],
 )
 admin_router = APIRouter(
+    prefix="/portal",
     tags=["portal-customers-admin"],
     dependencies=[Depends(_require_customer_accounts)],
 )
@@ -104,12 +106,16 @@ def _decode_customer_token(token: str) -> dict:
 
 
 async def _require_customer(
+    slug: str,
     authorization: str = Header(""),
     session: AsyncSession = Depends(get_session),
 ) -> PortalCustomerModel:
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing customer token")
     claims = _decode_customer_token(authorization[7:])
+    # Token is minted for one portal — reject it on any other slug.
+    if claims.get("slug") != slug:
+        raise HTTPException(401, "Invalid or expired customer token")
     customer = await session.get(PortalCustomerModel, uuid.UUID(claims["sub"]))
     if not customer:
         raise HTTPException(404, "Customer not found")
@@ -162,9 +168,11 @@ async def _send_otp_email(session: AsyncSession, to_email: str, otp: str, purpos
 
 async def _get_tenant_by_slug(slug: str, session: AsyncSession) -> TenantModel:
     tenant = (await session.execute(
-        select(TenantModel).where(TenantModel.slug == slug, TenantModel.portal_enabled.is_(True))
+        select(TenantModel).where(TenantModel.slug == slug)
     )).scalar_one_or_none()
-    if not tenant:
+    # Portal activation lives in tenant.settings["portal"]["enabled"] (same
+    # gate portal.py uses) — there is no portal_enabled column on tenants.
+    if not tenant or not (tenant.settings or {}).get("portal", {}).get("enabled", False):
         raise HTTPException(404, "Portal not found")
     return tenant
 
@@ -191,6 +199,7 @@ class UpdateProfileBody(BaseModel):
     phone: Optional[str] = None
     alt_email: Optional[str] = None
     preferred_email: Optional[str] = None   # "primary" | "alt"
+    notify_email: Optional[bool] = None     # P4: email me on replies/updates
 
 
 # ── Public: Registration ──────────────────────────────────────────────────────
@@ -240,6 +249,7 @@ async def portal_register(
     # Auto-link any historical cases with matching email
     historical = (await session.execute(
         select(CaseInstanceModel).where(
+            CaseInstanceModel.tenant_id == tenant.id,
             CaseInstanceModel.portal_submitter_email == body.email.lower(),
             CaseInstanceModel.id.not_in(
                 select(PortalCustomerCaseLinkModel.case_id)
@@ -338,6 +348,25 @@ async def portal_verify_otp(
     }
 
 
+@public_router.post("/{slug}/auth/refresh")
+async def portal_refresh_token(
+    slug: str,
+    customer: PortalCustomerModel = Depends(_require_customer),
+    session: AsyncSession = Depends(get_session),
+):
+    """Sliding session: a still-valid customer token buys a fresh 24h one.
+
+    Extends only while the customer is actively using the portal — an expired
+    token cannot refresh (no long-lived credential is ever minted), so an
+    abandoned session dies within 24h exactly as before.
+    """
+    tenant = await _get_tenant_by_slug(slug, session)
+    customer.last_active_at = datetime.now(timezone.utc)
+    session.add(customer)
+    await session.commit()
+    return {"customer_token": _mint_customer_token(str(customer.id), str(tenant.id), slug)}
+
+
 # ── Public: Profile ───────────────────────────────────────────────────────────
 
 @public_router.get("/{slug}/account")
@@ -361,6 +390,7 @@ async def portal_get_account(
         "preferred_email": customer.preferred_email,
         "phone":           customer.phone,
         "verified":        customer.verified,
+        "notify_email":    customer.notify_email,
         "case_count":      case_count,
         "created_at":      customer.created_at.isoformat(),
         "last_active_at":  customer.last_active_at.isoformat(),
@@ -390,6 +420,8 @@ async def portal_update_account(
         if body.preferred_email == "alt" and not customer.alt_email:
             raise HTTPException(400, "No alternative email set")
         customer.preferred_email = body.preferred_email
+    if body.notify_email is not None:
+        customer.notify_email = body.notify_email
 
     session.add(customer)
     await session.commit()
@@ -429,12 +461,16 @@ async def portal_account_cases(
         .order_by(CaseInstanceModel.created_at.desc())
     )).scalars().all()
 
+    # Subject is a case variable, not a column — same resolution portal.py uses.
+    from case_service.api.routers.portal import _case_vars_for
+    vars_by_case = await _case_vars_for(session, [c.id for c in rows])
+
     return {"cases": [
         {
             "case_id":        str(c.id),
             "case_number":    c.case_number,
             "tracking_token": str(c.portal_tracking_token) if c.portal_tracking_token else None,
-            "subject":        c.subject,
+            "subject":        vars_by_case.get(c.id, {}).get("subject", "Your request"),
             "status":         c.status,
             "priority":       c.priority,
             "submitted_at":   c.created_at.isoformat(),
@@ -452,7 +488,7 @@ async def admin_list_customers(
     q: str = "",
     limit: int = 50,
     offset: int = 0,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_role("admin")),
     session: AsyncSession = Depends(get_session),
 ):
     tenant = await _get_tenant_by_slug(slug, session)
@@ -493,7 +529,7 @@ async def admin_list_customers(
 async def admin_get_customer(
     slug: str,
     customer_id: uuid.UUID,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_role("admin")),
     session: AsyncSession = Depends(get_session),
 ):
     tenant = await _get_tenant_by_slug(slug, session)
@@ -507,6 +543,10 @@ async def admin_get_customer(
         .where(PortalCustomerCaseLinkModel.customer_id == customer.id)
         .order_by(CaseInstanceModel.created_at.desc())
     )).scalars().all()
+
+    # Subject is a case variable, not a column — same resolution portal.py uses.
+    from case_service.api.routers.portal import _case_vars_for
+    vars_by_case = await _case_vars_for(session, [c.id for c in cases])
 
     return {
         "id":              str(customer.id),
@@ -522,7 +562,7 @@ async def admin_get_customer(
             {
                 "case_id":      str(c.id),
                 "case_number":  c.case_number,
-                "subject":      c.subject,
+                "subject":      vars_by_case.get(c.id, {}).get("subject", "Your request"),
                 "status":       c.status,
                 "submitted_at": c.created_at.isoformat(),
             }
@@ -535,7 +575,7 @@ async def admin_get_customer(
 async def admin_delete_customer(
     slug: str,
     customer_id: uuid.UUID,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_role("admin")),
     session: AsyncSession = Depends(get_session),
 ):
     """GDPR Art. 17 — admin-initiated anonymisation."""

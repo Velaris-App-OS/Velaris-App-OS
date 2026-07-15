@@ -1,0 +1,14 @@
+{
+  "name": "Customer Portal",
+  "short_name": "Portal",
+  "description": "Submit and track your support requests — works offline.",
+  "start_url": ".",
+  "scope": "/portal/",
+  "display": "standalone",
+  "background_color": "#f5f7fa",
+  "theme_color": "#0d9488",
+  "icons": [
+    { "src": "/velaris.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/velaris.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -644,6 +644,9 @@ async def transition_stage(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     case = await _get_case_or_404(session, case_id)
+    # same case-level check the MCP case_advance_stage tool applies
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.update", case_id)
     prev = case.current_stage_id
     await repo.update_case_instance(
         session, case_id, values={"current_stage_id": body.target_stage_id}
@@ -849,12 +852,16 @@ async def create_assignment(
     case_id: uuid.UUID,
     body: InternalAssignmentCreate,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Create a work-item assignment for a case step.
 
-    Called by Temporal activities during stage execution.
+    In-process stage execution uses core/assignment_router directly; this
+    HTTP surface is for operators and requires case.update on the case.
     """
     await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.update", case_id)
 
     assignment = await repo.create_assignment(
         session,
@@ -888,9 +895,12 @@ async def create_assignment(
 async def list_case_assignments(
     case_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List all assignments for a case."""
     await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.read", case_id)
     return await repo.get_assignments_for_case(session, case_id)
 
 
@@ -903,8 +913,12 @@ async def list_case_assignments(
 async def get_case_history(
     case_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _get_case_or_404(session, case_id)
+    # same posture as get_case — a timeline reveals as much as the case itself
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.read", case_id)
     return await repo.get_audit_log(session, case_id)
 
 
@@ -920,9 +934,14 @@ async def add_relationship(
     case_id: uuid.UUID,
     body: RelationshipCreate,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _get_case_or_404(session, case_id)
     await _get_case_or_404(session, body.target_case_id)
+    # mirror of the MCP case_link tool: update on source, read on target
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.update", case_id)
+    await hxguard.require_case(session, user, "case.read", body.target_case_id)
     rel = await repo.create_relationship(
         session,
         data={
@@ -953,8 +972,11 @@ async def add_relationship(
 async def list_relationships(
     case_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.read", case_id)
     return await repo.get_relationships(session, case_id)
 
 
@@ -968,9 +990,12 @@ async def create_child_case(
     case_id: uuid.UUID,
     body: CaseCreate,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Create a child case linked to the parent."""
     parent = await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.update", case_id)
     body.parent_case_id = case_id
     case_type = await repo.get_case_type(session, body.case_type_id)
     if case_type is None:
@@ -1016,8 +1041,11 @@ async def create_child_case(
 async def list_child_cases(
     case_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.read", case_id)
     children, _ = await repo.search_case_instances(
         session,
         filters={"parent_case_id": case_id},
@@ -1572,6 +1600,30 @@ class ShareCreate(BaseModel):
     relation: str = "viewer"     # viewer | editor
 
 
+async def _resolve_share_user(session, value: str):
+    """Resolve a share target to a real user — accepts a user UUID, username,
+    or email. Tuples must store the canonical user id (the JWT `sub` is the
+    user UUID); a free-text subject would 'share' to nobody."""
+    from sqlalchemy import func, or_
+    from case_service.db.models import HelixUserModel
+    v = value.strip()
+    target = None
+    try:
+        target = (await session.execute(
+            sa_select(HelixUserModel).where(HelixUserModel.id == uuid.UUID(v))
+        )).scalar_one_or_none()
+    except ValueError:
+        pass
+    if target is None:
+        target = (await session.execute(
+            sa_select(HelixUserModel).where(or_(
+                func.lower(HelixUserModel.email) == v.lower(),
+                func.lower(HelixUserModel.username) == v.lower(),
+            ))
+        )).scalar_one_or_none()
+    return target
+
+
 async def _require_share_access(session, user, case_id: uuid.UUID, action: str) -> None:
     """Sharing endpoints are NEW surfaces — always enforced, regardless of
     the shadow-mode setting that protects pre-existing case routes.
@@ -1603,15 +1655,20 @@ async def share_case(
         raise HTTPException(400, "relation must be viewer | editor")
     await _get_case_or_404(session, case_id)
     await _require_share_access(session, user, case_id, "case.share")
+    target = await _resolve_share_user(session, body.user_id)
+    if target is None or not target.is_active:
+        raise HTTPException(400, f"No user found for '{body.user_id}' — use a user id, username, or email")
     from case_service.hxguard import tuples as hxg_tuples
     await hxg_tuples.write_tuple(
         session, object_type="case", object_id=case_id,
         relation=body.relation, subject_type="user",
-        subject_id=body.user_id, created_by=user.user_id,
+        subject_id=str(target.id), created_by=user.user_id,
     )
     await _audit(session, case_id, "case_shared", actor_id=user.user_id,
-                 details={"user_id": body.user_id, "relation": body.relation})
-    return {"case_id": str(case_id), "user_id": body.user_id, "relation": body.relation}
+                 details={"user_id": str(target.id), "given": body.user_id,
+                          "username": target.username, "relation": body.relation})
+    return {"case_id": str(case_id), "user_id": str(target.id),
+            "username": target.username, "relation": body.relation}
 
 
 @router.get("/{case_id}/shares")
@@ -1627,8 +1684,25 @@ async def list_case_shares(
         session, object_type="case", object_id=case_id,
         relations={"viewer", "editor", "assignee"},
     )
+    # Resolve subject UUIDs to usernames so the Sharing tab shows people,
+    # not identifiers. Legacy/free-text subjects simply resolve to nothing.
+    from case_service.db.models import HelixUserModel
+    subject_uuids = []
+    for t in rows:
+        try:
+            subject_uuids.append(uuid.UUID(t.subject_id))
+        except ValueError:
+            pass
+    names: dict[str, HelixUserModel] = {}
+    if subject_uuids:
+        for u in (await session.execute(
+            sa_select(HelixUserModel).where(HelixUserModel.id.in_(subject_uuids))
+        )).scalars():
+            names[str(u.id)] = u
     return [
         {"user_id": t.subject_id, "relation": t.relation,
+         "username": names[t.subject_id].username if t.subject_id in names else None,
+         "display_name": names[t.subject_id].display_name if t.subject_id in names else None,
          "created_by": t.created_by,
          "created_at": t.created_at.isoformat() if t.created_at else None}
         for t in rows
@@ -1646,14 +1720,23 @@ async def unshare_case(
     await _get_case_or_404(session, case_id)
     await _require_share_access(session, user, case_id, "case.share")
     from case_service.hxguard import tuples as hxg_tuples
+    # Accept id/username/email like share; fall back to the raw value so
+    # legacy free-text tuples stay removable.
+    target = await _resolve_share_user(session, user_id)
+    subject_id = str(target.id) if target is not None else user_id
     removed = await hxg_tuples.remove_tuple(
         session, object_type="case", object_id=case_id,
-        relation=relation, subject_type="user", subject_id=user_id,
+        relation=relation, subject_type="user", subject_id=subject_id,
     )
+    if not removed and subject_id != user_id:
+        removed = await hxg_tuples.remove_tuple(
+            session, object_type="case", object_id=case_id,
+            relation=relation, subject_type="user", subject_id=user_id,
+        )
     if not removed:
         raise HTTPException(404, "Share not found")
     await _audit(session, case_id, "case_unshared", actor_id=user.user_id,
-                 details={"user_id": user_id, "relation": relation})
+                 details={"user_id": subject_id, "given": user_id, "relation": relation})
 
 
 @router.get("/{case_id}/step-completions", response_model=list[StepCompletionResponse])
@@ -1661,12 +1744,15 @@ async def list_step_completions(
     case_id: uuid.UUID,
     stage_id: str | None = Query(None),
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Return all step completions for a case, optionally filtered by stage."""
     from sqlalchemy import select
     from case_service.db.models import CaseStepCompletionModel
 
     await _get_case_or_404(session, case_id)
+    from case_service import hxguard
+    await hxguard.require_case(session, user, "case.read", case_id)
     stmt = select(CaseStepCompletionModel).where(
         CaseStepCompletionModel.case_id == case_id
     )

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -344,6 +344,27 @@ async def _apply_artifact_to_main(session: AsyncSession, artifact_type: str, art
         e.updated_at = now
         return
     raise HTTPException(400, f"Merge not yet supported for artifact_type='{artifact_type}'.")
+
+
+async def _queue_rule_regen(
+    session: AsyncSession,
+    background_tasks: BackgroundTasks,
+    artifact_type: Optional[str],
+    artifact_id: Optional[str],
+) -> None:
+    """Parity with the manual rules PATCH: a merged rule change stales AI scenarios."""
+    if artifact_type != "rule" or not artifact_id:
+        return
+    try:
+        from case_service.db.models import RuleDefinitionModel
+        rule = await session.get(RuleDefinitionModel, uuid.UUID(artifact_id))
+        from case_service.testsuite import regen
+        background_tasks.add_task(
+            regen.bg_scenario_source_changed,
+            rule.scope_target_id if rule else None,
+        )
+    except Exception:
+        pass  # regen queueing must never block a merge
 
 
 # ── Branches CRUD ─────────────────────────────────────────────────
@@ -675,6 +696,7 @@ async def list_reviews(
 async def post_review(
     branch_id: uuid.UUID,
     body:      PostReviewRequest,
+    background_tasks: BackgroundTasks,
     session:   AsyncSession = Depends(get_session),
     user:      AuthenticatedUser = Depends(get_current_user),
 ):
@@ -717,6 +739,7 @@ async def post_review(
                     "The owner must recall the branch, rebase, and resubmit.",
                 )
             await _apply_artifact_to_main(session, b.artifact_type, b.artifact_id, b.content_snapshot)
+            await _queue_rule_regen(session, background_tasks, b.artifact_type, b.artifact_id)
 
         merge_diff = _compute_diff(current_main, b.content_snapshot)
         b.status = "merged"
@@ -875,6 +898,7 @@ async def revert_to_base(
 @router.post("/{branch_id}/merge")
 async def merge_branch(
     branch_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     session:   AsyncSession = Depends(get_session),
     user:      AuthenticatedUser = Depends(get_current_user),
 ):
@@ -892,6 +916,7 @@ async def merge_branch(
 
     if b.branch_type == "artifact" and b.artifact_type and b.artifact_id:
         await _apply_artifact_to_main(session, b.artifact_type, b.artifact_id, b.content_snapshot)
+        await _queue_rule_regen(session, background_tasks, b.artifact_type, b.artifact_id)
 
     now = datetime.now(timezone.utc)
     merge_diff = _compute_diff(current_main, b.content_snapshot)

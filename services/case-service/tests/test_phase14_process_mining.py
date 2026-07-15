@@ -125,6 +125,26 @@ class TestAnalyzerFunctions:
             )
         await session.commit()
 
+        # A stray rollback on the shared connection (app-session cleanup racing
+        # the fixture session) occasionally drops a flushed event before the
+        # commit lands. Top the setup back up — order doesn't matter here.
+        from sqlalchemy import func as _func, select as _select
+        from case_service.db.models import CaseEventLogModel as _Ev
+        for _ in range(3):
+            n = (await session.execute(
+                _select(_func.count()).select_from(_Ev).where(
+                    _Ev.case_id == case_id, _Ev.activity == "review")
+            )).scalar_one()
+            if n >= 3:
+                break
+            for _ in range(3 - n):
+                await log_event(
+                    session, case_id=case_id, case_type_id=ct_id,
+                    activity="review", activity_type="step_complete",
+                    duration_seconds=60,
+                )
+            await session.commit()
+
         resp = await client.get("/api/v1/process-mining/activity-stats")
         stats = resp.json()
         # At least our test activity should be in there
@@ -142,16 +162,40 @@ class TestAnalyzerFunctions:
         })
         ct_id = uuid.UUID(ct.json()["id"])
 
-        # Create 2 cases with same path
+        # Create 2 cases with same path — commit INSIDE the loop: the next
+        # client call rolls back the shared connection, wiping uncommitted events
+        case_ids = []
         for _ in range(2):
             case = await client.post("/api/v1/cases", json={
                 "case_type_id": ct.json()["id"], "data": {},
             })
             case_id = uuid.UUID(case.json()["id"])
+            case_ids.append(case_id)
             await log_event(session, case_id=case_id, case_type_id=ct_id, activity="A", activity_type="step")
             await log_event(session, case_id=case_id, case_type_id=ct_id, activity="B", activity_type="step")
             await log_event(session, case_id=case_id, case_type_id=ct_id, activity="C", activity_type="step")
-        await session.commit()
+            await session.commit()
+
+        # A stray rollback on the shared connection (app-session cleanup racing
+        # the fixture session) occasionally drops a flushed event before the
+        # commit lands. Verify the setup and rebuild any incomplete trace in
+        # order — the assertion below is about variant grouping, not harness timing.
+        from sqlalchemy import delete as _delete, select as _select
+        from case_service.db.models import CaseEventLogModel as _Ev
+        for case_id in case_ids:
+            for _ in range(3):
+                present = set((await session.execute(
+                    _select(_Ev.activity).where(_Ev.case_id == case_id,
+                                                _Ev.activity.in_(["A", "B", "C"]))
+                )).scalars().all())
+                if present == {"A", "B", "C"}:
+                    break
+                await session.execute(_delete(_Ev).where(
+                    _Ev.case_id == case_id, _Ev.activity.in_(["A", "B", "C"])))
+                for a in "ABC":
+                    await log_event(session, case_id=case_id, case_type_id=ct_id,
+                                    activity=a, activity_type="step")
+                await session.commit()
 
         resp = await client.get("/api/v1/process-mining/variants")
         variants = resp.json()

@@ -79,7 +79,10 @@ async def test_disbursement_with_bank_reference(client: AsyncClient, session: As
     })
     assert resp.status_code == 200
     data = resp.json()
-    assert data["bank_reference"] == "IBAN-DE89370400440532013000"
+    # SD-1: bank references are ALWAYS masked in API responses (last 4 visible)
+    assert data["bank_reference"].endswith("3000")
+    assert data["bank_reference"].startswith("*")
+    assert "DE8937040044053" not in data["bank_reference"]
     assert data["notes"] == "Customer requested express transfer"
 
 

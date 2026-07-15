@@ -323,6 +323,13 @@ function BranchDetail({ branch: initialBranch, onBack }: { branch: Branch; onBac
               {busy ? "Merging…" : "Merge to Main"}
             </button>
           )}
+          {branch.artifact_type === "rule" && (
+            <button style={{ ...S.btn, ...S.btnS }} disabled={busy}
+              title="Replay recent real cases against this branch's rule change (HxReplay)"
+              onClick={() => { window.location.href = `/hxreplay?branch=${branch.id}`; }}>
+              Simulate on history
+            </button>
+          )}
           <button style={{ ...S.btn, ...S.btnD }} disabled={busy}
             onClick={() => setShowDeleteModal(true)}>
             Delete Branch

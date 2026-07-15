@@ -1,5 +1,6 @@
 // HELIX P24 — Document Manager (multi-select + version delete)
 import React, { useEffect, useState } from "react";
+import { verifyDocument, listDocumentVerifications, type DocCheck } from "@shared/api/client";
 
 type Doc = {
   id: string;
@@ -310,6 +311,8 @@ export default function DocumentManager() {
                 </label>
               </div>
 
+              <VerificationSection docId={focusedDoc.id} />
+
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
                 <h3 style={{ fontSize: 14, margin: 0 }}>Versions</h3>
                 <button
@@ -357,6 +360,165 @@ export default function DocumentManager() {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+/* ── HxMeet P4b — document verification (the document-first KYC gate) ──
+   Automated checks run server-side; the worker's verdict is the record.
+   The server rejects "passed" while any check fails (409). */
+
+type Verification = {
+  id: string; status: string; checks: DocCheck[];
+  verified_by: string; notes: string | null; created_at: string | null;
+};
+
+const CHECKLIST_ITEMS: { key: string; label: string }[] = [
+  { key: "photo_matches", label: "Photo matches the person" },
+  { key: "no_visible_tampering", label: "No visible tampering" },
+  { key: "details_match_case", label: "Details match the case" },
+];
+
+const statusColor = (s: string) =>
+  s === "passed" ? "#16a34a" : s === "failed" ? "#c33" : "#b45309";
+
+function CheckChip({ c }: { c: DocCheck }) {
+  const color = c.result === "pass" ? "#16a34a" : c.result === "fail" ? "#c33" : "#888";
+  return (
+    <span title={c.detail} style={{
+      fontSize: 11, padding: "1px 6px", borderRadius: 3, marginRight: 4,
+      border: `1px solid ${color}`, color, whiteSpace: "nowrap", display: "inline-block", marginBottom: 3,
+    }}>
+      {c.result === "pass" ? "✓" : c.result === "fail" ? "✕" : "–"} {c.name}
+    </span>
+  );
+}
+
+function VerificationSection({ docId }: { docId: string }) {
+  const [history, setHistory] = useState<Verification[]>([]);
+  const [open, setOpen] = useState(false);
+  const [mrz, setMrz] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const [checklist, setChecklist] = useState<Record<string, boolean>>({});
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const r = await listDocumentVerifications(docId);
+      setHistory(r.verifications);
+    } catch { setHistory([]); }
+  }
+
+  useEffect(() => {
+    setOpen(false); setMrz(""); setExpiry(""); setChecklist({}); setNotes(""); setErr(null);
+    load();
+  }, [docId]);
+
+  async function submit(status: "passed" | "failed" | "review") {
+    setBusy(true); setErr(null);
+    try {
+      await verifyDocument(docId, {
+        status,
+        mrz_line2: mrz.trim() || undefined,
+        expiry_date: expiry || undefined,
+        checklist: Object.fromEntries(CHECKLIST_ITEMS.map((i) => [i.key, !!checklist[i.key]])),
+        notes: notes.trim() || undefined,
+      });
+      setOpen(false); setMrz(""); setExpiry(""); setChecklist({}); setNotes("");
+      await load();
+    } catch (e: any) { setErr(e.message || "Verification failed"); }
+    finally { setBusy(false); }
+  }
+
+  const latest = history[0] || null;
+  const allTicked = CHECKLIST_ITEMS.every((i) => checklist[i.key]);
+
+  return (
+    <div style={{ marginTop: 16, borderTop: "1px solid #eee", paddingTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ fontSize: 14, margin: 0 }}>
+          Verification
+          {latest && (
+            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, padding: "2px 8px",
+              borderRadius: 10, border: `1px solid ${statusColor(latest.status)}`, color: statusColor(latest.status) }}>
+              {latest.status.toUpperCase()}
+            </span>
+          )}
+        </h3>
+        <button onClick={() => setOpen((o) => !o)} style={btn()}>
+          {open ? "Cancel" : "Verify document"}
+        </button>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 10, padding: 12, border: "1px solid #e3e3e8", borderRadius: 6, background: "#fafafa" }}>
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 10 }}>
+            Automated checks (file integrity, image quality, MRZ, expiry) run on submit.
+            They are evidence attached to your verdict — a document cannot be passed over a failing check.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <label style={{ fontSize: 12, color: "#555" }}>
+              MRZ line 2 (optional)
+              <input value={mrz} onChange={(e) => setMrz(e.target.value)}
+                placeholder="L898902C36UTO7408122F1204159…"
+                style={{ width: "100%", boxSizing: "border-box", marginTop: 3, padding: "5px 8px",
+                  border: "1px solid #ccc", borderRadius: 4, fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
+            </label>
+            <label style={{ fontSize: 12, color: "#555" }}>
+              Expiry date (optional)
+              <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)}
+                style={{ width: "100%", boxSizing: "border-box", marginTop: 3, padding: "5px 8px",
+                  border: "1px solid #ccc", borderRadius: 4, fontSize: 12 }} />
+            </label>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            {CHECKLIST_ITEMS.map((i) => (
+              <label key={i.key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, marginBottom: 4 }}>
+                <input type="checkbox" checked={!!checklist[i.key]}
+                  onChange={(e) => setChecklist((p) => ({ ...p, [i.key]: e.target.checked }))} />
+                {i.label}
+              </label>
+            ))}
+          </div>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Notes (optional)"
+            style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", border: "1px solid #ccc",
+              borderRadius: 4, fontSize: 12, resize: "vertical", marginBottom: 10 }} />
+          {err && <div style={{ color: "#c33", fontSize: 12, marginBottom: 8, whiteSpace: "pre-wrap" }}>⚠ {err}</div>}
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button disabled={busy || !allTicked} onClick={() => submit("passed")}
+              title={allTicked ? "" : "Confirm every checklist item to record a pass"}
+              style={{ ...btn(), color: "#fff", background: allTicked && !busy ? "#16a34a" : "#a7c9b2", borderColor: "transparent" }}>
+              {busy ? "…" : "✓ Passed"}
+            </button>
+            <button disabled={busy} onClick={() => submit("review")}
+              style={{ ...btn(), color: "#b45309", borderColor: "#b45309", background: "#fff" }}>
+              {busy ? "…" : "Needs review"}
+            </button>
+            <button disabled={busy} onClick={() => submit("failed")}
+              style={{ ...btn(), color: "#c33", borderColor: "#c33", background: "#fff" }}>
+              {busy ? "…" : "✕ Failed"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {history.length === 0 && !open && (
+        <div style={{ color: "#888", fontSize: 12, marginTop: 8 }}>Not verified yet.</div>
+      )}
+      {history.map((v) => (
+        <div key={v.id} style={{ marginTop: 8, padding: 8, border: "1px solid #f0f0f0", borderRadius: 4 }}>
+          <div style={{ fontSize: 12, marginBottom: 4 }}>
+            <strong style={{ color: statusColor(v.status) }}>{v.status.toUpperCase()}</strong>
+            <span style={{ color: "#888", marginLeft: 8 }}>
+              {v.created_at ? new Date(v.created_at).toLocaleString() : ""} · by {v.verified_by}
+            </span>
+          </div>
+          <div>{v.checks.map((c, i) => <CheckChip key={i} c={c} />)}</div>
+          {v.notes && <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>{v.notes}</div>}
+        </div>
+      ))}
     </div>
   );
 }

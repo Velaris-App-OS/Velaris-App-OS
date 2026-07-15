@@ -1,8 +1,21 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AiUnavailableBanner } from "@shared/components/AiUnavailableBanner";
+import { useAuth } from "../../auth/AuthContext";
 
 type Tab = "chat" | "suggest" | "qa" | "translator";
-type Message = { role: "user" | "assistant"; content: string; external_ai?: boolean };
+type DraftKind = "rule" | "case_type" | "form" | "sla" | "user" | "connector"
+               | "escalation" | "routing";
+type DraftDiff = { changed_fields: { field: string; base: any; branch: any }[];
+                   added_keys: string[]; removed_keys: string[]; total_changes: number };
+type DraftPayload = {
+  kind: DraftKind; draft: any; errors: string[]; lint?: string[]; source?: string;
+  mode?: "modify"; diff?: DraftDiff; current?: any;
+  applied?: { id: string; name: string; temp_password?: string };
+  staged?: { rule_id?: string; tree_id?: string; branch_id: string; branch_name: string };
+  simulated?: string; discarded?: boolean;
+};
+type Message = { role: "user" | "assistant"; content: string; external_ai?: boolean;
+                 draft?: DraftPayload };
 type Suggestion = { action: string; reason: string; priority: "high" | "medium" | "low" };
 type BackendStatus = { name: string; backend: string; available: boolean; capabilities: string[] };
 type Summary = { summary: string; key_points: string[]; action_items: string[] };
@@ -32,7 +45,182 @@ const PRIORITY_COLOR: Record<string, string> = {
   high: "#ef4444", medium: "#f59e0b", low: "#22c55e",
 };
 
+// ── HxDraft card (design: docs/Future/hxdraft.md — human reviews, then applies) ──
+
+const _cardBtn: React.CSSProperties = {
+  padding: "6px 12px", borderRadius: 6, border: "1px solid var(--border-default)",
+  background: "var(--bg-input)", color: "var(--text-primary)", cursor: "pointer",
+  fontSize: 12, fontWeight: 600,
+};
+
+function DiffRows({ diff }: { diff: DraftDiff }) {
+  // shared diff rendering for modify + sla drafts — never a blind overwrite
+  const fmt = (v: any) => {
+    const s = JSON.stringify(v);
+    return s && s.length > 120 ? s.slice(0, 120) + "…" : s;
+  };
+  return (
+    <div style={{ fontSize: 12, marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}>
+      {diff.changed_fields.map((c, i) => (
+        <div key={i} style={{ marginBottom: 4 }}>
+          <div style={{ color: "var(--text-muted)" }}>{c.field}</div>
+          <div style={{ color: "#ef4444" }}>- {fmt(c.base)}</div>
+          <div style={{ color: "#22c55e" }}>+ {fmt(c.branch)}</div>
+        </div>
+      ))}
+      {diff.removed_keys.length > 0 && (
+        <div style={{ color: "#ef4444" }}>removed: {diff.removed_keys.join(", ")}</div>
+      )}
+      {diff.added_keys.length > 0 && (
+        <div style={{ color: "#22c55e" }}>added: {diff.added_keys.join(", ")}</div>
+      )}
+      {diff.total_changes === 0 && <div style={{ color: "var(--text-muted)" }}>no changes proposed</div>}
+    </div>
+  );
+}
+
+function DraftCard({ d, onApply, onSimulate, onStage, onDiscard }: {
+  d: DraftPayload;
+  onApply: () => void;
+  onSimulate: (caseTypeId: string) => void;
+  onStage: () => void;
+  onDiscard: () => void;
+}) {
+  const [simCt, setSimCt] = useState("");
+  const draft = d.draft ?? {};
+  const dj = draft.definition_json ?? {};
+  const policy = draft.policy ?? {};
+  const valid = d.errors.length === 0;
+  const isModify = d.mode === "modify";
+  const done = !!d.applied || !!d.staged;
+  return (
+    <div style={{ marginTop: 8, border: "1px solid var(--border-default)", borderRadius: 10,
+                  background: "var(--bg-input)", padding: 12, color: "var(--text-primary)" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".06em", padding: "2px 8px",
+                       borderRadius: 999, background: "var(--bg-elevated)", textTransform: "uppercase" }}>
+          {isModify ? "modify " : ""}{d.kind.replace("_", "-")}
+        </span>
+        <b style={{ fontSize: 13 }}>{draft.name ?? policy.name ?? draft.username ?? d.current?.name}</b>
+        {d.source === "template" && <span style={{ fontSize: 10, color: "#f59e0b" }}>template fallback (AI unavailable)</span>}
+        {d.source === "fallback" && <span style={{ fontSize: 10, color: "#f59e0b" }}>deterministic fallback (AI unavailable)</span>}
+        {d.applied && <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 700 }}>
+          {isModify ? "Updated" : "Created"} ✓ {d.applied.id.slice(0, 8)}</span>}
+        {d.staged && <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 700 }}>
+          Staged ✓ <a href="/hxbranch" style={{ color: "#3b82f6" }}>{d.staged.branch_name}</a> ({d.kind === "escalation" ? "inactive" : "disabled"} until merge)</span>}
+        {d.simulated && <span style={{ fontSize: 11, color: "#3b82f6" }}>simulating… run {d.simulated.slice(0, 8)} (see HxReplay)</span>}
+      </div>
+
+      {d.applied?.temp_password && (
+        <div style={{ fontSize: 12, marginTop: 8, color: "#f59e0b", fontFamily: "var(--font-mono, monospace)" }}>
+          temp password (shown once, must be changed on first login): {d.applied.temp_password}
+        </div>
+      )}
+
+      {!valid && (
+        <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "#f59e0b", fontSize: 12 }}>
+          {d.errors.map((e, i) => <li key={i}>{e}</li>)}
+        </ul>
+      )}
+
+      {valid && isModify && d.diff && <DiffRows diff={d.diff} />}
+      {valid && !isModify && d.kind === "rule" && (
+        <div style={{ fontSize: 12, marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}>
+          {(dj.conditions ?? []).map((c: any, i: number) => (
+            <div key={i}>WHEN {c.field_path} {c.operator} {JSON.stringify(c.value ?? c.value_field_path)}</div>
+          ))}
+          {(dj.actions ?? []).map((a: any, i: number) => (
+            <div key={i}>THEN {a.action_type}{a.target ? ` ${a.target}` : ""}{a.value != null ? ` = ${JSON.stringify(a.value)}` : ""}</div>
+          ))}
+        </div>
+      )}
+      {valid && !isModify && d.kind === "case_type" && (
+        <div style={{ fontSize: 12, marginTop: 8 }}>
+          {(dj.stages ?? []).map((s: any) => s.name ?? s.id).join(" > ")}
+        </div>
+      )}
+      {valid && !isModify && d.kind === "form" && (
+        <div style={{ fontSize: 12, marginTop: 8 }}>
+          {(dj.fields ?? []).map((f: any, i: number) => (
+            <div key={i}>{f.label} <span style={{ color: "var(--text-muted)" }}>({f.field_type}{f.required ? ", required" : ""})</span></div>
+          ))}
+        </div>
+      )}
+      {valid && d.kind === "sla" && (
+        <div style={{ fontSize: 12, marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}>
+          {draft.replaces_policy_id && draft.before_policy && (
+            <div style={{ color: "#ef4444" }}>
+              - {draft.before_policy.name}: goal {draft.before_policy.goal_duration} · deadline {draft.before_policy.deadline_duration}
+            </div>
+          )}
+          <div style={{ color: draft.replaces_policy_id ? "#22c55e" : undefined }}>
+            {draft.replaces_policy_id ? "+ " : ""}{policy.name}: goal {policy.goal_duration} · deadline {policy.deadline_duration}
+            {policy.scope === "stage" ? ` · stage ${policy.target_stage}` : " · whole case"}
+          </div>
+          <div style={{ color: "var(--text-muted)" }}>
+            on case type {draft.case_type_name}
+            {draft.replaces_policy_id ? ` (replaces ${draft.replaces_policy_id})` : ""}
+          </div>
+        </div>
+      )}
+      {valid && d.kind === "user" && (
+        <div style={{ fontSize: 12, marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}>
+          <div>{draft.username} · {draft.email}{draft.display_name ? ` · ${draft.display_name}` : ""}</div>
+          <div style={{ color: "var(--text-muted)" }}>roles: {(draft.roles ?? []).join(", ")} · temp password generated on Apply</div>
+        </div>
+      )}
+      {valid && d.kind === "escalation" && !isModify && (
+        <div style={{ fontSize: 12, marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}>
+          {((draft.tree_json?.levels) ?? []).map((l: any, i: number) => (
+            <div key={i}>
+              L{l.level} {l.name}: {l.trigger?.type}{l.trigger?.value != null ? ` ${l.trigger.value}` : ""} → {(l.actions ?? []).map((a: any) =>
+                `${a.type}${a.target_type ? ` ${a.target_type}` : ""}${a.target_id ? `:${a.target_id}` : ""}${a.set ? ` ${a.set}` : ""}`).join(", ")}
+            </div>
+          ))}
+          <div style={{ color: "var(--text-muted)" }}>{draft.scope === "case_type" ? "scoped to case type" : "global"}</div>
+        </div>
+      )}
+      {valid && (d.lint?.length ?? 0) > 0 && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "#3b82f6" }}>
+          <div style={{ fontWeight: 700 }}>Lint (advisory — does not block Apply):</div>
+          <ul style={{ margin: "2px 0 0", paddingLeft: 18 }}>
+            {d.lint!.map((f, i) => <li key={i}>{f}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {!done && (
+        <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {valid && <button style={{ ..._cardBtn, background: "var(--accent)", color: "#fff", border: "none" }} onClick={onApply}>Apply</button>}
+          {valid && (d.kind === "rule" || d.kind === "escalation") && !isModify && (
+            <button style={_cardBtn} onClick={onStage} title={d.kind === "escalation"
+              ? "Create the tree INACTIVE + an HxBranch; a reviewer's approval activates it (SOD)"
+              : "Create the rule DISABLED + an HxBranch; a reviewer's approval enables it (SOD)"}>
+              Stage in HxBranch
+            </button>
+          )}
+          {valid && d.kind === "rule" && !d.simulated && (
+            <>
+              <input value={simCt} onChange={e => setSimCt(e.target.value)} placeholder="case-type id to simulate"
+                     style={{ fontSize: 11, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border-default)", background: "var(--bg-elevated)", color: "var(--text-primary)", width: 220 }} />
+              <button style={_cardBtn} disabled={!simCt.trim()} onClick={() => onSimulate(simCt)}>Simulate on history</button>
+            </>
+          )}
+          <button style={{ ..._cardBtn, color: "#ef4444" }} onClick={onDiscard}>Discard</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function HxNexus() {
+  const { hasPrivilege } = useAuth();
+  // HxDraft builds/changes platform configuration; the Apply endpoints are
+  // backend-gated on case_type write (plus admin/superadmin). Mirror that in
+  // the UI so users who can never Apply don't see the ✎ draft / ☁ cloud AI
+  // affordances at all. Admin/superadmin get everything via hasPrivilege.
+  const canBuild = hasPrivilege("case_type", "update") || hasPrivilege("case_type", "delete");
+
   const [tab, setTab] = useState<Tab>("chat");
   const [status, setStatus] = useState<BackendStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -43,6 +231,10 @@ export default function HxNexus() {
   const [caseId, setCaseId] = useState("");
   const [input, setInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [draftMode, setDraftMode] = useState(false);
+  const [draftKind, setDraftKind] = useState<DraftKind>("rule");
+  const [draftTarget, setDraftTarget] = useState("");     // modify-existing target id
+  const [draftCaseType, setDraftCaseType] = useState(""); // sla drafts: the case type
   const [summary, setSummary] = useState<Summary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -76,11 +268,111 @@ export default function HxNexus() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // HxDraft: explicit intent only — the Draft toggle, or a "/draft kind: …" prefix.
+  // P2 adds: "/draft sla: …", "/draft user: …", "/draft modify <kind> <id>: …".
+  function parseDraftIntent(msg: string):
+      { kind: DraftKind; description: string; targetId?: string; caseTypeId?: string } | null {
+    const mod = msg.match(/^\/draft\s+modify\s+(rule|case[-_ ]?type|form|connector|escalation)\s+(\S+)\s*:?\s+([\s\S]+)$/i);
+    if (mod) {
+      const kind = mod[1].toLowerCase().replace(/[- ]/g, "_") as DraftKind;
+      return { kind, targetId: mod[2], description: mod[3].trim() };
+    }
+    const routing = msg.match(/^\/draft\s+routing\s+(\S+)\s*:?\s+([\s\S]+)$/i);
+    if (routing) return { kind: "routing", targetId: routing[1], description: routing[2].trim() };
+    const m = msg.match(/^\/draft\s+(rule|case[-_ ]?type|form|sla|user|escalation)\s*:?\s+([\s\S]+)$/i);
+    if (m) {
+      const kind = m[1].toLowerCase().replace(/[- ]/g, "_") as DraftKind;
+      return { kind, description: m[2].trim(),
+               caseTypeId: ["sla", "escalation"].includes(kind)
+                 ? draftCaseType.trim() || undefined : undefined };
+    }
+    if (draftMode) return {
+      kind: draftKind, description: msg,
+      targetId: draftTarget.trim() || undefined,
+      caseTypeId: ["sla", "escalation"].includes(draftKind)
+        ? draftCaseType.trim() || undefined : undefined,
+    };
+    return null;
+  }
+
+  async function sendDraft(intent: { kind: DraftKind; description: string;
+                                     targetId?: string; caseTypeId?: string },
+                           userMsg: string) {
+    setMessages(m => [...m, { role: "user", content: userMsg }]);
+    setChatLoading(true);
+    try {
+      const body: any = { kind: intent.kind, description: intent.description };
+      if (intent.targetId) body.target_id = intent.targetId;
+      if (intent.caseTypeId) body.case_type_id = intent.caseTypeId;
+      if (convId) body.conversation_id = convId;
+      const res = await apiJSON<DraftPayload>(
+        "/api/v1/hxnexus/draft", { method: "POST", body: JSON.stringify(body) });
+      const label = res.errors.length
+        ? `Draft rejected by validation (${res.errors.length} issue${res.errors.length > 1 ? "s" : ""}):`
+        : res.mode === "modify"
+          ? `Here's the proposed change to the ${intent.kind.replace("_", "-")} — review the diff before applying.`
+          : `Here's the drafted ${intent.kind.replace("_", "-")} — review it before applying.`;
+      setMessages(m => [...m, { role: "assistant", content: label, draft: res }]);
+    } catch (e: any) {
+      setMessages(m => [...m, { role: "assistant", content: `Draft failed: ${e.message}` }]);
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  async function stageDraft(msgIndex: number, d: DraftPayload) {
+    try {
+      const res = await apiJSON<{ rule_id: string; branch_id: string; branch_name: string }>(
+        "/api/v1/hxnexus/draft/stage",
+        { method: "POST", body: JSON.stringify({ kind: d.kind, draft: d.draft }) });
+      setMessages(m => m.map((msg, i) => i === msgIndex && msg.draft
+        ? { ...msg, draft: { ...msg.draft, staged: res } } : msg));
+    } catch (e: any) {
+      setMessages(m => [...m, { role: "assistant", content: `Stage failed: ${e.message}` }]);
+    }
+  }
+
+  async function applyDraft(msgIndex: number, d: DraftPayload) {
+    try {
+      const res = await apiJSON<{ id: string; name: string }>(
+        "/api/v1/hxnexus/draft/apply",
+        { method: "POST", body: JSON.stringify({ kind: d.kind, draft: d.draft }) });
+      setMessages(m => m.map((msg, i) => i === msgIndex && msg.draft
+        ? { ...msg, draft: { ...msg.draft, applied: res } } : msg));
+    } catch (e: any) {
+      setMessages(m => [...m, { role: "assistant", content: `Apply failed: ${e.message}` }]);
+    }
+  }
+
+  async function simulateDraft(msgIndex: number, d: DraftPayload, caseTypeId: string) {
+    try {
+      const res = await apiJSON<{ id: string }>(
+        "/api/v1/hxreplay/runs",
+        { method: "POST", body: JSON.stringify({
+            kind: "cohort", candidate: { rules: [d.draft] },
+            cohort_filter: { case_type_id: caseTypeId.trim(), max_cases: 500 } }) });
+      setMessages(m => m.map((msg, i) => i === msgIndex && msg.draft
+        ? { ...msg, draft: { ...msg.draft, simulated: res.id } } : msg));
+    } catch (e: any) {
+      setMessages(m => [...m, { role: "assistant", content: `Simulation failed: ${e.message}` }]);
+    }
+  }
+
+  function discardDraft(msgIndex: number) {
+    setMessages(m => m.map((msg, i) => i === msgIndex && msg.draft
+      ? { ...msg, content: "Draft discarded.", draft: { ...msg.draft, discarded: true } } : msg));
+  }
+
   async function sendChat() {
     if (!input.trim()) return;
     const userMsg = input.trim();
     setInput("");
     setSummary(null);
+    const intent = parseDraftIntent(userMsg);
+    if (intent) {
+      await sendDraft(intent, userMsg);
+      return;
+    }
     setMessages(m => [...m, { role: "user", content: userMsg }]);
     setChatLoading(true);
     try {
@@ -298,6 +590,13 @@ export default function HxNexus() {
                     ☁ answered using external AI (minimized &amp; pseudonymized)
                   </div>
                 )}
+                {m.draft && !m.draft.discarded && (
+                  <DraftCard d={m.draft}
+                             onApply={() => applyDraft(i, m.draft!)}
+                             onSimulate={(ctId) => simulateDraft(i, m.draft!, ctId)}
+                             onStage={() => stageDraft(i, m.draft!)}
+                             onDiscard={() => discardDraft(i)} />
+                )}
               </div>
             ))}
             {chatLoading && (
@@ -310,11 +609,49 @@ export default function HxNexus() {
 
           {/* Input */}
           <div style={{ padding: "var(--space-md) var(--space-2xl)", borderTop: "1px solid var(--border-subtle)", display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}>
-            <label title="Escalate this question to the configured external AI provider (content is minimized and pseudonymized before it leaves the platform)"
-              style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer" }}>
-              <input type="checkbox" checked={useCloud} onChange={e => setUseCloud(e.target.checked)} />
-              ☁ cloud AI
-            </label>
+            {canBuild && (
+              <label title="Escalate this question to the configured external AI provider (content is minimized and pseudonymized before it leaves the platform)"
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer" }}>
+                <input type="checkbox" checked={useCloud} onChange={e => setUseCloud(e.target.checked)} />
+                ☁ cloud AI
+              </label>
+            )}
+            {canBuild && (
+              <label title="HxDraft: turn descriptions into reviewable component drafts (or type /draft rule: …). Nothing is created until you Apply."
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer" }}>
+                <input type="checkbox" checked={draftMode} onChange={e => setDraftMode(e.target.checked)} />
+                ✎ draft
+              </label>
+            )}
+            {canBuild && draftMode && (
+              <select value={draftKind}
+                onChange={e => { setDraftKind(e.target.value as DraftKind); setDraftTarget(""); }}
+                style={{ fontSize: 11, padding: "6px 8px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-default)", background: "var(--bg-input)", color: "var(--text-primary)" }}>
+                <option value="rule">rule</option>
+                <option value="case_type">case-type</option>
+                <option value="form">form</option>
+                <option value="sla">sla</option>
+                <option value="user">user</option>
+                <option value="escalation">escalation</option>
+                <option value="connector">connector (modify)</option>
+                <option value="routing">routing (modify)</option>
+              </select>
+            )}
+            {draftMode && ["rule", "case_type", "form", "connector", "escalation", "routing"].includes(draftKind) && (
+              <input value={draftTarget} onChange={e => setDraftTarget(e.target.value)}
+                placeholder={draftKind === "connector" ? "connector id (required)"
+                  : draftKind === "routing" ? "case-type id (required)"
+                  : "id to modify (optional)"}
+                title="Modify-existing: paste the artifact's id to draft a change to it as a diff card"
+                style={{ fontSize: 11, padding: "6px 8px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-default)", background: "var(--bg-input)", color: "var(--text-primary)", width: 170 }} />
+            )}
+            {draftMode && ["sla", "escalation"].includes(draftKind) && (
+              <input value={draftCaseType} onChange={e => setDraftCaseType(e.target.value)}
+                placeholder={draftKind === "sla" ? "case-type id (required)" : "case-type id (optional scope)"}
+                title={draftKind === "sla" ? "SLA policies live on a case type — the draft is a diff on it"
+                  : "Scope the escalation tree to a case type (empty = global)"}
+                style={{ fontSize: 11, padding: "6px 8px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-default)", background: "var(--bg-input)", color: "var(--text-primary)", width: 170 }} />
+            )}
             <input
               value={input}
               onChange={e => setInput(e.target.value)}

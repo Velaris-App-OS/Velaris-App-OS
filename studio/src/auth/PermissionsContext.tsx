@@ -83,8 +83,14 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     (path: string, userRoles: string[], isAdmin: boolean): boolean => {
       if (isAdmin) return true;
       const roles = permissions[path];
-      // Paths with no entry in the map (e.g. open-to-all routes /, /cases, etc.) are unrestricted
-      if (!roles || roles.length === 0) return true;
+      // Distinguish "unmanaged" from "explicitly restricted":
+      //   • absent (undefined)  → route the matrix has never configured → open
+      //     (back-compat: a newly added component stays visible until an admin
+      //     decides who sees it).
+      //   • present but EMPTY   → the admin unticked every role → admin-only.
+      //   • present with roles  → visible to those roles.
+      if (roles === undefined) return true;
+      if (roles.length === 0) return false;
       return roles.some(r => userRoles.includes(r));
     },
     [permissions],

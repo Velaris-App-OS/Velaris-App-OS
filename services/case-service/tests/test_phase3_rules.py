@@ -493,3 +493,60 @@ class TestFormsAPI:
 
         resp = await client.delete(f"/api/v1/forms/{form['id']}")
         assert resp.status_code == 204
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Rules API — HxGuard rules.write gate (was auth-only; HxDraft backlog)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _token_for(roles: list[str]) -> dict:
+    from case_service.auth.jwt_handler import create_dev_token
+    from case_service.config import get_settings
+
+    s = get_settings()
+    token = create_dev_token(
+        user_id=str(uuid.uuid4()),
+        username="test-limited",
+        roles=roles,
+        secret=s.auth_secret,
+        private_key=s.auth_rsa_private_key or "",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+class TestRulesWriteHxGuard:
+    _BODY = {
+        "name": "GateProbe", "version": "1.0.0", "rule_type": "when",
+        "definition_json": {"conditions": []},
+    }
+
+    async def test_plain_user_cannot_write(self, client):
+        hdrs = _token_for(["user"])
+        resp = await client.post("/api/v1/rules", json=self._BODY, headers=hdrs)
+        assert resp.status_code == 403
+
+        rid = (await client.post("/api/v1/rules", json=self._BODY)).json()["id"]
+        assert (await client.patch(f"/api/v1/rules/{rid}", json={"enabled": False},
+                                   headers=hdrs)).status_code == 403
+        assert (await client.delete(f"/api/v1/rules/{rid}",
+                                    headers=hdrs)).status_code == 403
+        # rule untouched by the denied calls
+        assert (await client.get(f"/api/v1/rules/{rid}")).json()["enabled"] is True
+
+    async def test_plain_user_can_still_read_and_evaluate(self, client):
+        rid = (await client.post("/api/v1/rules", json=self._BODY)).json()["id"]
+        hdrs = _token_for(["user"])
+        assert (await client.get("/api/v1/rules", headers=hdrs)).status_code == 200
+        assert (await client.get(f"/api/v1/rules/{rid}", headers=hdrs)).status_code == 200
+        resp = await client.post(f"/api/v1/rules/{rid}/evaluate",
+                                 json={"context": {}}, headers=hdrs)
+        assert resp.status_code == 200
+
+    async def test_designer_can_write(self, client):
+        hdrs = _token_for(["designer"])
+        resp = await client.post("/api/v1/rules", json=self._BODY, headers=hdrs)
+        assert resp.status_code == 201
+        rid = resp.json()["id"]
+        assert (await client.delete(f"/api/v1/rules/{rid}",
+                                    headers=hdrs)).status_code == 204

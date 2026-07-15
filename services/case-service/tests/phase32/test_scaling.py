@@ -229,7 +229,7 @@ def test_09_locustfile_defines_expected_user_classes():
     """Static check — avoid importing locust (its event-loop hangs under pytest)."""
     from pathlib import Path
     src = (Path(__file__).parents[4] / "load-tests" / "locustfile.py").read_text()
-    for cls in ("CaseWorkerUser", "CaseCreatorUser", "ObservabilityUser"):
+    for cls in ("VelarisUser", "CaseWorkerUser", "ManagerUser", "DevOpsUser", "SpikeUser"):  # current persona set
         assert f"class {cls}" in src, f"{cls} missing from locustfile.py"
     # Also verify it declares required Locust decorators
     assert "@task" in src
@@ -241,7 +241,7 @@ def test_09_locustfile_defines_expected_user_classes():
 
 def test_10_helm_chart_files_exist():
     from pathlib import Path
-    base = Path(__file__).parents[4] / "deploy" / "helm" / "helix"
+    base = Path(__file__).parents[4] / "deploy" / "helm" / "velaris"
     assert (base / "Chart.yaml").exists()
     assert (base / "values.yaml").exists()
     templates = {
@@ -261,7 +261,7 @@ def test_10_helm_chart_files_exist():
 def test_11_values_yaml_has_autoscaling_keys():
     import yaml
     from pathlib import Path
-    values = yaml.safe_load((Path(__file__).parents[4] / "deploy" / "helm" / "helix" / "values.yaml").read_text())
+    values = yaml.safe_load((Path(__file__).parents[4] / "deploy" / "helm" / "velaris" / "values.yaml").read_text())
     assert values["caseService"]["autoscaling"]["enabled"] is True
     assert values["engine"]["autoscaling"]["enabled"] is True
     assert "keda" in values["worker"]

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from case_service.db.backends.mariadb import MariadbBackend
 from case_service.db.backends.mysql import MysqlBackend
 from case_service.db.backends.postgres import PostgresBackend
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 ALLOWED_BACKENDS: "dict[str, type[DatabaseBackend]]" = {
     "postgresql": PostgresBackend,
     "mysql": MysqlBackend,
+    "mariadb": MariadbBackend,
 }
 
 
@@ -61,14 +63,19 @@ def resolve_async_url(settings: Any) -> str:
     backend = get_backend(getattr(settings, "database_backend", "postgresql"))
     full = getattr(settings, "database_url", "") or ""
     if full:
-        # Scheme/driver pin: a full URL must match the selected dialect, so a
-        # `database: mysql` config can't be silently pointed at a postgres URL
-        # (or vice-versa). Lenient on the driver suffix, strict on the dialect.
+        # Scheme/driver pin: a full URL must match the selected backend's URL scheme,
+        # so a `database: mysql` config can't be silently pointed at a postgres URL
+        # (or vice-versa). Lenient on the driver suffix, strict on the scheme. We match
+        # the backend's *driver scheme* (`postgresql` / `mysql`) rather than its name so
+        # MariaDB (name "mariadb", but driver scheme `mysql+aiomysql`) accepts a
+        # `mysql://` URL — the SQLAlchemy dialect for MariaDB genuinely is mysql.
         dialect = full.split("://", 1)[0].split("+", 1)[0]
-        if dialect != backend.name():
+        expected = backend.async_driver().split("+", 1)[0]
+        if dialect != expected:
             raise SystemExit(
-                f"database_url dialect {dialect!r} does not match backend "
-                f"{backend.name()!r}. Fix velaris.yaml: database: or the URL."
+                f"database_url scheme {dialect!r} does not match backend "
+                f"{backend.name()!r} (expects {expected!r}). "
+                f"Fix velaris.yaml: database: or the URL."
             )
         return full
     return backend.async_url(settings)
@@ -82,6 +89,7 @@ def resolve_sync_url(settings: Any) -> str:
 
 __all__ = [
     "ALLOWED_BACKENDS",
+    "MariadbBackend",
     "MysqlBackend",
     "PostgresBackend",
     "get_backend",

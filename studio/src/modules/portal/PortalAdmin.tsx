@@ -104,6 +104,8 @@ function TenantsTab() {
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [caseTypes, setCaseTypes] = useState<CaseType[]>([]);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [displayFor, setDisplayFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -266,6 +268,30 @@ function TenantsTab() {
               <input value={editing.logo_text} onChange={e => setEditing({ ...editing, logo_text: e.target.value })} style={modalInput} />
             </ModalField>
 
+            <ModalField label="Logo Image (Portal v2 — replaces the letter avatar)">
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <input type="file" accept="image/png,image/jpeg,image/webp"
+                  onChange={async e => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    const form = new FormData();
+                    form.append("file", f);
+                    try {
+                      const r = await fetch(`/api/v1/portal-admin/tenants/${editing.slug}/logo`,
+                        { method: "POST", headers: _authHdr(), body: form });
+                      const d = await r.json();
+                      if (!r.ok) throw new Error(d.detail || "Upload failed");
+                      setSaveErr(null);
+                      setLogoPreview(`${d.logo_url}?t=${Date.now()}`);
+                    } catch (err: any) { setSaveErr(err.message); }
+                    e.target.value = "";
+                  }}
+                  style={{ fontSize: 12 }} />
+                {logoPreview && <img src={logoPreview} alt="logo"
+                  style={{ width: 40, height: 40, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border-default)" }} />}
+              </div>
+            </ModalField>
+
             <ModalField label="Brand Color">
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 <input type="color" value={editing.brand_color} onChange={e => setEditing({ ...editing, brand_color: e.target.value })}
@@ -291,12 +317,23 @@ function TenantsTab() {
                         style={{ width: 16, height: 16, accentColor: "var(--accent)" }}
                       />
                       <span style={{ fontSize: 13, color: "var(--text-primary)" }}>{ct.name}</span>
-                      {ct.portal_enabled && <span style={{ fontSize: 11, color: "var(--accent)", marginLeft: "auto" }}>Portal enabled</span>}
+                      {ct.portal_enabled && (
+                        <>
+                          <span style={{ fontSize: 11, color: "var(--accent)", marginLeft: "auto" }}>Portal enabled</span>
+                          <button onClick={e => { e.preventDefault(); setDisplayFor(displayFor === ct.id ? null : ct.id); }}
+                            style={{ fontSize: 11, border: "1px solid var(--border-default)", borderRadius: 6,
+                                     background: "transparent", color: "var(--text-primary)", cursor: "pointer", padding: "3px 8px" }}>
+                            Display…
+                          </button>
+                        </>
+                      )}
                     </label>
                   ))}
                 </div>
               )}
             </div>
+
+            {displayFor && <DisplayEditor caseTypeId={displayFor} onClose={() => setDisplayFor(null)} />}
 
             {saveErr && <p style={{ color: "var(--status-failed)", fontSize: 13, marginBottom: 12 }}>{saveErr}</p>}
 
@@ -309,6 +346,86 @@ function TenantsTab() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/* ── Portal Display editor (Portal v2 P1/P5) ───────────────
+   Customer-facing stage labels, expected duration, and the Form
+   Builder form rendered on portal submit. */
+
+function DisplayEditor({ caseTypeId, onClose }: { caseTypeId: string; onClose: () => void }) {
+  const [stages, setStages] = useState<{ id: string; name: string }[]>([]);
+  const [labels, setLabels] = useState<Record<string, string>>({});
+  const [expectedDays, setExpectedDays] = useState<string>("");
+  const [formId, setFormId] = useState<string>("");
+  const [forms, setForms] = useState<{ id: string; name: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiJSON<any>(`/api/v1/portal-admin/case-types/${caseTypeId}/portal-display`)
+      .then(d => {
+        setStages(d.stages ?? []);
+        setLabels(d.stage_labels ?? {});
+        setExpectedDays(d.expected_days != null ? String(d.expected_days) : "");
+        setFormId(d.form_id ?? "");
+      })
+      .catch(e => setMsg(e.message));
+    apiJSON<any>("/api/v1/forms?page_size=100")
+      .then(d => setForms((d.items ?? d.forms ?? []).map((f: any) => ({ id: f.id, name: f.name }))))
+      .catch(() => setForms([]));
+  }, [caseTypeId]);
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      await apiJSON(`/api/v1/portal-admin/case-types/${caseTypeId}/portal-display`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          stage_labels: labels,
+          ...(expectedDays !== "" ? { expected_days: Number(expectedDays) } : {}),
+          form_id: formId,
+        }),
+      });
+      setMsg("Saved.");
+    } catch (e: any) { setMsg(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--border-default)", borderRadius: "var(--radius-sm)", padding: 12, marginBottom: "var(--space-md)" }}>
+      <div style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+        Customer-facing display
+      </div>
+      {stages.map(s => (
+        <div key={s.id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", width: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
+          <input value={labels[s.id] ?? ""} placeholder={`Shown as "${s.name}"`}
+            onChange={e => setLabels(l => ({ ...l, [s.id]: e.target.value }))}
+            style={{ ...modalInput, flex: 1, marginBottom: 0 }} />
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-muted)", width: 140 }}>Expected days</span>
+        <input type="number" min={0} value={expectedDays} onChange={e => setExpectedDays(e.target.value)}
+          style={{ ...modalInput, width: 100, marginBottom: 0 }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--text-muted)", width: 140 }}>Submit form</span>
+        <select value={formId} onChange={e => setFormId(e.target.value)} style={{ ...modalInput, flex: 1, marginBottom: 0 }}>
+          <option value="">None (default fields only)</option>
+          {forms.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+      </div>
+      {msg && <div style={{ fontSize: 12, marginTop: 8, color: msg === "Saved." ? "var(--accent)" : "var(--status-failed)" }}>{msg}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onClose} style={ghostBtn}>Close</button>
+        <button onClick={save} disabled={busy} style={{ ...primaryBtn, opacity: busy ? 0.7 : 1 }}>
+          {busy ? "Saving…" : "Save display"}
+        </button>
+      </div>
     </div>
   );
 }
