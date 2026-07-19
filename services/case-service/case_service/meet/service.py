@@ -257,6 +257,19 @@ async def _participant_by_identity(
     )).scalars().first()
 
 
+async def _stamp_biometric_consent(session: AsyncSession, row: CaseSessionModel,
+                                   participant: CaseSessionParticipantModel) -> None:
+    """P4d: the same act that grants recording consent also grants biometric
+    consent — but ONLY when the tenant opted into biometric matching, so the
+    join UI showed the distinct biometric notice first (GDPR Art. 9 explicit
+    consent, never implied by the recording notice alone)."""
+    from case_service.meet import kyc as meet_kyc
+    if (row.record_intent and participant.biometric_consent_at is None
+            and await meet_kyc.tenant_kyc_biometrics_enabled(session, row.tenant_id)):
+        participant.biometric_consent_at = _utcnow()
+        session.add(participant)
+
+
 async def mint_worker_token(
     session: AsyncSession,
     *,
@@ -278,6 +291,7 @@ async def mint_worker_token(
     if row.record_intent and participant.consent_recorded_at is None:
         participant.consent_recorded_at = _utcnow()
         session.add(participant)
+    await _stamp_biometric_consent(session, row, participant)
     await session.commit()
     room = row.external_meeting_id or livekit.room_name(row.tenant_id or "default", row.id)
     return {
@@ -313,6 +327,7 @@ async def join_customer(
     if row.record_intent and participant.consent_recorded_at is None:
         participant.consent_recorded_at = _utcnow()
     session.add(participant)
+    await _stamp_biometric_consent(session, row, participant)
     await session.commit()
     room = row.external_meeting_id or livekit.room_name(row.tenant_id or "default", row.id)
     return {
@@ -416,7 +431,8 @@ async def exchange_guest_invite(session: AsyncSession, raw_token: str) -> dict:
     if row.record_intent and participant.consent_recorded_at is None:
         participant.consent_recorded_at = _utcnow()
         session.add(participant)
-        await session.commit()
+    await _stamp_biometric_consent(session, row, participant)
+    await session.commit()
 
     room = row.external_meeting_id or livekit.room_name(row.tenant_id or "default", row.id)
     return {
@@ -454,10 +470,15 @@ async def preview_guest_invite(session: AsyncSession, raw_token: str) -> dict:
     )).scalars().first()
     if row is None or row.status != "active" or row.driver != "embedded":
         raise ValueError("invalid invite")
+    from case_service.meet import kyc as meet_kyc
     return {
         "title":         row.title,
         "display_name":  participant.display_name,
         "record_intent": row.record_intent,
+        # P4d: the guest page must show the DISTINCT biometric notice before
+        # the exchange — joining then grants Art. 9 explicit consent.
+        "biometric_notice": bool(row.record_intent) and
+                            await meet_kyc.tenant_kyc_biometrics_enabled(session, row.tenant_id),
     }
 
 

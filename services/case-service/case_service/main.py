@@ -81,6 +81,7 @@ from case_service.api.routers.hxlogs   import router as hxlogs_router     # P63 
 from case_service.api.routers.auth_real import router as auth_real_router  # P64 Real Auth
 from case_service.api.routers.permissions import router as permissions_router
 from case_service.api.routers.marketplace import router as marketplace_router  # Marketplace
+from case_service.api.routers.broker import router as broker_router  # Marketplace Layer-2 data broker
 from case_service.api.routers.platform_updates import router as platform_updates_router  # PUO Phase 1
 from case_service.api.routers.case_variables import router as case_variables_router  # Case Variables P1
 from case_service.api.routers.portal_customers import public_router as portal_customers_public_router, admin_router as portal_customers_admin_router  # P65
@@ -605,6 +606,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_real_router, prefix=prefix)  # P64 Real Auth
     app.include_router(permissions_router, prefix=prefix)
     app.include_router(marketplace_router, prefix=prefix)  # Marketplace
+    app.include_router(broker_router, prefix=prefix)  # Layer-2 scoped data broker (container-only surface)
     app.include_router(checkout_router, prefix=prefix)  # HxCheckout (marketplace app)
     app.include_router(storefront_router, prefix=prefix)  # HxStorefront (marketplace app)
     app.include_router(storefront_public_router, prefix=prefix)  # HxStorefront public storefront

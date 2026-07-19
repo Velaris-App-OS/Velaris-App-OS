@@ -279,7 +279,7 @@ services/
 
 engine/                    # BPMN process engine (Temporal-backed)
 studio/                    # React frontend (Vite)
-migrations/                # ordered SQL migrations (000–093)
+migrations/                # ordered SQL migrations (000–124, postgresql/ + mysql/)
 libs/                      # helix-ir (schema) + helix-sdk
 plugins/                   # auth, cache, db, events, git, integrations, search
 load-tests/                # Locust load test suite (4 user classes)
@@ -302,7 +302,7 @@ Migrations run automatically on `setup-velaris.sh` / `start-velaris.sh`. To insp
 find migrations/ -name "*.sql" | sort
 
 # Apply a specific migration
-PGPASSWORD=<pw> psql -h localhost -U helix -d helix -f migrations/093_testsuite_ai_stale.sql
+PGPASSWORD=<pw> psql -h localhost -U helix -d helix -f migrations/postgresql/124_marketplace_containers.sql
 ```
 
 ---

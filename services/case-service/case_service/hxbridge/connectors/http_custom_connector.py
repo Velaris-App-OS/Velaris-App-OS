@@ -67,9 +67,39 @@ class HttpCustomConnector(ConnectorProtocol):
         self._body_tmpl = config.get("body_template", "")
         self._response_mapping = config.get("response_mapping", {})
         self._credentials = credentials
+        # Marketplace Layer-1 (mig 122): a marketplace-installed connector
+        # carries its grant anchor; every call is allowlist-checked against
+        # the ADMIN-GRANTED domains (absent until approval = block all),
+        # SSRF-guarded, and logged. User-built connectors have no block.
+        self._marketplace = config.get("_marketplace")
+
+    async def _marketplace_gate(self, url: str) -> None:
+        from urllib.parse import urlparse
+
+        from case_service.marketplace import grants as mkt_grants
+
+        mkt = self._marketplace or {}
+        granted = mkt.get("granted_domains")
+        host = urlparse(url).hostname or ""
+        if not granted or not mkt_grants.host_allowed(host, granted):
+            await mkt_grants.log_marketplace_call(
+                grant_id=mkt.get("grant_id"), package_id=mkt.get("package_id", "?"),
+                url=url, method=self._method, status="blocked",
+                is_declared=bool(granted) and mkt_grants.host_allowed(host, granted))
+            if not granted:
+                raise RuntimeError(
+                    "Marketplace connector is not activated — no capability grant "
+                    "has been approved for it.")
+            raise RuntimeError(
+                f"Marketplace connector blocked: '{host}' is not in the granted "
+                "outbound domains.")
+        from case_service.hxbridge.security import validate_outbound_url
+        await validate_outbound_url(url)   # SSRF guard — raises on internal targets
 
     async def execute(self, input_data: dict) -> dict:
         url     = _substitute(self._url_tmpl, input_data)
+        if self._marketplace is not None:
+            await self._marketplace_gate(url)
         headers = {k: _substitute(v, input_data) for k, v in self._headers.items()}
         headers.setdefault("Content-Type", "application/json")
 
@@ -86,6 +116,14 @@ class HttpCustomConnector(ConnectorProtocol):
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(self._method, url, headers=headers, content=body)
+
+        if self._marketplace is not None:
+            from case_service.marketplace import grants as mkt_grants
+            await mkt_grants.log_marketplace_call(
+                grant_id=self._marketplace.get("grant_id"),
+                package_id=self._marketplace.get("package_id", "?"),
+                url=url, method=self._method, status="allowed",
+                http_status_code=resp.status_code)
 
         if resp.status_code >= 400:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
@@ -104,6 +142,8 @@ class HttpCustomConnector(ConnectorProtocol):
     async def test(self) -> bool:
         try:
             url = _substitute(self._url_tmpl, {})
+            if self._marketplace is not None:
+                await self._marketplace_gate(url)   # inert/blocked = test fails
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.request("GET", url)
             return resp.status_code < 500

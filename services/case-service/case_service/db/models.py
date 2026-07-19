@@ -3604,8 +3604,81 @@ class MarketplaceInstallModel(Base):
     revoked_at:      Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class MarketplaceCapabilityGrantModel(Base):
+    """Marketplace Layer-1 (mig 122) — the capability grant behind a remote app.
+
+    Freedom to publish is not freedom to execute: install creates the grant
+    `pending` alongside an INERT connector; admin approval writes the ticked
+    subset into `granted` and activates exactly that. One active (non-revoked)
+    grant per (tenant, package) — enforced in code, not by partial index
+    (MySQL portability).
+    """
+    __tablename__ = "marketplace_capability_grants"
+    __table_args__ = (
+        Index("ix_mcg_tenant_package", "tenant_id", "package_id"),
+        Index("ix_mcg_status", "status"),
+    )
+
+    id:                Mapped[uuid.UUID]      = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:         Mapped[str]            = mapped_column(String(255), nullable=False)
+    package_id:        Mapped[str]            = mapped_column(String(255), nullable=False)
+    install_id:        Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_installs.id", ondelete="SET NULL"), nullable=True)
+    workspace_id:      Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_workspaces.id", ondelete="SET NULL"), nullable=True)
+    connector_id:      Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("connector_registry.id", ondelete="SET NULL"), nullable=True)
+    requested:         Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    granted:           Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    status:            Mapped[str]            = mapped_column(String(32), nullable=False, default="pending")  # pending|granted|revoked|pending_reapproval
+    # P2 drift (mig 123): the regenerated mapping + requested set held for
+    # admin re-approval; the live mapping keeps running untouched meanwhile.
+    proposed:          Mapped[dict | None]    = mapped_column(PortableJSON(), nullable=True)
+    descriptor_sha256: Mapped[str | None]     = mapped_column(String(96), nullable=True)  # bare hex (L1) or sha256:<hex> (L2)
+    descriptor_format: Mapped[str | None]     = mapped_column(String(32), nullable=True)
+    mapping_version:   Mapped[int]            = mapped_column(Integer, nullable=False, default=1)
+    requested_by:      Mapped[str]            = mapped_column(String(255), nullable=False)
+    requested_at:      Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    granted_by:        Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    granted_at:        Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by:        Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    revoked_at:        Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note:              Mapped[str | None]     = mapped_column(Text, nullable=True)
+
+
+class MarketplaceContainerModel(Base):
+    """Marketplace Layer-2 (mig 124) — one publisher app container.
+
+    Digest-pinned identity, full sandbox hardening, zero DB credentials
+    (the scoped broker is the only data path). Starts only on a granted
+    capability grant; revocation stops it instantly.
+    """
+    __tablename__ = "marketplace_containers"
+    __table_args__ = (
+        Index("ix_mc_tenant_package", "tenant_id", "package_id"),
+        Index("ix_mc_grant", "grant_id"),
+    )
+
+    id:            Mapped[uuid.UUID]      = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:     Mapped[str]            = mapped_column(String(255), nullable=False)
+    package_id:    Mapped[str]            = mapped_column(String(255), nullable=False)
+    grant_id:      Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_capability_grants.id", ondelete="SET NULL"), nullable=True)
+    install_id:    Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_installs.id", ondelete="SET NULL"), nullable=True)
+    image:         Mapped[str]            = mapped_column(String(512), nullable=False)
+    image_digest:  Mapped[str]            = mapped_column(String(96), nullable=False)
+    registry:      Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    container_id:  Mapped[str | None]     = mapped_column(String(128), nullable=True)
+    status:        Mapped[str]            = mapped_column(String(32), nullable=False, default="declared")  # declared|provisioned|running|stopped|destroyed|failed
+    port:          Mapped[int | None]     = mapped_column(Integer, nullable=True)
+    signature_verified: Mapped[bool]      = mapped_column(Boolean, nullable=False, default=False)
+    pulled_at:     Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stopped_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at:    Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    error:         Mapped[str | None]     = mapped_column(Text, nullable=True)
+
+
 class MarketplaceNetworkLogModel(Base):
-    """Every outbound call attempt from a sandbox container — blocked or allowed."""
+    """Every outbound call attempt from marketplace code — blocked or allowed.
+    Sandbox container traffic (workspace_id) AND production Layer-1 connector
+    calls (grant_id, mig 122); either anchor may be NULL, never both."""
     __tablename__ = "marketplace_network_log"
     __table_args__ = (
         Index("ix_mnl_workspace", "workspace_id"),
@@ -3613,7 +3686,8 @@ class MarketplaceNetworkLogModel(Base):
     )
 
     id:              Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
-    workspace_id:    Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("marketplace_workspaces.id", ondelete="CASCADE"), nullable=False)
+    workspace_id:    Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_workspaces.id", ondelete="CASCADE"), nullable=True)
+    grant_id:        Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("marketplace_capability_grants.id", ondelete="SET NULL"), nullable=True)
     package_id:      Mapped[str]       = mapped_column(String(255), nullable=False)
     destination_url: Mapped[str]       = mapped_column(String(1024), nullable=False)
     destination_ip:  Mapped[str | None]= mapped_column(String(64), nullable=True)
@@ -5217,6 +5291,9 @@ class CaseSessionParticipantModel(Base):
     joined_at:           Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
     left_at:             Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
     consent_recorded_at: Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)   # P3
+    # P4d (mig 121): distinct biometric consent — GDPR Art. 9 explicit consent,
+    # never implied by the recording consent alone.
+    biometric_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at:          Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -5241,6 +5318,54 @@ class CaseSessionIntelligenceModel(Base):
     requested_by:           Mapped[str]            = mapped_column(String(255), nullable=False)
     created_at:             Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
     completed_at:           Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CaseSessionChallengeModel(Base):
+    """HxMeet P4c (mig 120) — one randomized liveness challenge issued in-room.
+
+    Minted server-side (the guest can never predict the payload) on a
+    RECORD-INTENT session only, so issue + response are captured in the
+    sealed recording. The worker records the observed result — human
+    judgment, never automated.
+    """
+
+    __tablename__ = "case_session_challenges"
+    __table_args__ = (
+        Index("idx_session_challenges_session", "session_id", "issued_at"),
+    )
+
+    id:           Mapped[uuid.UUID]      = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    session_id:   Mapped[uuid.UUID]      = mapped_column(GUID(), ForeignKey("case_sessions.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:    Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    kind:         Mapped[str]            = mapped_column(String(32), nullable=False)   # head_turn | phrase_readback | document_tilt
+    payload:      Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    issued_by:    Mapped[str]            = mapped_column(String(255), nullable=False)
+    issued_at:    Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    result:       Mapped[str]            = mapped_column(String(20), nullable=False, default="pending")  # pending|passed|failed|skipped
+    result_notes: Mapped[str | None]     = mapped_column(Text, nullable=True)
+    result_by:    Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    result_at:    Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CaseSessionKycSignalsModel(Base):
+    """HxMeet P4c (mig 120) — one passive-signal analysis run per session
+    (re-run replaces), over the SEALED recording. Risk score + per-check
+    breakdown + deterministic challenge cross-checks vs the sealed live
+    transcript. Assistive only: the worker records the KYC verdict.
+    """
+
+    __tablename__ = "case_session_kyc_signals"
+
+    session_id:       Mapped[uuid.UUID]      = mapped_column(GUID(), ForeignKey("case_sessions.id", ondelete="CASCADE"), primary_key=True)
+    status:           Mapped[str]            = mapped_column(String(20), nullable=False, default="pending")  # pending|running|completed|failed
+    risk_score:       Mapped[float | None]   = mapped_column(Float, nullable=True)   # 0..1, higher = riskier
+    checks:           Mapped[list]           = mapped_column(PortableJSON(), default=list)
+    challenge_checks: Mapped[list]           = mapped_column(PortableJSON(), default=list)
+    model_versions:   Mapped[dict]           = mapped_column(PortableJSON(), default=dict)
+    error:            Mapped[str | None]     = mapped_column(Text, nullable=True)
+    requested_by:     Mapped[str]            = mapped_column(String(255), nullable=False)
+    created_at:       Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow)
+    completed_at:     Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DocumentVerificationModel(Base):

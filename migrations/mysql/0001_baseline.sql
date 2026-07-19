@@ -1979,26 +1979,36 @@ CREATE INDEX ix_int_calls_created ON integration_calls (created_at);
 
 CREATE INDEX ix_int_calls_status ON integration_calls (status);
 
-CREATE TABLE marketplace_network_log (
+CREATE TABLE marketplace_capability_grants (
 	id CHAR(36) NOT NULL, 
-	workspace_id CHAR(36) NOT NULL, 
+	tenant_id VARCHAR(255) NOT NULL, 
 	package_id VARCHAR(255) NOT NULL, 
-	destination_url VARCHAR(1024) NOT NULL, 
-	destination_ip VARCHAR(64), 
-	http_method VARCHAR(16), 
-	bytes_sent INTEGER NOT NULL, 
-	bytes_received INTEGER NOT NULL, 
-	status VARCHAR(16) NOT NULL, 
-	http_status_code INTEGER, 
-	is_declared BOOL NOT NULL, 
-	created_at DATETIME NOT NULL, 
+	install_id CHAR(36), 
+	workspace_id CHAR(36), 
+	connector_id CHAR(36), 
+	requested JSON NOT NULL, 
+	granted JSON NOT NULL, 
+	status VARCHAR(32) NOT NULL, 
+	proposed JSON, 
+	descriptor_sha256 VARCHAR(96), 
+	descriptor_format VARCHAR(32), 
+	mapping_version INTEGER NOT NULL, 
+	requested_by VARCHAR(255) NOT NULL, 
+	requested_at DATETIME NOT NULL, 
+	granted_by VARCHAR(255), 
+	granted_at DATETIME, 
+	revoked_by VARCHAR(255), 
+	revoked_at DATETIME, 
+	note TEXT, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(workspace_id) REFERENCES marketplace_workspaces (id) ON DELETE CASCADE
+	FOREIGN KEY(install_id) REFERENCES marketplace_installs (id) ON DELETE SET NULL, 
+	FOREIGN KEY(workspace_id) REFERENCES marketplace_workspaces (id) ON DELETE SET NULL, 
+	FOREIGN KEY(connector_id) REFERENCES connector_registry (id) ON DELETE SET NULL
 );
 
-CREATE INDEX ix_mnl_package ON marketplace_network_log (package_id);
+CREATE INDEX ix_mcg_status ON marketplace_capability_grants (status);
 
-CREATE INDEX ix_mnl_workspace ON marketplace_network_log (workspace_id);
+CREATE INDEX ix_mcg_tenant_package ON marketplace_capability_grants (tenant_id, package_id);
 
 CREATE TABLE marketplace_packages (
 	id VARCHAR(255) NOT NULL, 
@@ -2841,6 +2851,56 @@ CREATE INDEX ix_intake_case_type ON intake_events (case_type_id);
 CREATE INDEX ix_intake_received ON intake_events (received_at);
 
 CREATE INDEX ix_intake_status ON intake_events (status);
+
+CREATE TABLE marketplace_containers (
+	id CHAR(36) NOT NULL, 
+	tenant_id VARCHAR(255) NOT NULL, 
+	package_id VARCHAR(255) NOT NULL, 
+	grant_id CHAR(36), 
+	install_id CHAR(36), 
+	image VARCHAR(512) NOT NULL, 
+	image_digest VARCHAR(96) NOT NULL, 
+	registry VARCHAR(255), 
+	container_id VARCHAR(128), 
+	status VARCHAR(32) NOT NULL, 
+	port INTEGER, 
+	signature_verified BOOL NOT NULL, 
+	pulled_at DATETIME, 
+	started_at DATETIME, 
+	stopped_at DATETIME, 
+	created_at DATETIME NOT NULL, 
+	error TEXT, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(grant_id) REFERENCES marketplace_capability_grants (id) ON DELETE SET NULL, 
+	FOREIGN KEY(install_id) REFERENCES marketplace_installs (id) ON DELETE SET NULL
+);
+
+CREATE INDEX ix_mc_grant ON marketplace_containers (grant_id);
+
+CREATE INDEX ix_mc_tenant_package ON marketplace_containers (tenant_id, package_id);
+
+CREATE TABLE marketplace_network_log (
+	id CHAR(36) NOT NULL, 
+	workspace_id CHAR(36), 
+	grant_id CHAR(36), 
+	package_id VARCHAR(255) NOT NULL, 
+	destination_url VARCHAR(1024) NOT NULL, 
+	destination_ip VARCHAR(64), 
+	http_method VARCHAR(16), 
+	bytes_sent INTEGER NOT NULL, 
+	bytes_received INTEGER NOT NULL, 
+	status VARCHAR(16) NOT NULL, 
+	http_status_code INTEGER, 
+	is_declared BOOL NOT NULL, 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(workspace_id) REFERENCES marketplace_workspaces (id) ON DELETE CASCADE, 
+	FOREIGN KEY(grant_id) REFERENCES marketplace_capability_grants (id) ON DELETE SET NULL
+);
+
+CREATE INDEX ix_mnl_package ON marketplace_network_log (package_id);
+
+CREATE INDEX ix_mnl_workspace ON marketplace_network_log (workspace_id);
 
 CREATE TABLE migration_tasks (
 	id CHAR(36) NOT NULL, 
@@ -3859,6 +3919,24 @@ CREATE TABLE case_session_caption_segments (
 
 CREATE INDEX idx_caption_segments_session ON case_session_caption_segments (session_id, spoken_at);
 
+CREATE TABLE case_session_challenges (
+	id CHAR(36) NOT NULL, 
+	session_id CHAR(36) NOT NULL, 
+	tenant_id VARCHAR(255), 
+	kind VARCHAR(32) NOT NULL, 
+	payload JSON NOT NULL, 
+	issued_by VARCHAR(255) NOT NULL, 
+	issued_at DATETIME NOT NULL, 
+	result VARCHAR(20) NOT NULL, 
+	result_notes TEXT, 
+	result_by VARCHAR(255), 
+	result_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(session_id) REFERENCES case_sessions (id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_session_challenges_session ON case_session_challenges (session_id, issued_at);
+
 CREATE TABLE case_session_intelligence (
 	session_id CHAR(36) NOT NULL, 
 	status VARCHAR(20) NOT NULL, 
@@ -3867,6 +3945,21 @@ CREATE TABLE case_session_intelligence (
 	action_items JSON NOT NULL, 
 	language VARCHAR(16), 
 	duration_seconds INTEGER, 
+	model_versions JSON NOT NULL, 
+	error TEXT, 
+	requested_by VARCHAR(255) NOT NULL, 
+	created_at DATETIME NOT NULL, 
+	completed_at DATETIME, 
+	PRIMARY KEY (session_id), 
+	FOREIGN KEY(session_id) REFERENCES case_sessions (id) ON DELETE CASCADE
+);
+
+CREATE TABLE case_session_kyc_signals (
+	session_id CHAR(36) NOT NULL, 
+	status VARCHAR(20) NOT NULL, 
+	risk_score FLOAT, 
+	checks JSON NOT NULL, 
+	challenge_checks JSON NOT NULL, 
 	model_versions JSON NOT NULL, 
 	error TEXT, 
 	requested_by VARCHAR(255) NOT NULL, 
@@ -3890,6 +3983,7 @@ CREATE TABLE case_session_participants (
 	joined_at DATETIME, 
 	left_at DATETIME, 
 	consent_recorded_at DATETIME, 
+	biometric_consent_at DATETIME, 
 	created_at DATETIME NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(session_id) REFERENCES case_sessions (id) ON DELETE CASCADE, 

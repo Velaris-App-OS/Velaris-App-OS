@@ -717,9 +717,67 @@ export async function listDocumentVerifications(documentId: string): Promise<{
   return caseRequest(`/documents/${documentId}/verifications`);
 }
 
+// ── HxMeet P4c — Video-KYC liveness challenges ──
+
+export type MeetChallenge = {
+  id: string;
+  session_id: string;
+  kind: "head_turn" | "phrase_readback" | "document_tilt";
+  payload: { instruction?: string; phrase?: string; sequence?: string[]; side?: string };
+  issued_by: string;
+  issued_at: string | null;
+  result: "pending" | "passed" | "failed" | "skipped";
+  result_notes: string | null;
+  result_by: string | null;
+  result_at: string | null;
+};
+
+export async function issueMeetChallenges(sessionId: string, kinds?: string[]): Promise<{ challenges: MeetChallenge[] }> {
+  return caseRequest(`/meet/sessions/${sessionId}/challenges`, {
+    method: "POST", body: JSON.stringify({ kinds: kinds ?? null }),
+  });
+}
+
+export async function listMeetChallenges(sessionId: string): Promise<{ challenges: MeetChallenge[] }> {
+  return caseRequest(`/meet/sessions/${sessionId}/challenges`);
+}
+
+export async function recordMeetChallengeResult(
+  sessionId: string, challengeId: string, result: "passed" | "failed" | "skipped", notes?: string,
+): Promise<MeetChallenge> {
+  return caseRequest(`/meet/sessions/${sessionId}/challenges/${challengeId}/result`, {
+    method: "POST", body: JSON.stringify({ result, notes: notes ?? null }),
+  });
+}
+
+export type KycCheck = {
+  name: string; score?: number; skipped?: boolean; detail: string; model?: string; challenge_id?: string;
+};
+
+export type KycAnalysis = {
+  status: "none" | "pending" | "running" | "completed" | "failed";
+  risk_score?: number | null;
+  review_recommended?: boolean | null;
+  review_threshold?: number;
+  checks?: KycCheck[];
+  challenge_checks?: KycCheck[];
+  model_versions?: Record<string, string>;
+  error?: string | null;
+  completed_at?: string | null;
+};
+
+export async function runKycAnalysis(sessionId: string): Promise<{ status: string }> {
+  return caseRequest(`/meet/sessions/${sessionId}/kyc-analysis`, { method: "POST" });
+}
+
+export async function getKycAnalysis(sessionId: string): Promise<KycAnalysis> {
+  return caseRequest(`/meet/sessions/${sessionId}/kyc-analysis`);
+}
+
 /** Public, non-consuming invite preview — recording notice before consent. */
 export async function previewMeetGuestInvite(inviteToken: string): Promise<{
   title: string | null; display_name: string | null; record_intent: boolean;
+  biometric_notice?: boolean;
 }> {
   const res = await fetch(`/api/v1/meet/guest/preview`, {
     method: "POST",

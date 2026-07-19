@@ -43,6 +43,13 @@ import {
   startMeetRecording,
   stopMeetRecording,
   verifyMeetRecording,
+  issueMeetChallenges,
+  listMeetChallenges,
+  recordMeetChallengeResult,
+  runKycAnalysis,
+  getKycAnalysis,
+  type KycAnalysis,
+  type KycCheck,
 } from "@shared/api/client";
 import type { MyTaskResult, CaseSession, MeetProvider } from "@shared/api/client";
 import FormRenderer from "@modules/form-builder/FormRenderer";
@@ -770,6 +777,33 @@ function SessionsTab({ caseId }: { caseId: string }) {
     finally { setPlayBusy(null); }
   };
 
+  // P4c — Video-KYC signal pass (risk score + per-check breakdown, assistive)
+  const [kyc, setKyc] = useState<Record<string, KycAnalysis>>({});
+  const [kycBusy, setKycBusy] = useState<string | null>(null);
+
+  const startKyc = async (sessionId: string, force = false) => {
+    setKycBusy(sessionId);
+    try {
+      if (!force) {
+        const existing = await getKycAnalysis(sessionId);
+        if (existing.status === "completed" || existing.status === "failed") {
+          // First click shows what's already there; the panel offers Re-run.
+          setKyc((m) => ({ ...m, [sessionId]: existing }));
+          return;
+        }
+      }
+      await runKycAnalysis(sessionId);
+      setKyc((m) => ({ ...m, [sessionId]: { status: "running" } }));
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const got = await getKycAnalysis(sessionId);
+        setKyc((m) => ({ ...m, [sessionId]: got }));
+        if (got.status === "completed" || got.status === "failed") break;
+      }
+    } catch (e: any) { setMsg(e?.message || "Could not run the KYC analysis"); }
+    finally { setKycBusy(null); }
+  };
+
   // P4a-live-2 — sealed live transcript viewer
   const [transcripts, setTranscripts] = useState<Record<string, string>>({});
   const [transcriptOpen, setTranscriptOpen] = useState<string | null>(null);
@@ -976,6 +1010,12 @@ function SessionsTab({ caseId }: { caseId: string }) {
               {intelBusy === s.id ? "Analyzing…" : (intel[s.id]?.status === "completed" ? "Analysis" : "Analyze")}
             </button>
           )}
+          {s.record_intent && (s.recording_status === "sealed" || s.transcript_status === "sealed") && (
+            <button onClick={() => startKyc(s.id)} disabled={kycBusy === s.id}
+              style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12, opacity: kycBusy === s.id ? 0.5 : 1 }}>
+              {kycBusy === s.id ? "Scanning…" : "KYC signals"}
+            </button>
+          )}
           {s.status === "active" && s.driver === "embedded" && (
             <>
               <button onClick={() => joinEmbedded(s)}
@@ -1019,6 +1059,56 @@ function SessionsTab({ caseId }: { caseId: string }) {
               color: "var(--text-secondary)" }}>
               {transcripts[s.id]}
             </pre>
+          </div>
+        )}
+
+        {/* P4c — Video-KYC signal panel: risk score + per-check breakdown.
+            Assistive framing throughout — a low score is never "verified". */}
+        {kyc[s.id] && kyc[s.id].status !== "none" && (
+          <div style={{ padding: "10px 12px", margin: "6px 0 12px", borderRadius: 8,
+            background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)", fontSize: 12 }}>
+            {kyc[s.id].status === "running" && <span style={{ color: "var(--text-muted)" }}>Analyzing the sealed recording… this runs locally and can take a minute.</span>}
+            {kyc[s.id].status === "failed" && <span style={{ color: "var(--status-failed)" }}>KYC analysis failed: {kyc[s.id].error || "unknown error"}</span>}
+            {kyc[s.id].status === "completed" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <span style={{ fontWeight: 700 }}>KYC signal pass</span>
+                  {kyc[s.id].risk_score != null ? (
+                    <span style={{
+                      fontWeight: 700, padding: "2px 10px", borderRadius: 6,
+                      color: kyc[s.id].review_recommended ? "var(--status-failed)" : "var(--text-primary)",
+                      border: `1px solid ${kyc[s.id].review_recommended ? "var(--status-failed)" : "var(--border-subtle)"}`,
+                    }}>
+                      risk {(kyc[s.id].risk_score! * 100).toFixed(0)}%
+                      {kyc[s.id].review_recommended ? " — review recommended" : ""}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--text-muted)" }}>no check could produce a score</span>
+                  )}
+                  <button onClick={() => startKyc(s.id, true)} disabled={kycBusy === s.id}
+                    style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>
+                    Re-run
+                  </button>
+                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                    assistive, not a verdict — the worker decides
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {[...(kyc[s.id].checks || []), ...(kyc[s.id].challenge_checks || [])].map((c: KycCheck, i: number) => (
+                    <span key={i} title={c.detail + (c.model ? ` · ${c.model}` : "")}
+                      style={{
+                        padding: "2px 8px", borderRadius: 5, fontSize: 11, cursor: "default",
+                        border: "1px solid var(--border-subtle)",
+                        color: c.skipped ? "var(--text-muted)"
+                             : (c.score ?? 0) >= 0.5 ? "var(--status-failed)" : "var(--text-secondary)",
+                        opacity: c.skipped ? 0.7 : 1,
+                      }}>
+                      {c.name.replace(/_/g, " ")}{c.skipped ? " — skipped" : ` ${((c.score ?? 0) * 100).toFixed(0)}%`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1090,6 +1180,9 @@ function SessionsTab({ caseId }: { caseId: string }) {
               recordIntent={room.session.record_intent}
               recordingActive={room.session.recording_status === "recording"}
               onToggleRecording={toggleRecording} sessionId={room.session.id}
+              onIssueChallenges={() => issueMeetChallenges(room.session.id)}
+              onLoadChallenges={() => listMeetChallenges(room.session.id)}
+              onChallengeResult={(cid, result) => recordMeetChallengeResult(room.session.id, cid, result)}
               onLeave={() => { setRoom(null); load(); }} />
           </div>
         </div>

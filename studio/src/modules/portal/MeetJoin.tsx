@@ -17,6 +17,7 @@ export default function MeetJoin() {
   const token = params.get("token") || "";
   const [room, setRoom] = useState<MeetRoomToken | null>(null);
   const [recordIntent, setRecordIntent] = useState(false);
+  const [biometricNotice, setBiometricNotice] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -27,7 +28,11 @@ export default function MeetJoin() {
   useEffect(() => {
     if (!token) return;
     previewMeetGuestInvite(token)
-      .then((p) => { setRecordIntent(p.record_intent); setSessionTitle(p.title); })
+      .then((p) => {
+        setRecordIntent(p.record_intent);
+        setBiometricNotice(!!p.biometric_notice);
+        setSessionTitle(p.title);
+      })
       .catch((e: any) => setError(e?.message || "Could not load the invite."));
   }, [token]);
 
@@ -80,13 +85,26 @@ export default function MeetJoin() {
         </div>
         {recordIntent && (
           <div style={{
-            fontSize: 13, color: "var(--status-failed, #f66)", marginBottom: 20,
+            fontSize: 13, color: "var(--status-failed, #f66)", marginBottom: biometricNotice ? 12 : 20,
             padding: "10px 12px", borderRadius: 8, textAlign: "left",
             border: "1px solid var(--status-failed, #f66)",
           }}>
             <strong>This session is recorded.</strong> Your audio, video, and anything
             you share on screen will be recorded and attached to the case.
             Joining counts as your consent.
+          </div>
+        )}
+        {biometricNotice && (
+          <div style={{
+            fontSize: 13, color: "var(--status-failed, #f66)", marginBottom: 20,
+            padding: "10px 12px", borderRadius: 8, textAlign: "left",
+            border: "1px solid var(--status-failed, #f66)",
+          }}>
+            <strong>Biometric identity check.</strong> Your face in this session may be
+            compared against the ID document on file to verify your identity.
+            The comparison runs on the case system, the biometric data is not
+            retained — only the match score is kept. Joining counts as your
+            explicit consent to this check.
           </div>
         )}
         {!token && <div style={{ fontSize: 13, color: "var(--status-failed, #f66)" }}>This link is missing its invite token.</div>}

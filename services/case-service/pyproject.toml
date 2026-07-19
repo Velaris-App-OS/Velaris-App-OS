@@ -68,6 +68,13 @@ intelligence = [
     # GGML_VULKAN=1 for AMD/Intel GPU; the CPU wheel still works, lag mode).
     "pywhispercpp>=1.5.0",
 ]
+# HxMeet P4c — Video-KYC passive signal pass on the sealed recording. Optional
+# for the same reason: checks whose dependency is absent are skipped honestly
+# (never silently), and the endpoint 501s only when NO check could run.
+kyc = [
+    "av>=12.0.0",     # in-memory MP4 frame decode (no temp files)
+    "numpy>=1.26",    # moiré spectral analysis + micro-movement statistics
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -1543,6 +1543,169 @@ function SourcesTab() {
   );
 }
 
+// ── CapabilityGrantsSection (Layer-1 execution & trust model) ────────────────
+// Approval is never "now it's trusted": the admin ticks a SUBSET of what the
+// package requested, and exactly that set activates. Drift (a changed
+// publisher descriptor) is held here for re-approval while the old mapping
+// keeps running.
+
+function CapabilityGrantsSection() {
+  const [grants, setGrants] = useState<any[]>([]);
+  const [ticked, setTicked] = useState<Record<string, Record<string, boolean>>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = () => {
+    apiFetch("/grants").then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(g => {
+        const rows = g?.grants ?? [];
+        setGrants(rows);
+        // Pre-tick everything the package asks for; the admin unticks.
+        const t: Record<string, Record<string, boolean>> = {};
+        for (const gr of rows) {
+          const src = gr.status === "pending_reapproval" ? (gr.proposed?.requested ?? {}) : (gr.requested ?? {});
+          t[gr.id] = {};
+          // Containers run egress-isolated — domains are never grantable.
+          if (gr.descriptor_format !== "container_image") {
+            for (const d of src.outbound_domains ?? []) t[gr.id][`d:${d}`] = true;
+          }
+          for (const s of src.scopes ?? []) t[gr.id][`s:${s}`] = true;
+        }
+        setTicked(t);
+      });
+  };
+  React.useEffect(load, []);
+
+  const tickedOf = (id: string) => {
+    const m = ticked[id] ?? {};
+    return {
+      outbound_domains: Object.keys(m).filter(k => k.startsWith("d:") && m[k]).map(k => k.slice(2)),
+      scopes:           Object.keys(m).filter(k => k.startsWith("s:") && m[k]).map(k => k.slice(2)),
+    };
+  };
+
+  const act = async (id: string, path: string, body: any) => {
+    setBusy(id); setErr(null);
+    try {
+      const r = await apiFetch(path, { method: "POST", body: JSON.stringify(body) });
+      if (!r.ok) setErr((await r.json())?.detail || "Request failed");
+      load();
+    } finally { setBusy(null); }
+  };
+
+  if (grants.length === 0) return null;
+
+  const badge = (status: string) => ({
+    fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const,
+    padding: "2px 8px", borderRadius: 4,
+    color: status === "granted" ? "#22c55e" : status === "revoked" ? "var(--text-muted)"
+         : status === "pending_reapproval" ? "#f59e0b" : "#38bdf8",
+    border: `1px solid currentColor`,
+  });
+
+  const checkboxRow = (g: any, kind: "d" | "s", values: string[]) => (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+      {values.map(v => (
+        <label key={v} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4,
+          color: "var(--text-secondary)", cursor: "pointer" }}>
+          <input type="checkbox" checked={!!ticked[g.id]?.[`${kind}:${v}`]}
+            onChange={e => setTicked(t => ({ ...t, [g.id]: { ...t[g.id], [`${kind}:${v}`]: e.target.checked } }))} />
+          {v}
+        </label>
+      ))}
+      {values.length === 0 && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>none</span>}
+    </div>
+  );
+
+  return (
+    <>
+      <div style={S.sectionHd}>Capability Grants — Layer-1 Remote Apps · {grants.length}</div>
+      {err && <div style={{ fontSize: 12, color: "var(--status-failed, #f66)", marginBottom: 8 }}>{err}</div>}
+      {grants.map(g => {
+        const requested = g.status === "pending_reapproval" ? (g.proposed?.requested ?? {}) : (g.requested ?? {});
+        const isContainer = g.descriptor_format === "container_image";
+        return (
+          <div key={g.id} style={{ ...S.card, marginBottom: 10,
+            borderColor: g.status === "pending_reapproval" ? "#f59e0b55" : "var(--border-subtle)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{g.package_id}</span>
+              <span style={badge(g.status)}>{g.status.replace("_", " ")}</span>
+              <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                {isContainer
+                  ? <>Layer-2 container · digest-pinned · runs fully egress-isolated — the scoped broker is its only data path · every access logged</>
+                  : <>mapping v{g.mapping_version} · connector inert until granted · every call logged</>}
+              </span>
+            </div>
+            {isContainer && g.descriptor_sha256 && (
+              <div style={{ fontSize: 10, fontFamily: "var(--font-mono, monospace)",
+                color: "var(--text-muted)", marginBottom: 6 }}>
+                {g.descriptor_sha256}
+              </div>
+            )}
+
+            {g.status === "pending_reapproval" && g.proposed && (
+              <div style={{ fontSize: 11, color: "#f59e0b", marginBottom: 6 }}>
+                Publisher descriptor changed ({g.proposed.classification}):{" "}
+                {(g.proposed.reasons ?? []).join("; ")} — the old mapping keeps running until you decide.
+              </div>
+            )}
+
+            {(g.status === "pending" || g.status === "pending_reapproval") && (
+              <>
+                {!isContainer && (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)" }}>
+                      Requested outbound domains — tick what this app may reach:
+                    </div>
+                    {checkboxRow(g, "d", requested.outbound_domains ?? [])}
+                  </>
+                )}
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-secondary)", marginTop: 6 }}>
+                  Requested {isContainer ? "data scopes (served by the broker)" : "scopes"}:
+                </div>
+                {checkboxRow(g, "s", requested.scopes ?? [])}
+                <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                  <button style={{ ...S.btn, fontSize: 11 }} disabled={busy === g.id}
+                    onClick={() => act(g.id,
+                      g.status === "pending_reapproval" ? `/grants/${g.id}/drift/approve` : `/grants/${g.id}/approve`,
+                      tickedOf(g.id))}>
+                    {g.status === "pending_reapproval"
+                      ? (isContainer ? "Approve new image & restart" : "Approve new mapping")
+                      : (isContainer ? "Grant & start container" : "Activate granted set")}
+                  </button>
+                  {g.status === "pending_reapproval" && (
+                    <button style={{ ...S.btn, ...S.btnGhost, fontSize: 11 }} disabled={busy === g.id}
+                      onClick={() => act(g.id, `/grants/${g.id}/drift/reject`, {})}>
+                      Reject drift (keep old mapping)
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+
+            {g.status === "granted" && (
+              <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                Granted: {(g.granted?.outbound_domains ?? []).join(", ") || "—"}
+                {(g.granted?.scopes?.length ?? 0) > 0 && <> · scopes: {g.granted.scopes.join(", ")}</>}
+              </div>
+            )}
+
+            {g.status !== "revoked" && (
+              <div style={{ marginTop: 8 }}>
+                <button style={{ ...S.btn, ...S.btnGhost, fontSize: 11, color: "var(--status-failed, #f66)" }}
+                  disabled={busy === g.id}
+                  onClick={() => act(g.id, `/grants/${g.id}/revoke`, {})}>
+                  Revoke — instant inert
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // ── ReviewQueueTab ────────────────────────────────────────────────────────────
 
 function ReviewQueueTab() {
@@ -1617,6 +1780,9 @@ function ReviewQueueTab() {
 
   return (
     <div style={{ flex: 1, padding: "var(--space-xl) var(--space-2xl)", overflow: "auto" }}>
+
+      {/* Layer-1 capability grants (execution & trust model) */}
+      <CapabilityGrantsSection />
 
       {/* Update notifications */}
       {updates.length > 0 && (

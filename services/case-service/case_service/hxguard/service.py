@@ -150,6 +150,7 @@ CASE_ACTIONS: dict[str, set[str]] = {
     "messages.write": {"assignee", "editor"},            # Portal v2 P4: post to the case thread
     "meet.intelligence.run": {"assignee", "editor"},     # HxMeet P4a: analyze a sealed recording
     "docs.verify":    {"assignee", "editor"},            # HxMeet P4b: record a document verification
+    "meet.kyc.run":   {"assignee", "editor"},            # HxMeet P4c: issue liveness challenges / run the signal pass
     "cases.ask":      {"assignee", "editor", "viewer"},  # HxNexus case Q&A: read-derived
 }
 

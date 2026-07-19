@@ -32,7 +32,22 @@ export interface MeetRoomProps {
   onToggleRecording?: () => void;
   /** P4a-live: session id enables the CC button (captions WebSocket). */
   sessionId?: string | null;
+  /** P4c: worker-only Video-KYC challenge controls; omit for guests.
+   *  Issue mints a randomized server-side script (record-intent + recording
+   *  running + tenant opt-in are enforced server-side). */
+  onIssueChallenges?: () => Promise<{ challenges: KycChallenge[] }>;
+  onLoadChallenges?: () => Promise<{ challenges: KycChallenge[] }>;
+  onChallengeResult?: (challengeId: string, result: "passed" | "failed" | "skipped") => Promise<KycChallenge>;
 }
+
+/** P4c — mirrors client.ts MeetChallenge (kept local: the guest page bundles
+ *  this component without the authorized API client). */
+export type KycChallenge = {
+  id: string;
+  kind: string;
+  payload: { instruction?: string; phrase?: string; sequence?: string[]; side?: string };
+  result: "pending" | "passed" | "failed" | "skipped";
+};
 
 const displayName = (p: Participant) =>
   (p.name || p.identity || "?").replace(/^(user|customer|email):/, "");
@@ -122,6 +137,7 @@ function ParticipantTile({ participant, isLocal, compact }: {
 
 export default function MeetRoom({
   url, token, title, onLeave, recordIntent, recordingActive, onToggleRecording, sessionId,
+  onIssueChallenges, onLoadChallenges, onChallengeResult,
 }: MeetRoomProps) {
   const roomRef = useRef<Room | null>(null);
   const everConnectedRef = useRef(false);
@@ -139,6 +155,23 @@ export default function MeetRoom({
   const [partials, setPartials] = useState<Record<string, Caption>>({});
   const [transcript, setTranscript] = useState<Caption[]>([]);
   const ccStopRef = useRef<(() => void) | null>(null);
+
+  // P4c Video-KYC: banner = the challenge currently presented to the room
+  // (received on the data channel — guests get only this); the panel is the
+  // worker's checklist over the server-minted script.
+  const [kycBanner, setKycBanner] = useState<{ instruction: string; kind: string } | null>(null);
+  const [kycOpen, setKycOpen] = useState(false);
+  const [kycChallenges, setKycChallenges] = useState<KycChallenge[]>([]);
+  const [kycBusy, setKycBusy] = useState(false);
+  const kycBannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showKycBanner = useCallback((instruction: string, kind: string) => {
+    if (kycBannerTimer.current) clearTimeout(kycBannerTimer.current);
+    setKycBanner({ instruction, kind });
+    kycBannerTimer.current = setTimeout(() => setKycBanner(null), 45000);
+  }, []);
+
+  useEffect(() => () => { if (kycBannerTimer.current) clearTimeout(kycBannerTimer.current); }, []);
 
   const handleCaption = useCallback((speaker: string, text: string, isFinal: boolean) => {
     const entry: Caption = { speaker, text, isFinal, ts: Date.now() };
@@ -176,6 +209,15 @@ export default function MeetRoom({
         sync();
       })
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+        if (topic === "kyc-challenges") {
+          try {
+            const m = JSON.parse(new TextDecoder().decode(payload));
+            if (typeof m.instruction === "string" && m.instruction) {
+              showKycBanner(m.instruction, String(m.kind || ""));
+            }
+          } catch { /* malformed challenge payload — drop */ }
+          return;
+        }
         if (topic !== "captions") return;
         try {
           const m = JSON.parse(new TextDecoder().decode(payload));
@@ -340,6 +382,51 @@ export default function MeetRoom({
     setCc(true);
   }, [sessionId, state, token, handleCaption]);
 
+  // ── P4c Video-KYC worker actions ──
+  const kycToggle = async () => {
+    const next = !kycOpen;
+    setKycOpen(next);
+    if (next && onLoadChallenges && kycChallenges.length === 0) {
+      try { setKycChallenges((await onLoadChallenges()).challenges); }
+      catch { /* nothing issued yet — panel offers Issue */ }
+    }
+  };
+
+  const kycIssue = async () => {
+    if (!onIssueChallenges || kycBusy) return;
+    setKycBusy(true);
+    try {
+      const res = await onIssueChallenges();
+      setKycChallenges((prev) => [...prev, ...res.challenges]);
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message || "Could not issue challenges");
+    } finally {
+      setKycBusy(false);
+    }
+  };
+
+  const kycPresent = (c: KycChallenge) => {
+    const instruction = c.payload?.instruction || "";
+    if (!instruction) return;
+    const payload = JSON.stringify({ id: c.id, kind: c.kind, instruction });
+    roomRef.current?.localParticipant
+      .publishData(new TextEncoder().encode(payload), { topic: "kyc-challenges", reliable: true })
+      .catch(() => { /* data channel hiccup — Present again */ });
+    showKycBanner(instruction, c.kind);
+  };
+
+  const kycRecord = async (c: KycChallenge, result: "passed" | "failed" | "skipped") => {
+    if (!onChallengeResult) return;
+    try {
+      const updated = await onChallengeResult(c.id, result);
+      setKycChallenges((prev) => prev.map((x) => (x.id === c.id ? { ...x, ...updated } : x)));
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message || "Could not record the challenge result");
+    }
+  };
+
   const toggle = async (kind: "mic" | "cam" | "screen") => {
     const room = roomRef.current;
     // Publishing on an unconnected room hangs until an engine timeout —
@@ -424,6 +511,28 @@ export default function MeetRoom({
 
       {error && <div style={{ fontSize: 12, color: "var(--status-failed, #f66)" }}>{error}</div>}
 
+      {/* P4c: the challenge currently presented to the room — everyone sees
+          it (the guest acts on it; it's also on the sealed recording). */}
+      {kycBanner && (
+        <div style={{
+          flex: "0 0 auto", padding: "10px 14px", borderRadius: 8, fontSize: 14,
+          border: "1px solid var(--accent, #6cf)", background: "rgba(80,160,255,.12)",
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span style={{
+            fontSize: 10, textTransform: "uppercase", fontWeight: 700,
+            color: "var(--accent, #6cf)", flex: "0 0 auto",
+          }}>
+            verification
+          </span>
+          <span style={{ flex: 1 }}>{kycBanner.instruction}</span>
+          <button onClick={() => setKycBanner(null)} style={{
+            border: "none", background: "transparent", color: "var(--text-muted, #999)",
+            cursor: "pointer", fontSize: 14, flex: "0 0 auto",
+          }}>×</button>
+        </div>
+      )}
+
       {remoteAudio.map((a) => <MediaView key={a.key} track={a.track} />)}
 
       {presenter ? (
@@ -488,6 +597,81 @@ export default function MeetRoom({
         );
       })()}
 
+      {/* P4c: worker checklist — the server-minted challenge script. The
+          worker presents each challenge to the room and records what they
+          OBSERVED; nothing here auto-passes. */}
+      {kycOpen && onIssueChallenges && (
+        <div style={{
+          flex: "0 0 auto", maxHeight: 180, overflowY: "auto", padding: "8px 12px",
+          borderRadius: 8, border: "1px solid var(--border-subtle, #333)", fontSize: 12,
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
+            fontSize: 10, textTransform: "uppercase", color: "var(--text-muted, #888)",
+          }}>
+            <span style={{ flex: 1 }}>Liveness challenges — worker records the observed result</span>
+            <button onClick={kycIssue} disabled={kycBusy || !live} style={{
+              padding: "3px 10px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+              border: "1px solid var(--accent, #6cf)", background: "transparent",
+              color: "var(--accent, #6cf)", fontWeight: 600, opacity: kycBusy ? 0.5 : 1,
+            }}>
+              {kycChallenges.length ? "Issue more" : "Issue challenge script"}
+            </button>
+          </div>
+          {kycChallenges.length === 0 && (
+            <div style={{ color: "var(--text-muted, #888)" }}>
+              No challenges yet — issuing mints a randomized script server-side
+              (recording must be running).
+            </div>
+          )}
+          {kycChallenges.map((c) => (
+            <div key={c.id} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "5px 0",
+              borderTop: "1px solid var(--border-subtle, #2a2a2a)",
+            }}>
+              <span style={{
+                fontSize: 10, textTransform: "uppercase", fontFamily: "var(--font-mono, monospace)",
+                color: "var(--text-muted, #888)", flex: "0 0 auto", width: 104,
+              }}>
+                {c.kind.replace(/_/g, " ")}
+              </span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {c.payload?.instruction}
+              </span>
+              {c.result === "pending" ? (
+                <span style={{ display: "flex", gap: 4, flex: "0 0 auto" }}>
+                  <button onClick={() => kycPresent(c)} disabled={!live} style={{
+                    padding: "3px 8px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                    border: "1px solid var(--accent, #6cf)", background: "transparent", color: "var(--accent, #6cf)",
+                  }}>Present</button>
+                  <button onClick={() => kycRecord(c, "passed")} style={{
+                    padding: "3px 8px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                    border: "1px solid var(--status-success, #4b4)", background: "transparent", color: "var(--status-success, #4b4)",
+                  }}>Pass</button>
+                  <button onClick={() => kycRecord(c, "failed")} style={{
+                    padding: "3px 8px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                    border: "1px solid var(--status-failed, #c33)", background: "transparent", color: "var(--status-failed, #f66)",
+                  }}>Fail</button>
+                  <button onClick={() => kycRecord(c, "skipped")} style={{
+                    padding: "3px 8px", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                    border: "1px solid var(--border-subtle, #444)", background: "transparent", color: "var(--text-muted, #999)",
+                  }}>Skip</button>
+                </span>
+              ) : (
+                <span style={{
+                  fontSize: 10, textTransform: "uppercase", fontWeight: 700, flex: "0 0 auto",
+                  color: c.result === "passed" ? "var(--status-success, #4b4)"
+                       : c.result === "failed" ? "var(--status-failed, #f66)"
+                       : "var(--text-muted, #999)",
+                }}>
+                  {c.result}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {showTranscript && (
         <div style={{
           flex: "0 0 auto", maxHeight: 140, overflowY: "auto", padding: "8px 12px",
@@ -518,6 +702,11 @@ export default function MeetRoom({
           <button style={btn(showTranscript)} disabled={!live}
                   onClick={() => setShowTranscript((s) => !s)}>
             Transcript
+          </button>
+        )}
+        {onIssueChallenges && recordIntent && (
+          <button style={btn(kycOpen)} disabled={!live} onClick={kycToggle}>
+            KYC
           </button>
         )}
         {onToggleRecording && recordIntent && (

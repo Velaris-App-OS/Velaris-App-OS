@@ -716,3 +716,136 @@ async def intelligence_get(
     await _authorized_case(session, user, str(row.case_id), "meet.recording.view")
     intel = await session.get(CaseSessionIntelligenceModel, row.id)
     return meet_intel.intelligence_view(intel)
+
+
+# ═══ HxMeet P4c — Video-KYC liveness challenges ═══
+# Challenges are minted server-side (CSPRNG — the far end can never predict
+# them) and only while a record-intent session is actually RECORDING, so the
+# instruction and the response both land in the sealed recording. The worker
+# records the observed result per challenge; nothing here auto-passes.
+# Tenant opt-in tenant.settings["meet"].kyc, default OFF.
+
+from case_service.meet import kyc as meet_kyc  # noqa: E402
+
+
+class IssueChallengesBody(BaseModel):
+    kinds: list[str] | None = None   # default: one of each kind
+
+
+@router.post("/sessions/{session_id}/challenges", status_code=201)
+async def challenges_issue(
+    session_id: str,
+    body: IssueChallengesBody,
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    row = await _visible_session(session, user, session_id)
+    await _authorized_case(session, user, str(row.case_id), "meet.kyc.run")
+    _require_active_embedded(row)
+    if not await meet_kyc.tenant_kyc_enabled(session, row.tenant_id):
+        raise HTTPException(400, "Video-KYC is not enabled for this tenant")
+    if not row.record_intent:
+        raise HTTPException(409, "Challenges require a record-intent session")
+    if row.recording_status != "recording":
+        raise HTTPException(409, "Challenges can only be issued while the recording is running")
+    kinds = body.kinds or list(meet_kyc.CHALLENGE_KINDS)
+    unknown = [k for k in kinds if k not in meet_kyc.CHALLENGE_KINDS]
+    if unknown:
+        raise HTTPException(400, f"Unknown challenge kinds: {', '.join(unknown)}")
+    challenges = await meet_kyc.issue_challenges(
+        session, row=row, kinds=kinds, actor=user.user_id)
+    return {"challenges": [meet_kyc.challenge_view(c) for c in challenges]}
+
+
+@router.get("/sessions/{session_id}/challenges")
+async def challenges_list(
+    session_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    row = await _visible_session(session, user, session_id)
+    await _authorized_case(session, user, str(row.case_id), "case.read")
+    rows = await meet_kyc.list_challenges(session, row.id)
+    return {"challenges": [meet_kyc.challenge_view(c) for c in rows]}
+
+
+# ── P4c-2: passive signal pass on the sealed recording ──
+# One risk score with a per-check breakdown, never a binary verdict. Checks
+# whose dependency is missing are skipped honestly; 501 only when NO check
+# could run (no frame-analysis deps AND no sealed transcript to cross-check).
+
+@router.post("/sessions/{session_id}/kyc-analysis", status_code=202)
+async def kyc_analysis_run(
+    session_id: str,
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    from case_service.db.models import CaseSessionKycSignalsModel
+
+    row = await _visible_session(session, user, session_id)
+    await _authorized_case(session, user, str(row.case_id), "meet.kyc.run")
+    has_recording = row.recording_status == "sealed" and row.recording_document_id is not None
+    has_transcript = row.transcript_status == "sealed" and row.transcript_document_id is not None
+    if not has_recording and not has_transcript:
+        raise HTTPException(404, "No sealed recording for this session")
+    if not await meet_kyc.tenant_kyc_enabled(session, row.tenant_id):
+        raise HTTPException(400, "Video-KYC is not enabled for this tenant")
+    if not (has_recording and meet_kyc.cv_available()) and not has_transcript:
+        raise HTTPException(501, "KYC analysis is not installed on this server (pip install .[kyc])")
+
+    signals = await session.get(CaseSessionKycSignalsModel, row.id)
+    if signals is not None and signals.status == "running":
+        raise HTTPException(409, "KYC analysis is already running for this session")
+    if signals is None:
+        signals = CaseSessionKycSignalsModel(session_id=row.id, requested_by=user.user_id)
+        session.add(signals)
+    else:
+        signals.status = "pending"
+        signals.error = None
+        signals.requested_by = user.user_id
+    await session.commit()
+
+    background.add_task(meet_kyc.run_kyc_job, row.id)
+    return {"session_id": str(row.id), "status": "pending"}
+
+
+@router.get("/sessions/{session_id}/kyc-analysis")
+async def kyc_analysis_get(
+    session_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    from case_service.db.models import CaseSessionKycSignalsModel
+
+    row = await _visible_session(session, user, session_id)
+    # Reading the analysis derives from the recording — same gate as viewing it.
+    await _authorized_case(session, user, str(row.case_id), "meet.recording.view")
+    signals = await session.get(CaseSessionKycSignalsModel, row.id)
+    threshold = await meet_kyc.tenant_review_threshold(session, row.tenant_id)
+    return meet_kyc.kyc_view(signals, threshold)
+
+
+class ChallengeResultBody(BaseModel):
+    result: str                # passed | failed | skipped
+    notes: str | None = None
+
+
+@router.post("/sessions/{session_id}/challenges/{challenge_id}/result")
+async def challenge_result(
+    session_id: str,
+    challenge_id: str,
+    body: ChallengeResultBody,
+    session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    row = await _visible_session(session, user, session_id)
+    await _authorized_case(session, user, str(row.case_id), "meet.kyc.run")
+    if body.result not in meet_kyc.CHALLENGE_RESULTS:
+        raise HTTPException(400, "result must be one of: " + ", ".join(meet_kyc.CHALLENGE_RESULTS))
+    challenge = await meet_kyc.record_challenge_result(
+        session, row=row, challenge_id=challenge_id,
+        result=body.result, notes=body.notes, actor=user.user_id)
+    if challenge is None:
+        raise HTTPException(404, "Challenge not found")
+    return meet_kyc.challenge_view(challenge)

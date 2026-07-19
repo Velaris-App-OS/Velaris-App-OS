@@ -300,6 +300,20 @@ class Settings(BaseSettings):
     marketplace_official_poll_interval_hours: int = 1
     # Sandbox workspace auto-expiry (days).
     marketplace_workspace_expiry_days: int = 30
+    # >>> Marketplace Layer-2 (execution & trust model)
+    # Registries a Layer-2 image may be pulled from (comma-separated host
+    # prefixes). Empty = Layer-2 installs fail closed.
+    marketplace_l2_registries: str = Field(
+        default="docker.io,ghcr.io", validation_alias="VELARIS_CASE_MARKETPLACE_L2_REGISTRIES")
+    # Require a cosign signature on Layer-2 images (needs the cosign binary).
+    marketplace_l2_require_signature: bool = Field(
+        default=False, validation_alias="VELARIS_CASE_MARKETPLACE_L2_REQUIRE_SIGNATURE")
+    # Resource caps for production app containers (sandbox caps stay in sandbox.py).
+    marketplace_l2_mem_limit: str = Field(
+        default="512m", validation_alias="VELARIS_CASE_MARKETPLACE_L2_MEM_LIMIT")
+    marketplace_l2_cpu_quota: int = Field(
+        default=50000, validation_alias="VELARIS_CASE_MARKETPLACE_L2_CPU_QUOTA")  # 50% of one core
+    # <<< Marketplace Layer-2
     # AES key for encrypting source tokens and licence keys at rest (32-byte hex).
     # Falls back to storage_master_key when empty.
     # Generate: openssl rand -hex 32

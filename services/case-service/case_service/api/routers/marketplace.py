@@ -1103,6 +1103,19 @@ async def install_package(
                     "This package declares runtime 'wasm' — HxSandbox is not "
                     "yet available on this platform; only runtime 'python' "
                     "packages can be installed.")
+            # Layer-1 (execution & trust model): provision the remote app as
+            # an INERT connector + pending capability grant. Nothing can run
+            # or reach anywhere until an admin activates the grant.
+            if manifest.get("execution"):
+                from case_service.marketplace import grants as mkt_grants
+                try:
+                    await mkt_grants.create_pending_grant(
+                        session, tenant_id=ws.tenant_id, package_id=body.package_id,
+                        workspace_id=ws.id, manifest=manifest,
+                        requested_by=user.user_id,
+                        publisher_tier=_effective_tier(source_url, body.package_id))
+                except ValueError as e:
+                    raise HTTPException(400, f"Execution provisioning failed: {e}")
             logger.info("Package %s checksum + manifest verified", body.package_id)
         except HTTPException:
             raise
@@ -1251,6 +1264,179 @@ async def decide_whitelist(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  LAYER-1 CAPABILITY GRANTS (execution & trust model, mig 122)
+#  Approval is never "now it's trusted" — it activates exactly the ticked,
+#  default-deny capability subset. Revocation is instant inert.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GrantApproveReq(BaseModel):
+    outbound_domains: list[str]
+    scopes: list[str] = []
+    note: str | None = None
+
+
+class GrantRevokeReq(BaseModel):
+    note: str | None = None
+
+
+async def _visible_grant(session: AsyncSession, user: AuthenticatedUser, grant_id: str):
+    """Tenant-scoped grant lookup — 404 anti-oracle."""
+    from case_service.db.models import MarketplaceCapabilityGrantModel
+    try:
+        gid = uuid.UUID(grant_id)
+    except ValueError:
+        raise HTTPException(404, "Grant not found")
+    grant = await session.get(MarketplaceCapabilityGrantModel, gid)
+    if grant is None or grant.tenant_id != (user.tenant_id or "default"):
+        raise HTTPException(404, "Grant not found")
+    return grant
+
+
+@router.get("/grants")
+async def list_grants(
+    status: str | None = None,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _require_admin(user)
+    from case_service.db.models import MarketplaceCapabilityGrantModel
+    from case_service.marketplace import grants as mkt_grants
+    q = select(MarketplaceCapabilityGrantModel).where(
+        MarketplaceCapabilityGrantModel.tenant_id == (user.tenant_id or "default"))
+    if status:
+        q = q.where(MarketplaceCapabilityGrantModel.status == status)
+    rows = (await session.execute(
+        q.order_by(MarketplaceCapabilityGrantModel.requested_at.desc()))).scalars().all()
+    return {"grants": [mkt_grants.grant_view(g) for g in rows]}
+
+
+@router.get("/grants/{grant_id}")
+async def get_grant(
+    grant_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _require_admin(user)
+    from case_service.db.models import MarketplaceNetworkLogModel
+    from case_service.marketplace import grants as mkt_grants
+    grant = await _visible_grant(session, user, grant_id)
+    logs = (await session.execute(
+        select(MarketplaceNetworkLogModel)
+        .where(MarketplaceNetworkLogModel.grant_id == grant.id)
+        .order_by(MarketplaceNetworkLogModel.created_at.desc()).limit(100)
+    )).scalars().all()
+    view = mkt_grants.grant_view(grant)
+    # Layer-2: the grant's container (image identity, provenance, status).
+    if mkt_grants.is_container_grant(grant):
+        row = await mkt_grants._container_row(session, grant)
+        if row is not None:
+            view["container"] = {
+                "image":              row.image,
+                "image_digest":       row.image_digest,
+                "registry":           row.registry,
+                "status":             row.status,
+                "container_id":       (row.container_id or "")[:12] or None,
+                "signature_verified": row.signature_verified,
+                "pulled_at":          row.pulled_at.isoformat() if row.pulled_at else None,
+                "started_at":         row.started_at.isoformat() if row.started_at else None,
+                "error":              row.error,
+            }
+    view["network_log"] = [{
+        "destination_url": l.destination_url, "http_method": l.http_method,
+        "status": l.status, "http_status_code": l.http_status_code,
+        "is_declared": l.is_declared,
+        "created_at": l.created_at.isoformat() if l.created_at else None,
+    } for l in logs]
+    return view
+
+
+@router.post("/grants/{grant_id}/approve")
+async def approve_capability_grant(
+    grant_id: str,
+    body: GrantApproveReq,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _require_admin(user)
+    from case_service.marketplace import grants as mkt_grants
+    grant = await _visible_grant(session, user, grant_id)
+    if grant.status == "revoked":
+        raise HTTPException(409, "Grant is revoked — reinstall the package to request again")
+    try:
+        await mkt_grants.approve_grant(
+            session, grant=grant, outbound_domains=body.outbound_domains,
+            scopes=body.scopes, admin_id=user.user_id, note=body.note)
+    except ValueError as e:
+        # Layer-2: a container start failure is recorded on the container row
+        # (status/error) — persist that record even though the approval aborts.
+        await session.commit()
+        raise HTTPException(400, str(e))
+    await session.commit()
+    return mkt_grants.grant_view(grant)
+
+
+@router.post("/grants/{grant_id}/drift/approve")
+async def approve_grant_drift(
+    grant_id: str,
+    body: GrantApproveReq,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Apply a held (drifted) mapping with the admin-ticked subset of the
+    NEW request. Until this call the old mapping keeps running untouched."""
+    _require_admin(user)
+    from case_service.marketplace import grants as mkt_grants
+    grant = await _visible_grant(session, user, grant_id)
+    try:
+        await mkt_grants.approve_drift(
+            session, grant=grant, outbound_domains=body.outbound_domains,
+            scopes=body.scopes, admin_id=user.user_id, note=body.note)
+    except ValueError as e:
+        # Persist the container failure record (and the physical reality that
+        # the old container was stopped) — the grant stays pending_reapproval
+        # so the admin can retry or reject.
+        await session.commit()
+        raise HTTPException(400, str(e))
+    await session.commit()
+    return mkt_grants.grant_view(grant)
+
+
+@router.post("/grants/{grant_id}/drift/reject")
+async def reject_grant_drift(
+    grant_id: str,
+    body: GrantRevokeReq,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _require_admin(user)
+    from case_service.marketplace import grants as mkt_grants
+    grant = await _visible_grant(session, user, grant_id)
+    try:
+        await mkt_grants.reject_drift(session, grant=grant, admin_id=user.user_id, note=body.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await session.commit()
+    return mkt_grants.grant_view(grant)
+
+
+@router.post("/grants/{grant_id}/revoke")
+async def revoke_capability_grant(
+    grant_id: str,
+    body: GrantRevokeReq,
+    user: AuthenticatedUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    _require_admin(user)
+    from case_service.marketplace import grants as mkt_grants
+    grant = await _visible_grant(session, user, grant_id)
+    if grant.status == "revoked":
+        raise HTTPException(409, "Grant is already revoked")
+    await mkt_grants.revoke_grant(session, grant=grant, admin_id=user.user_id, note=body.note)
+    await session.commit()
+    return mkt_grants.grant_view(grant)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REVIEW QUEUE
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1325,7 +1511,7 @@ async def approve_workspace(
             )
         )
         if not existing_r.scalar_one_or_none():
-            session.add(MarketplaceInstallModel(
+            install_row = MarketplaceInstallModel(
                 tenant_id=ws.tenant_id,
                 package_id=item.package_id,
                 package_version=item.package_version,
@@ -1333,7 +1519,16 @@ async def approve_workspace(
                 licence_key_enc=item.licence_key_enc,
                 approved_by=user.user_id,
                 workspace_id=ws.id,
-            ))
+            )
+            session.add(install_row)
+            await session.flush()
+            # Layer-1: anchor the pending grant to the production install.
+            # Workspace approval does NOT activate capabilities — that stays
+            # an explicit, separate admin act on the grant itself.
+            from case_service.marketplace import grants as mkt_grants
+            grant = await mkt_grants.active_grant(session, ws.tenant_id, item.package_id)
+            if grant is not None and grant.install_id is None:
+                grant.install_id = install_row.id
         item.status = "approved"
         item.approved_at = _utcnow()
         approved.append(item.package_id)
@@ -1485,11 +1680,42 @@ async def approve_update(
     if install:
         install.package_version = upd.available_version
 
+    # Layer-1 drift (P2): an update to a package with an active capability
+    # grant gets its NEW descriptor inspected before the version lands.
+    # Fail-closed: if the new bundle can't be fetched and verified, the
+    # update does not apply — a code-bearing package is never bumped blind.
+    from case_service.marketplace import grants as mkt_grants
+    drift: dict | None = None
+    grant = await mkt_grants.active_grant(session, upd.tenant_id, upd.package_id)
+    if grant is not None:
+        pkg = await session.get(MarketplacePackageCacheModel, upd.package_id)
+        if not pkg or not pkg.download_url or not pkg.checksum_sha256:
+            raise HTTPException(502, "Cannot verify the updated package bundle for drift inspection")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as http_client:
+                r = await http_client.get(pkg.download_url)
+                r.raise_for_status()
+            from case_service.marketplace.checksum import parse_and_validate_manifest, verify_checksum
+            verify_checksum(r.content, pkg.checksum_sha256)
+            new_manifest = parse_and_validate_manifest(r.content)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"Drift inspection failed — update not applied: {exc}")
+        if new_manifest.get("execution"):
+            src = await session.get(MarketplaceSourceModel, pkg.source_id) if pkg.source_id else None
+            drift = await mkt_grants.apply_descriptor_drift(
+                session, grant=grant, manifest=new_manifest,
+                publisher_tier=_effective_tier(src.url if src else "", upd.package_id))
+
     upd.status = "approved"
     upd.approved_at = _utcnow()
     upd.approved_by = user.user_id
     await session.commit()
-    return {"approved": update_id, "new_version": upd.available_version}
+    out = {"approved": update_id, "new_version": upd.available_version}
+    if drift is not None:
+        out["drift"] = drift
+    return out
 
 
 @router.post("/updates/{update_id}/dismiss")
