@@ -413,6 +413,27 @@ fi
 
 green "  ✓ Code updated to v$LATEST_VERSION"
 
+# ── Step 4b: Refresh dependencies ─────────────────────────────────
+# New releases can add Python/npm packages (e.g. livekit-client in 2.1.0);
+# stale .venv/node_modules break services and Vite until reinstalled.
+step "Step 4b — Refreshing dependencies..."
+if command -v uv >/dev/null 2>&1; then
+  uv sync --all-packages 2>&1 | tail -3
+  green "  ✓ Python dependencies synced"
+else
+  yellow "  ⚠ uv not found — skipping Python dependency sync"
+fi
+if [ -d "$HELIX_DIR/studio" ]; then
+  if ( cd "$HELIX_DIR/studio" && { npm install --prefer-offline >/tmp/velaris-npm-install.log 2>&1 \
+         || npm install >/tmp/velaris-npm-install.log 2>&1; } \
+       && rm -rf node_modules/.vite ); then
+    green "  ✓ Studio npm dependencies installed"
+  else
+    tail -5 /tmp/velaris-npm-install.log
+    yellow "  ⚠ npm install FAILED — Studio may not load. Full log: /tmp/velaris-npm-install.log"
+  fi
+fi
+
 # ── Step 5: Pull new Docker images ───────────────────────────────
 step "Step 5/7 — Pulling new Docker images..."
 docker compose -f "$COMPOSE_FILE" pull

@@ -413,6 +413,41 @@ echo ""
 # ── Step 8: Start Studio ─────────────────────────────────────────
 echo "▶ Starting Velaris Studio (port 5173)..."
 cd "$HELIX_DIR/studio"
+
+# Reinstall npm deps if package.json changed since the last install, OR if the
+# installed tree doesn't actually satisfy package.json (a release can add
+# packages, e.g. livekit-client in 2.1.0; a plain `git pull` + start would
+# otherwise leave node_modules stale and Vite fails to resolve imports).
+# node_modules lives at the workspace root in dev (npm workspaces) or inside
+# studio/ in a standalone clone — check whichever marker exists.
+_NM_MARK=""
+for _m in "$HELIX_DIR/node_modules/.package-lock.json" "$HELIX_DIR/studio/node_modules/.package-lock.json"; do
+  [ -f "$_m" ] && _NM_MARK="$_m" && break
+done
+_NEED_NPM=0
+if [ -z "$_NM_MARK" ] \
+   || [ "$HELIX_DIR/studio/package.json" -nt "$_NM_MARK" ] \
+   || { [ -f "$HELIX_DIR/package.json" ] && [ "$HELIX_DIR/package.json" -nt "$_NM_MARK" ]; }; then
+  _NEED_NPM=1
+elif ! npm ls --depth=0 >/dev/null 2>&1; then
+  # mtimes look fine but the tree is broken/incomplete (failed earlier install)
+  _NEED_NPM=1
+fi
+if [ "$_NEED_NPM" = 1 ]; then
+  echo "  Studio dependencies missing/stale — running npm install..."
+  _NPM_LOG=/tmp/velaris-npm-install.log
+  if npm install --prefer-offline >"$_NPM_LOG" 2>&1 \
+     || npm install >"$_NPM_LOG" 2>&1; then   # retry online if offline-first failed
+    rm -rf "$HELIX_DIR/studio/node_modules/.vite"
+    green "  ✓ Studio dependencies installed"
+  else
+    tail -5 "$_NPM_LOG"
+    yellow "  ⚠ npm install FAILED — Studio may not load. Full log: $_NPM_LOG"
+  fi
+else
+  green "  ✓ Studio dependencies up to date"
+fi
+
 nohup npm run dev -- --host 0.0.0.0 > /tmp/velaris-studio.log 2>&1 &
 echo "  PID: $! | Logs: tail -f /tmp/velaris-studio.log"
 sleep 3
