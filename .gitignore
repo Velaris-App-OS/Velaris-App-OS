@@ -56,3 +56,8 @@ deploy/openbao/agent/role_id
 deploy/openbao/agent/secret_id
 deploy/openbao/agent/out/
 deploy/openbao/enabled
+
+# Marketplace L2 egress gateway — runtime state (allowlist holds token hashes)
+deploy/docker-compose/egress-gw/conf/allowlist.json
+deploy/docker-compose/egress-gw/log/*
+!deploy/docker-compose/egress-gw/log/.gitkeep

@@ -313,6 +313,13 @@ class Settings(BaseSettings):
         default="512m", validation_alias="VELARIS_CASE_MARKETPLACE_L2_MEM_LIMIT")
     marketplace_l2_cpu_quota: int = Field(
         default=50000, validation_alias="VELARIS_CASE_MARKETPLACE_L2_CPU_QUOTA")  # 50% of one core
+    # Egress host-filter: OFF = container domain grants refused fail-closed
+    # (pre-egress behavior); ON = granted domains reachable via the egress
+    # gateway only. Dir override points at a non-standard egress-gw folder.
+    marketplace_l2_egress_enabled: bool = Field(
+        default=False, validation_alias="VELARIS_CASE_MARKETPLACE_L2_EGRESS")
+    marketplace_l2_egress_dir: str = Field(
+        default="", validation_alias="VELARIS_CASE_MARKETPLACE_L2_EGRESS_DIR")
     # <<< Marketplace Layer-2
     # AES key for encrypting source tokens and licence keys at rest (32-byte hex).
     # Falls back to storage_master_key when empty.

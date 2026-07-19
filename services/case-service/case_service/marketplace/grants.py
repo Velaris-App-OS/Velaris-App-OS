@@ -333,6 +333,7 @@ async def _start_container_for_grant(
         row.signature_verified = verified
 
         broker_url, broker_token = await _broker_credentials(session, grant)
+        egress_env = await _egress_credentials(session, grant, row, granted_domains)
         declared = (grant.requested or {}).get("execution") or {}
         container_id = await asyncio.to_thread(
             lambda: runtime.provision_app_container(
@@ -340,6 +341,7 @@ async def _start_container_for_grant(
                 package_id=grant.package_id, image=row.image,
                 digest=row.image_digest, granted_domains=granted_domains,
                 broker_url=broker_url, broker_token=broker_token,
+                egress_env=egress_env,
                 declared_env=declared.get("env") or {},
                 declared_command=declared.get("command"),
                 port=declared.get("port")))
@@ -348,10 +350,12 @@ async def _start_container_for_grant(
         row.started_at = _utcnow()
         row.error = None
     except runtime.Layer2Error as exc:
-        row.status = "failed"
-        row.error = str(exc)[:500]
+        _remove_egress_entry(grant)                     # never leave a grant's
+        row.status = "failed"                           # egress open for a
+        row.error = str(exc)[:500]                      # container that failed
         raise
     except Exception as exc:
+        _remove_egress_entry(grant)
         row.status = "failed"
         row.error = str(exc)[:500]
         raise runtime.Layer2Error(f"Container start failed: {exc}") from exc
@@ -373,6 +377,45 @@ async def _broker_credentials(
     grant.granted = {**(grant.granted or {}),
                      "broker_token_hash": hashlib.sha256(raw.encode()).hexdigest()}
     return runtime.BROKER_URL_IN_NETWORK, raw
+
+
+async def _egress_credentials(
+    session: AsyncSession,
+    grant: MarketplaceCapabilityGrantModel,
+    row,
+    granted_domains: list[str],
+) -> dict | None:
+    """Domain grant > per-container egress credential + allowlist entry.
+    Same posture as the broker token: hash-only at rest, raw injected once,
+    rotated on every (re)start. No domains = no credential = no egress.
+    Flag/gateway gating happens fail-closed in runtime.provision_app_container
+    (checked there so it also guards any future caller)."""
+    if not granted_domains:
+        # A re-approval may NARROW a previous domain grant to none — the old
+        # allowlist entry must not survive the narrowing.
+        _remove_egress_entry(grant)
+        return None
+    from case_service.marketplace import egress
+    if not egress.egress_enabled():
+        return None                    # provision will refuse with the clear message
+    user = f"app-{row.id}"
+    raw, token_hash = egress.mint_credentials()
+    grant.granted = {**(grant.granted or {}),
+                     "egress_user": user, "egress_token_hash": token_hash}
+    egress.upsert_app(user, token_hash=token_hash, grant_id=str(grant.id),
+                      package_id=grant.package_id, tenant_id=grant.tenant_id,
+                      domains=granted_domains)
+    return egress.proxy_env(user, raw)
+
+
+def _remove_egress_entry(grant: MarketplaceCapabilityGrantModel) -> None:
+    """Instant egress cut for this grant's container — best-effort, and a
+    no-op if the grant never had a domain credential."""
+    try:
+        from case_service.marketplace import egress
+        egress.remove_app((grant.granted or {}).get("egress_user"))
+    except Exception as exc:
+        logger.warning("egress allowlist removal failed for grant %s: %s", grant.id, exc)
 
 
 async def revoke_grant(
@@ -400,6 +443,7 @@ async def revoke_grant(
         import asyncio
 
         from case_service.marketplace import runtime
+        _remove_egress_entry(grant)
         row = await _container_row(session, grant)
         if row is not None:
             if row.container_id:

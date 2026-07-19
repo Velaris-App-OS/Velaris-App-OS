@@ -130,6 +130,7 @@ def provision_app_container(
     granted_domains: list[str],
     broker_url: str | None = None,
     broker_token: str | None = None,
+    egress_env: dict | None = None,
     declared_env: dict | None = None,
     declared_command: list[str] | None = None,
     port: int | None = None,
@@ -137,17 +138,25 @@ def provision_app_container(
     """Start the publisher's container with the full hardening posture on the
     INTERNAL apps network (egress-DROP by construction — no route out).
 
-    External outbound domains are refused fail-closed in this release:
-    granting them would silently not be enforceable without a host-privileged
-    packet filter. The broker is the container's only reach.
+    External outbound domains are enforceable ONLY through the egress
+    gateway (a CONNECT proxy dual-homed on the apps network — see
+    marketplace/egress.py). A domain grant without that path available is
+    refused fail-closed, exactly as before the gateway existed.
 
     Returns the docker container id. Every failure raises Layer2Error.
     """
     if granted_domains:
-        raise Layer2Error(
-            "Layer-2 containers run fully egress-isolated in this release — "
-            "external outbound domains cannot be granted to a container yet. "
-            "Approve with no outbound domains (the scoped broker is the data path).")
+        from case_service.marketplace import egress
+        if not egress.egress_enabled():
+            raise Layer2Error(
+                "Layer-2 egress is disabled (VELARIS_CASE_MARKETPLACE_L2_EGRESS) — "
+                "external outbound domains cannot be granted to a container. "
+                "Approve with no outbound domains (the scoped broker is the data path).")
+        egress.require_gateway_running()
+        if not egress_env:
+            raise Layer2Error(
+                "egress credentials were not minted for a domain grant — refusing "
+                "to start a container whose grant could not be enforced.")
     client = _get_client()
     settings = get_settings()
     ensure_apps_network()
@@ -172,6 +181,8 @@ def provision_app_container(
         env["VELARIS_BROKER_URL"] = broker_url
     if broker_token:
         env["VELARIS_BROKER_TOKEN"] = broker_token
+    if granted_domains and egress_env:
+        env.update(egress_env)
 
     container = client.containers.run(
         image=ref,

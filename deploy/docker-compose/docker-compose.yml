@@ -314,6 +314,34 @@ services:
       - velaris-apps
       - velaris-apps-edge
     restart: unless-stopped
+
+  # Egress host-filter gateway: the ONLY way OUT for app containers, and only
+  # for those holding a per-container credential minted at grant approval.
+  # CONNECT-only proxy (TLS end-to-end, no MITM): authenticates, allows exactly
+  # the admin-granted domains, refuses IP-literals + anything resolving to a
+  # private address, and audit-logs every attempt. Dual-homed: velaris-apps
+  # (reachable by apps) + the NATted default network (its way out). Runs with
+  # the same hardening posture the app containers get. The platform writes
+  # conf/allowlist.json (re-read per request — revocation is instant) and
+  # ingests log/ into marketplace_network_log.
+  egress-gw:
+    image: python:3.12-alpine
+    container_name: velaris-egress-gw
+    command: ["python", "/opt/proxy.py"]
+    user: "65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    volumes:
+      - ./egress-gw/proxy.py:/opt/proxy.py:ro
+      - ./egress-gw/conf:/etc/velaris-egress:ro
+      - ./egress-gw/log:/var/log/velaris-egress
+    networks:
+      - velaris-apps
+      - default
+    restart: unless-stopped
   # <<< Marketplace Layer-2
 
 networks:

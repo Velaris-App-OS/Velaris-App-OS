@@ -1318,8 +1318,12 @@ async def get_grant(
 ):
     _require_admin(user)
     from case_service.db.models import MarketplaceNetworkLogModel
+    from case_service.marketplace import egress as mkt_egress
     from case_service.marketplace import grants as mkt_grants
     grant = await _visible_grant(session, user, grant_id)
+    # Fold any fresh egress-gateway attempts in first so the view is current.
+    if mkt_egress.egress_enabled():
+        await mkt_egress.ingest_access_log(session)
     logs = (await session.execute(
         select(MarketplaceNetworkLogModel)
         .where(MarketplaceNetworkLogModel.grant_id == grant.id)

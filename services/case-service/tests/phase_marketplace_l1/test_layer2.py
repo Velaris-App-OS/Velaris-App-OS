@@ -279,8 +279,10 @@ class TestSupplyChain:
             s.marketplace_l2_require_signature = old
 
     async def test_external_domains_refused_for_containers(self, client, session):
-        """Egress isolation is by construction in this release — granting an
-        external domain to a container would be unenforceable, so it refuses."""
+        """Egress isolation is by construction: with the egress gateway
+        DISABLED (the default), granting an external domain to a container
+        would be unenforceable, so it refuses. (Enforcement via the gateway
+        when the flag is ON is pinned in test_egress.py.)"""
         bundle = _l2_bundle(outbound_domains=["api.example.com"])
         _, r = await _install_l2(client, session, bundle)
         assert r.status_code == 200, r.text
@@ -291,7 +293,7 @@ class TestSupplyChain:
             r = await client.post(f"{MKT}/grants/{grant.id}/approve", json={
                 "outbound_domains": ["api.example.com"], "scopes": []})
         assert r.status_code == 400
-        assert "egress-isolated" in r.json()["detail"]
+        assert "egress is disabled" in r.json()["detail"]
 
 
 class TestLayer2Drift:
