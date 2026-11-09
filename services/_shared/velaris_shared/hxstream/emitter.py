@@ -105,3 +105,24 @@ async def emit_trace(
         _broadcast(event)
     except Exception:
         logger.exception("HxStream: broadcast error")
+
+    # And to subscribers on every OTHER process, when the cache is on (R5e
+    # step 5). Until then a trace emitted in hxmigrate-service never reached a
+    # subscriber, who are all on case-service. Cache off: nothing more, as before.
+    try:
+        from velaris_shared import shared_state
+        await shared_state.publish("hxstream", event)
+    except Exception:  # noqa: BLE001
+        logger.debug("HxStream: cross-process publish failed", exc_info=True)
+
+
+async def relay_from_other_processes() -> None:
+    """Deliver traces published by other processes to this process's
+    subscribers. Started where /hxstream/ws lives (case-service) when the cache
+    is on; never returns."""
+    from velaris_shared import shared_state
+    async for event in shared_state.listen("hxstream"):
+        try:
+            _broadcast(event)
+        except Exception:  # noqa: BLE001
+            logger.exception("HxStream: relay broadcast error")

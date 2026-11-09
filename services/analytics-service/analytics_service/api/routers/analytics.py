@@ -8,6 +8,8 @@ SPDX-License-Identifier: BSL-1.1
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -16,7 +18,7 @@ import uuid
 from typing import Optional
 
 from velaris_shared import hxguard
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import Request, APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, case as sa_case, extract, and_, desc
@@ -38,8 +40,57 @@ from velaris_shared.db.session import get_analytics_session as get_session
 from velaris_shared.db.session import get_replica_session as get_ro_session
 from velaris_shared.auth.dependencies import get_current_user
 from velaris_shared.auth.models import AuthenticatedUser
+from velaris_shared.db.read_routing import get_analytics_cutoff_session
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+# ─── Short reuse of answers (VELARIS_CASE_ANALYTICS_CACHE_SECONDS) ─
+
+_inflight: dict[str, asyncio.Lock] = {}
+
+
+async def _cached(session: AsyncSession, name: str, params: dict, compute) -> Any:
+    """Reuse an answer for the same tenant scope and parameters for a few
+    seconds (R6 soak 2026-11-05: 400 users' dashboards each recomputed the
+    same numbers). Off (0, the default): compute every time, as before.
+
+    The key carries the session's tenant scope as `_tenant_scope` set it —
+    exactly what the queries below are filtered by — so two tenants (or a
+    tenant and the operator) never share an answer. Within one process,
+    concurrent misses for one key wait for a single computation.
+    """
+    from velaris_shared import shared_state
+    from velaris_shared.config import get_settings
+    from velaris_shared.tenancy.orm_scope import SCOPE_KEY
+
+    ttl = min(max(int(getattr(get_settings(), "analytics_cache_seconds", 0) or 0), 0), 300)
+    if ttl <= 0:
+        return await compute()
+    scope = getattr(session, "sync_session", session).info.get(SCOPE_KEY)
+    if scope is not None:
+        scope = {"uuids": sorted(str(u) for u in scope["uuids"]),
+                 "tokens": sorted(str(t) for t in scope["tokens"])}
+    key = json.dumps([name, params, scope], sort_keys=True, default=str)
+
+    hit = await shared_state.get("analytics", key)
+    if hit is not None:
+        return json.loads(hit)
+    lock = _inflight.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            hit = await shared_state.get("analytics", key)
+            if hit is not None:
+                return json.loads(hit)
+            value = await compute()
+            data = (value.model_dump(mode="json") if isinstance(value, BaseModel)
+                    else [v.model_dump(mode="json") if isinstance(v, BaseModel) else v
+                          for v in value] if isinstance(value, list) else value)
+            await shared_state.put("analytics", key, json.dumps(data), ttl)
+            return data
+    finally:
+        if not lock.locked() and _inflight.get(key) is lock:
+            _inflight.pop(key, None)
 
 
 # ─── Response schemas ─────────────────────────────────────────────
@@ -123,6 +174,14 @@ async def get_dashboard(
     _user: AuthenticatedUser = Depends(hxguard.guard("analytics.reports.read")),
 ):
     """Full analytics dashboard — all metrics in one call."""
+    return await _cached(
+        session, "dashboard",
+        {"days": days, "case_type_id": case_type_id, "tenant_id": tenant_id},
+        lambda: _dashboard(session, days, case_type_id, tenant_id),
+    )
+
+
+async def _dashboard(session, days, case_type_id, tenant_id) -> AnalyticsDashboard:
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -133,10 +192,14 @@ async def get_dashboard(
     if case_type_id:
         base_filter.append(CaseInstanceModel.case_type_id == case_type_id)
 
-    overview = await _get_overview(session, base_filter, today_start)
-    status = await _get_status_breakdown(session, base_filter)
-    priority = await _get_priority_breakdown(session, base_filter)
-    ct_breakdown = await _get_case_type_breakdown(session, base_filter)
+    # One pass over the cases gives the overview and all three breakdowns
+    # (R6 soak 2026-11-05: 19 sequential queries held a connection from a
+    # pool of 5 for the whole request; dashboard p95 8.5 s at 420k cases).
+    rollup = await _case_rollup(session, base_filter, today_start)
+    overview = _overview_from(rollup)
+    status = _status_from(rollup)
+    priority = _priority_from(rollup)
+    ct_breakdown = await _case_types_from(session, rollup)
     sla = await _get_sla_compliance(session, case_type_id)
     assignments = await _get_assignment_metrics(session, case_type_id)
     time_series = await _get_cases_over_time(session, since, base_filter)
@@ -160,12 +223,14 @@ async def get_overview_metrics(
     session: AsyncSession = Depends(get_ro_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("analytics.reports.read")),
 ):
-    base_filter = []
-    if case_type_id:
-        base_filter.append(CaseInstanceModel.case_type_id == case_type_id)
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return await _get_overview(session, base_filter, today_start)
+    async def compute():
+        base_filter = []
+        if case_type_id:
+            base_filter.append(CaseInstanceModel.case_type_id == case_type_id)
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return _overview_from(await _case_rollup(session, base_filter, today_start))
+    return await _cached(session, "overview", {"case_type_id": case_type_id}, compute)
 
 
 @router.get("/sla-compliance", response_model=SLAComplianceMetrics)
@@ -174,7 +239,8 @@ async def get_sla_compliance(
     session: AsyncSession = Depends(get_ro_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("analytics.reports.read")),
 ):
-    return await _get_sla_compliance(session, case_type_id)
+    return await _cached(session, "sla-compliance", {"case_type_id": case_type_id},
+                         lambda: _get_sla_compliance(session, case_type_id))
 
 
 @router.get("/cases-over-time", response_model=list[TimeSeriesPoint])
@@ -184,11 +250,14 @@ async def get_cases_over_time(
     session: AsyncSession = Depends(get_ro_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("analytics.reports.read")),
 ):
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    base_filter = []
-    if case_type_id:
-        base_filter.append(CaseInstanceModel.case_type_id == case_type_id)
-    return await _get_cases_over_time(session, since, base_filter)
+    async def compute():
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        base_filter = []
+        if case_type_id:
+            base_filter.append(CaseInstanceModel.case_type_id == case_type_id)
+        return await _get_cases_over_time(session, since, base_filter)
+    return await _cached(session, "cases-over-time",
+                         {"days": days, "case_type_id": case_type_id}, compute)
 
 
 @router.get("/bottlenecks", response_model=list[StageBottleneck])
@@ -228,127 +297,100 @@ async def get_bottlenecks(
 # ─── Internal query functions ─────────────────────────────────────
 
 
-async def _get_overview(
+_OPEN_STATUSES = ("new", "open", "reopened", "pending_external", "pending_subcase")
+
+
+async def _case_rollup(
     session: AsyncSession,
     base_filter: list,
     today_start: datetime,
-) -> OverviewMetrics:
-    # Total cases
-    total_q = select(func.count()).select_from(CaseInstanceModel)
-    for f in base_filter:
-        total_q = total_q.where(f)
-    total = (await session.execute(total_q)).scalar_one()
+) -> list:
+    """One scan of the caller's cases, grouped by (status, priority, case type).
 
-    # By status
-    status_counts = {}
-    for s in ["new", "open", "resolved", "closed", "cancelled", "reopened",
-              "pending_external", "pending_subcase"]:
-        q = select(func.count()).select_from(CaseInstanceModel).where(
-            CaseInstanceModel.status == s
+    The group count is small (statuses × priorities × case types), and every
+    dashboard number over cases is a sum over these groups. Replaces 15
+    separate full-table queries (total, 8 status counts, average resolution,
+    created/resolved today, and the status, priority and case-type GROUP BYs).
+    """
+    resolution = duration_seconds(session, CaseInstanceModel.created_at,
+                                  CaseInstanceModel.resolved_at)
+    q = (
+        select(
+            CaseInstanceModel.status,
+            CaseInstanceModel.priority,
+            CaseInstanceModel.case_type_id,
+            func.count().label("cnt"),
+            # count/sum of a NULL-able expression skip NULLs, exactly as the
+            # old AVG(... WHERE resolved_at IS NOT NULL) did.
+            func.count(resolution).label("res_n"),
+            func.sum(resolution).label("res_secs"),
+            func.sum(sa_case((CaseInstanceModel.created_at >= today_start, 1), else_=0)).label("created_today"),
+            func.sum(sa_case((CaseInstanceModel.resolved_at >= today_start, 1), else_=0)).label("resolved_today"),
         )
-        for f in base_filter:
-            q = q.where(f)
-        status_counts[s] = (await session.execute(q)).scalar_one()
-
-    open_cases = sum(status_counts.get(s, 0) for s in ["new", "open", "reopened",
-                     "pending_external", "pending_subcase"])
-
-    # Average resolution time
-    avg_q = select(
-        func.avg(
-            duration_seconds(session, CaseInstanceModel.created_at,
-                             CaseInstanceModel.resolved_at)
-        )
-    ).where(CaseInstanceModel.resolved_at.isnot(None))
-    for f in base_filter:
-        avg_q = avg_q.where(f)
-    avg_seconds = (await session.execute(avg_q)).scalar_one()
-    avg_hours = round(avg_seconds / 3600, 1) if avg_seconds else None
-
-    # Today's counts
-    created_today_q = select(func.count()).select_from(CaseInstanceModel).where(
-        CaseInstanceModel.created_at >= today_start
+        .group_by(CaseInstanceModel.status, CaseInstanceModel.priority,
+                  CaseInstanceModel.case_type_id)
     )
     for f in base_filter:
-        created_today_q = created_today_q.where(f)
-    created_today = (await session.execute(created_today_q)).scalar_one()
+        q = q.where(f)
+    return list((await session.execute(q)).all())
 
-    resolved_today_q = select(func.count()).select_from(CaseInstanceModel).where(
-        CaseInstanceModel.resolved_at >= today_start
-    )
-    for f in base_filter:
-        resolved_today_q = resolved_today_q.where(f)
-    resolved_today = (await session.execute(resolved_today_q)).scalar_one()
 
+def _overview_from(rows: list) -> OverviewMetrics:
+    by_status: dict[str, int] = {}
+    res_n = 0
+    res_secs = 0.0
+    created_today = resolved_today = 0
+    for r in rows:
+        by_status[r.status] = by_status.get(r.status, 0) + r.cnt
+        res_n += r.res_n or 0
+        res_secs += float(r.res_secs or 0)
+        created_today += int(r.created_today or 0)
+        resolved_today += int(r.resolved_today or 0)
+    avg_seconds = res_secs / res_n if res_n else None
     return OverviewMetrics(
-        total_cases=total,
-        open_cases=open_cases,
-        resolved_cases=status_counts.get("resolved", 0),
-        closed_cases=status_counts.get("closed", 0),
-        cancelled_cases=status_counts.get("cancelled", 0),
-        avg_resolution_hours=avg_hours,
+        total_cases=sum(by_status.values()),
+        open_cases=sum(by_status.get(s, 0) for s in _OPEN_STATUSES),
+        resolved_cases=by_status.get("resolved", 0),
+        closed_cases=by_status.get("closed", 0),
+        cancelled_cases=by_status.get("cancelled", 0),
+        avg_resolution_hours=round(avg_seconds / 3600, 1) if avg_seconds else None,
         cases_created_today=created_today,
         cases_resolved_today=resolved_today,
     )
 
 
-async def _get_status_breakdown(
-    session: AsyncSession, base_filter: list
-) -> list[StatusBreakdown]:
-    q = (
-        select(
-            CaseInstanceModel.status,
-            func.count().label("cnt"),
-        )
-        .group_by(CaseInstanceModel.status)
-        .order_by(func.count().desc())
-    )
-    for f in base_filter:
-        q = q.where(f)
-    result = await session.execute(q)
-    return [StatusBreakdown(status=r.status, count=r.cnt) for r in result.all()]
+def _sum_by(rows: list, attr: str) -> list[tuple[Any, int]]:
+    totals: dict[Any, int] = {}
+    for r in rows:
+        k = getattr(r, attr)
+        totals[k] = totals.get(k, 0) + r.cnt
+    return sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
 
 
-async def _get_priority_breakdown(
-    session: AsyncSession, base_filter: list
-) -> list[PriorityBreakdown]:
-    q = (
-        select(
-            CaseInstanceModel.priority,
-            func.count().label("cnt"),
-        )
-        .group_by(CaseInstanceModel.priority)
-        .order_by(func.count().desc())
-    )
-    for f in base_filter:
-        q = q.where(f)
-    result = await session.execute(q)
-    return [PriorityBreakdown(priority=r.priority, count=r.cnt) for r in result.all()]
+def _status_from(rows: list) -> list[StatusBreakdown]:
+    return [StatusBreakdown(status=k, count=n) for k, n in _sum_by(rows, "status")]
 
 
-async def _get_case_type_breakdown(
-    session: AsyncSession, base_filter: list
-) -> list[CaseTypeBreakdown]:
-    q = (
-        select(
-            CaseInstanceModel.case_type_id,
-            CaseTypeModel.name.label("ct_name"),
-            func.count().label("cnt"),
-        )
-        .join(CaseTypeModel, CaseInstanceModel.case_type_id == CaseTypeModel.id)
-        .group_by(CaseInstanceModel.case_type_id, CaseTypeModel.name)
-        .order_by(func.count().desc())
-    )
-    for f in base_filter:
-        q = q.where(f)
-    result = await session.execute(q)
+def _priority_from(rows: list) -> list[PriorityBreakdown]:
+    return [PriorityBreakdown(priority=k, count=n) for k, n in _sum_by(rows, "priority")]
+
+
+async def _case_types_from(session: AsyncSession, rows: list) -> list[CaseTypeBreakdown]:
+    """Counts per case type, named. A case whose type the caller cannot see is
+    left out, as the old INNER JOIN on case_types (tenant-scoped) did."""
+    totals = _sum_by(rows, "case_type_id")
+    ids = [k for k, _ in totals if k is not None]
+    if not ids:
+        return []
+    names = {
+        r.id: r.name
+        for r in (await session.execute(
+            select(CaseTypeModel.id, CaseTypeModel.name).where(CaseTypeModel.id.in_(ids))
+        )).all()
+    }
     return [
-        CaseTypeBreakdown(
-            case_type_id=str(r.case_type_id),
-            case_type_name=r.ct_name,
-            count=r.cnt,
-        )
-        for r in result.all()
+        CaseTypeBreakdown(case_type_id=str(k), case_type_name=names[k], count=n)
+        for k, n in totals if k in names
     ]
 
 
@@ -386,9 +428,19 @@ async def _get_sla_compliance(
 async def _get_assignment_metrics(
     session: AsyncSession, case_type_id: uuid.UUID | None
 ) -> AssignmentMetrics:
+    completion = duration_seconds(session, CaseAssignmentModel.assigned_at,
+                                  CaseAssignmentModel.completed_at)
+    unclaimed = sa_case(
+        (and_(CaseAssignmentModel.status == "active",
+              CaseAssignmentModel.claimed_at.is_(None)), 1),
+        else_=0,
+    )
     base = select(
         CaseAssignmentModel.status,
         func.count().label("cnt"),
+        func.count(completion).label("done_n"),
+        func.sum(completion).label("done_secs"),
+        func.sum(unclaimed).label("unclaimed"),
     ).group_by(CaseAssignmentModel.status)
 
     if case_type_id:
@@ -397,39 +449,28 @@ async def _get_assignment_metrics(
             CaseAssignmentModel.case_id == CaseInstanceModel.id,
         ).where(CaseInstanceModel.case_type_id == case_type_id)
 
-    result = await session.execute(base)
-    counts = {r.status: r.cnt for r in result.all()}
-
-    total = sum(counts.values())
-    active = counts.get("active", 0)
-    completed = counts.get("completed", 0)
-
-    # Avg completion time
-    avg_q = select(
-        func.avg(
-            duration_seconds(session, CaseAssignmentModel.assigned_at,
-                             CaseAssignmentModel.completed_at)
-        )
-    ).where(CaseAssignmentModel.completed_at.isnot(None))
-    if case_type_id:
-        avg_q = avg_q.join(
-            CaseInstanceModel,
-            CaseAssignmentModel.case_id == CaseInstanceModel.id,
-        ).where(CaseInstanceModel.case_type_id == case_type_id)
-    avg_secs = (await session.execute(avg_q)).scalar_one()
+    rows = (await session.execute(base)).all()
+    counts = {r.status: r.cnt for r in rows}
+    done_n = sum(r.done_n or 0 for r in rows)
+    done_secs = sum(float(r.done_secs or 0) for r in rows)
+    avg_secs = done_secs / done_n if done_n else None
     avg_hours = round(avg_secs / 3600, 1) if avg_secs else None
 
-    # Unassigned (queue-type, not claimed)
-    unassigned_q = select(func.count()).select_from(CaseAssignmentModel).where(
-        CaseAssignmentModel.status == "active",
-        CaseAssignmentModel.claimed_at.is_(None),
-    )
-    unassigned = (await session.execute(unassigned_q)).scalar_one()
+    if case_type_id:
+        # Unassigned has always been counted across every case type, filter
+        # or not; keep that answer.
+        unassigned_q = select(func.count()).select_from(CaseAssignmentModel).where(
+            CaseAssignmentModel.status == "active",
+            CaseAssignmentModel.claimed_at.is_(None),
+        )
+        unassigned = (await session.execute(unassigned_q)).scalar_one()
+    else:
+        unassigned = sum(int(r.unclaimed or 0) for r in rows)
 
     return AssignmentMetrics(
-        total_assignments=total,
-        active=active,
-        completed=completed,
+        total_assignments=sum(counts.values()),
+        active=counts.get("active", 0),
+        completed=counts.get("completed", 0),
         avg_completion_hours=avg_hours,
         unassigned=unassigned,
     )
@@ -576,6 +617,7 @@ async def list_saved_reports(
     rows = (await session.execute(
         select(SavedReportModel).order_by(desc(SavedReportModel.created_at))
     )).scalars().all()
+    rows = [r for r in rows if await _rpt_visible(session, _, r)]
     return {"reports": [_rpt(r) for r in rows], "total": len(rows)}
 
 
@@ -606,7 +648,7 @@ async def get_saved_report(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    return _rpt(await _rpt_or_404(session, report_id))
+    return _rpt(await _rpt_or_404(session, report_id, _))
 
 
 @router.delete("/reports/{report_id}", status_code=204)
@@ -615,7 +657,7 @@ async def delete_saved_report(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    r = await _rpt_or_404(session, report_id)
+    r = await _rpt_or_404(session, report_id, _, write=True)
     await session.delete(r)
     await session.commit()
 
@@ -623,10 +665,10 @@ async def delete_saved_report(
 @router.get("/reports/{report_id}/run")
 async def run_saved_report(
     report_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_ro_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    r = await _rpt_or_404(session, report_id)
+    r = await _rpt_or_404(session, report_id, _)
     result = (await nl_query(r.query_def.get("question", ""), session)
               if r.query_type == "nl"
               else await run_structured(r.query_def, session))
@@ -635,14 +677,27 @@ async def run_saved_report(
     return result
 
 
+async def _scoped_cutoff_session(request: Request,
+                                 session: AsyncSession = Depends(get_analytics_cutoff_session)) -> AsyncSession:
+    """The export's cutoff session (R5d 11b), scoped to the caller's tenant like
+    every analytics session. analytics-service scopes by MARKING sessions
+    (tenancy.orm_scope), and the app-level `_tenant_scope` marks only the
+    `get_replica_session` / `get_analytics_session` objects — a session from any
+    other dependency reads every tenant (found in 11b: another tenant's saved
+    report ran)."""
+    from velaris_shared.tenancy.orm_scope import scope_session_to_caller
+    await scope_session_to_caller(request, session)
+    return session
+
+
 @router.get("/reports/{report_id}/export")
 async def export_saved_report(
     report_id: uuid.UUID,
     format: str = Query("csv", pattern="^(csv|json)$"),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(_scoped_cutoff_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    r = await _rpt_or_404(session, report_id)
+    r = await _rpt_or_404(session, report_id, _)
     result = (await nl_query(r.query_def.get("question", ""), session)
               if r.query_type == "nl"
               else await run_structured(r.query_def, session))
@@ -689,10 +744,35 @@ async def odata_feed(
     return odata_response(records)
 
 
-async def _rpt_or_404(session, report_id):
+async def _rpt_visible(session, user, r) -> bool:
+    """2026-11-04: saved reports had no read rule at all — every tenant's,
+    private ones included, to any signed-in user. A report is visible in its
+    own tenant (a tenant-less one is the default tenant's) and, there, to its
+    creator or to everyone when public. The platform operator sees all."""
+    from velaris_shared.tenancy.identity import (
+        DEFAULT_TENANT, is_platform_operator, same_tenant,
+    )
+    if await is_platform_operator(session, user):
+        return True
+    owner = r.tenant_id or DEFAULT_TENANT
+    if not await same_tenant(session, owner, getattr(user, "tenant_id", None) or DEFAULT_TENANT):
+        return False
+    return bool(r.is_public) or _is_creator(user, r)
+
+
+def _is_creator(user, r) -> bool:
+    return r.created_by is not None and r.created_by in {
+        str(getattr(user, "user_id", "")), str(getattr(user, "username", ""))}
+
+
+async def _rpt_or_404(session, report_id, user=None, *, write: bool = False):
     r = await session.get(SavedReportModel, report_id)
-    if not r:
+    if not r or (user is not None and not await _rpt_visible(session, user, r)):
         raise HTTPException(404, f"Report {report_id} not found")
+    if write and user is not None and not _is_creator(user, r):
+        from velaris_shared.tenancy.identity import is_platform_operator
+        if not await is_platform_operator(session, user):
+            raise HTTPException(403, "Only the report's creator can delete it.")
     return r
 
 

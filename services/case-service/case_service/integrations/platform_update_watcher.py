@@ -187,6 +187,12 @@ class PlatformUpdateWatcher:
         from case_service.push.service import send_to_user
 
         logger.info("platform-update notify: %s — %s", title, body)
+        # Also to the operator's alert address, when configured (off when unset).
+        try:
+            from case_service.mail.operator_alerts import send_operator_alert
+            await send_operator_alert(title, body)
+        except Exception as exc:
+            logger.debug("platform-update alert email skipped: %s", exc)
         try:
             async with self._factory() as session:
                 users = (await session.execute(

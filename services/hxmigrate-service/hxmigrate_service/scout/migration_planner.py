@@ -66,7 +66,7 @@ def build_migration_plan(scan: ScanResult) -> dict[str, Any]:
         recommendations.append({
             "severity": "critical",
             "title": f"{len(artifacts_by_compat['incompatible'])} incompatible artifacts",
-            "description": "These features have no HELIX equivalent and require a different approach.",
+            "description": "These features have no Velaris equivalent and require a different approach.",
         })
     if artifacts_by_compat["low"]:
         recommendations.append({

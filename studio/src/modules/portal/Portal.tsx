@@ -11,7 +11,10 @@ import CaseDetail from "./CaseDetail";
 import { clearCustomerToken, downloadMyData, setNotifyEmail, slideSession } from "./portalApi";
 import { portalErrorText } from "./portalError";
 import { flushPending, listPending, onQueueChange, queueSubmission, registerPortalPwa } from "./portalOffline";
-import { PortalFormField, getCaseTypeForm, postAskFeedback } from "./portalApi";
+import { postAskFeedback, getCaseTypeFormDefinition } from "./portalApi";
+import PortalFormFields from "../form-builder/PortalFormFields";
+import { portalFetcher } from "../form-builder/refOptions";
+import { validateForm } from "../form-builder/validate";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -150,8 +153,10 @@ export default function Portal() {
   const [pendingCount, setPendingCount] = useState(0);
 
   // Portal v2 (P5) — Form Builder fields attached to the selected case type
-  const [formFields, setFormFields] = useState<PortalFormField[]>([]);
-  const [formData, setFormData] = useState<Record<string, string>>({});
+  // The case type's Form Builder form (Portal v2 P5; drawn with the shared renderer since part 10).
+  const [formDef, setFormDef] = useState<any | null>(null);
+  const [formData, setFormData] = useState<Record<string, any>>({});
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
   // P65 — Customer account auth
   const [custToken, setCustToken]         = useState<string | null>(null);
@@ -231,9 +236,16 @@ export default function Portal() {
   }, [view, custToken, slug]);
 
   useEffect(() => {
-    if (!slug || !caseTypeId) { setFormFields([]); return; }
-    getCaseTypeForm(slug, caseTypeId).then(setFormFields).catch(() => setFormFields([]));
-    setFormData({});
+    if (!slug || !caseTypeId) { setFormDef(null); return; }
+    setFormData({}); setFormErrors({});
+    getCaseTypeFormDefinition(slug, caseTypeId).then(def => {
+      setFormDef(def);
+      // Defaults fill the form when it opens, as in Studio.
+      const d: Record<string, any> = {};
+      for (const sec of def?.sections ?? []) for (const f of sec.fields ?? [])
+        if (f.default_value !== undefined && f.default_value !== null) d[f.field_key] = f.default_value;
+      setFormData(d);
+    }).catch(() => setFormDef(null));
   }, [slug, caseTypeId]);
 
   useEffect(() => {
@@ -334,19 +346,34 @@ export default function Portal() {
     if (!caseTypeId || !name.trim() || !email.trim() || !subject.trim() || !description.trim()) {
       setSubmitErr("All fields are required."); return;
     }
-    const missing = formFields.filter(f => f.required && !String(formData[f.key] ?? "").trim());
-    if (missing.length) {
-      setSubmitErr(`Please fill in: ${missing.map(f => f.label).join(", ")}`); return;
+    // The same check the server runs on submit (velaris_shared/forms).
+    let extra: Record<string, any> | null = null;
+    if (formDef) {
+      const { clean, errors } = validateForm(formDef.sections, formData);
+      setFormErrors(errors);
+      if (Object.keys(errors).length) { setSubmitErr("Please check the highlighted fields."); return; }
+      extra = clean;
     }
     setSubmitting(true); setSubmitErr(null);
     const payload = { case_type_id: caseTypeId, submitter_name: name, submitter_email: email,
                       subject, description, priority,
-                      ...(formFields.length ? { extra_data: formData } : {}) };
+                      ...(extra ? { extra_data: extra } : {}) };
     try {
       const r = await fetch(`/api/v1/portal/${slug}/submit`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (r.status === 422) {
+        // The server's check found something the page did not: show it on the field.
+        const d = await r.json().catch(() => ({}));
+        const fe = d?.detail?.field_errors;
+        if (Array.isArray(fe)) {
+          setFormErrors(Object.fromEntries(fe.map((e: any) => [e.field_key, e.message])));
+          setSubmitErr("Please check the highlighted fields.");
+          return;
+        }
+        throw new Error(typeof d?.detail === "string" ? d.detail : d?.detail?.message || "Please check the form.");
+      }
       if (!r.ok) throw new Error(await r.text());
       setSubmitResult(await r.json());
     } catch (err: any) {
@@ -783,29 +810,17 @@ export default function Portal() {
                     placeholder="Please describe your request in detail…"
                     rows={5} style={{ ...C.input, resize: "vertical" }} required />
 
-                  {/* Portal v2 (P5): case-type form (Form Builder) */}
-                  {formFields.map(f => (
-                    <div key={f.key}>
-                      <div style={C.label}>{f.label}{f.required ? " *" : ""}</div>
-                      {f.type === "textarea" ? (
-                        <textarea rows={3} value={formData[f.key] ?? ""} placeholder={f.placeholder}
-                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
-                          style={{ ...C.input, resize: "vertical" }} />
-                      ) : f.type === "select" && f.options.length > 0 ? (
-                        <select value={formData[f.key] ?? ""}
-                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
-                          style={C.input}>
-                          <option value="">Select…</option>
-                          {f.options.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      ) : (
-                        <input type={["number", "date", "email"].includes(f.type) ? f.type : "text"}
-                          value={formData[f.key] ?? ""} placeholder={f.placeholder}
-                          onChange={e => setFormData(d => ({ ...d, [f.key]: e.target.value }))}
-                          style={C.input} />
-                      )}
+                  {/* Portal v2 (P5): case-type form (Form Builder), drawn by the shared renderer. */}
+                  {formDef && (
+                    <div style={{ margin: "14px 0" }}>
+                      <PortalFormFields definition={formDef} values={formData} errors={formErrors}
+                        fetcher={slug && caseTypeId ? portalFetcher(slug, caseTypeId) : undefined}
+                        onChange={(k, v) => {
+                          setFormData(d => ({ ...d, [k]: v }));
+                          setFormErrors(e => { if (!e[k]) return e; const n = { ...e }; delete n[k]; return n; });
+                        }} />
                     </div>
-                  ))}
+                  )}
 
                   <div style={C.label}>Priority</div>
                   <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
@@ -826,7 +841,7 @@ export default function Portal() {
                     <button type="button" onClick={() => setStep(1)} style={{ ...C.secondary, flexShrink: 0 }}>← Back</button>
                     <button type="submit" disabled={submitting}
                       style={{ ...C.primary(brand), flex: 1, justifyContent: "center", opacity: submitting ? 0.7 : 1 }}>
-                      {submitting ? "Submitting…" : "Submit Request"}
+                      {submitting ? "Submitting…" : formDef?.settings?.submit_label || "Submit Request"}
                     </button>
                   </div>
                 </form>

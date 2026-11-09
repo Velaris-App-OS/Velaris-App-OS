@@ -356,6 +356,7 @@ class CaseInstanceModel(Base):
         Index("idx_cases_parent", "parent_case_id"),
         Index("idx_cases_urgency", "urgency_score"),
         Index("idx_cases_created", "created_at"),
+        Index("idx_cases_created_by", "created_by"),  # migration 228
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1084,6 +1085,14 @@ class SecurityEventModel(Base):
     outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     details: Mapped[dict] = mapped_column(PortableJSON(), default=dict)
     timestamp: Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+    #: Migration 230: the TRUSTED tenant of the signed-in request that raised it;
+    #: NULL = the platform's (raised outside a request, or before 2026-11-04).
+    tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: Migration 231: how many identical events this row stands for. 1 = one
+    #: event (every row before 231). >1 = a summary of refused repeats inside a
+    #: minute (AuditMiddleware). Count events as SUM(repeat_count), not rows.
+    repeat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1,
+                                              server_default="1")
 
 
 class RetentionPolicyModel(Base):
@@ -1966,7 +1975,7 @@ class PortalModel(Base):
     """Named portal configuration — each access group has exactly one portal.
 
     portal_type controls which UI shell is rendered for operators in that group:
-      staff    → full Helix Studio
+      staff    → full Velaris Studio
       manager  → analytics + reporting focused
       admin    → system administration console
       customer → external customer self-service (public portal)
@@ -2152,7 +2161,7 @@ class TraceEventModel(Base):
 # <<< P46 HxStream
 
 
-# >>> P41 HxGraph — Helix Native Knowledge Graph
+# >>> P41 HxGraph — Velaris Native Knowledge Graph
 
 class GraphNodeModel(Base):
     """One node in the HxGraph knowledge graph.
@@ -2230,7 +2239,7 @@ class GraphEdgeModel(Base):
 # >>> P42 HxNexus Polyglot Intelligence
 
 class BpmConceptModel(Base):
-    """One BPM concept → Helix mapping in the polyglot knowledge base."""
+    """One BPM concept → Velaris mapping in the polyglot knowledge base."""
 
     __tablename__ = "bpm_concepts"
     __table_args__ = (
@@ -2268,7 +2277,7 @@ class GeneratedDocModel(Base):
 # >>> P43 App Registry
 
 class AppPackageModel(Base):
-    """A versioned snapshot of the full Helix platform state."""
+    """A versioned snapshot of the full Velaris platform state."""
 
     __tablename__ = "app_packages"
     __table_args__ = (
@@ -2755,7 +2764,7 @@ class SyncRunModel(Base):
 
 
 class SyncFieldMappingModel(Base):
-    """Maps a Helix case field to a DWH column with optional transform."""
+    """Maps a Velaris case field to a DWH column with optional transform."""
 
     __tablename__ = "sync_field_mappings"
 
@@ -2774,7 +2783,7 @@ class SyncFieldMappingModel(Base):
 
 
 class SyncRedactionRuleModel(Base):
-    """PII redaction rule: hash/drop/mask a field before it leaves Helix."""
+    """PII redaction rule: hash/drop/mask a field before it leaves Velaris."""
 
     __tablename__ = "sync_redaction_rules"
 
@@ -2931,7 +2940,7 @@ class SecurityRuleModel(Base):
 
 
 class SecurityIncidentModel(Base):
-    """A detected fraud/abuse event — a first-class Helix incident record."""
+    """A detected fraud/abuse event — a first-class Velaris incident record."""
 
     __tablename__ = "security_incidents"
     __table_args__ = (
@@ -3199,7 +3208,7 @@ class DocStorageRouteModel(Base):
 # <<< P53 HxConnect: Developer & Custom Connectors
 
 class WebhookReceiverRuleModel(Base):
-    """Routing rule: map inbound webhook payload to a Helix case."""
+    """Routing rule: map inbound webhook payload to a Velaris case."""
 
     __tablename__ = "webhook_receiver_rules"
     __table_args__ = (
@@ -3512,7 +3521,7 @@ class DeploymentHealthCheckModel(Base):
 # <<< P56 HxWork: Kanban + Sprint Board
 
 class HxWorkBoardModel(Base):
-    """A Kanban/Sprint board backed by a Helix case type."""
+    """A Kanban/Sprint board backed by a Velaris case type."""
 
     __tablename__ = "hxwork_boards"
     __table_args__ = (
@@ -3808,7 +3817,7 @@ class HxDocsArticleVersionModel(Base):
 # ═══════════════════════════════════════════════════════════════════
 
 class ArtifactBranchModel(Base):
-    """A named branch of a Helix artifact (case type, form, etc.) or full app package,
+    """A named branch of a Velaris artifact (case type, form, etc.) or full app package,
     pulled from a remote environment for review and merge into dev main."""
 
     __tablename__ = "artifact_branches"
@@ -3936,8 +3945,32 @@ class HelixUserModel(Base):
     created_at:               Mapped[datetime]       = mapped_column(MicroDateTime(), default=_utcnow)
     updated_at:               Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     last_login_at:            Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A deleted account (mig 223): refused everywhere at once, kept — username
+    # reserved — until purge_after, then purged (velaris_shared.identity.lifecycle).
+    # NULL = not deleted.
+    deleted_at:               Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by:               Mapped[str | None]     = mapped_column(String(255), nullable=True)
+    purge_after:              Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deleted_meta:             Mapped[str | None]     = mapped_column(Text, nullable=True)
+    # Tokens issued before this are refused — "sign out everywhere" (a delete
+    # sets it, so an undo does not revive the sessions it ended). NULL = none.
+    tokens_valid_after:       Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     otps: Mapped[list["AuthOtpModel"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class DeletionLedgerModel(Base):
+    """The deletion ledger's outbox (mig 224): a purged account's signed record,
+    queued in the purge's own transaction, then written to .deletions/ — the
+    ledger itself lives outside the database (velaris_shared.identity.ledger)."""
+
+    __tablename__ = "deletion_ledger"
+
+    id:         Mapped[uuid.UUID]       = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    account_id: Mapped[uuid.UUID]       = mapped_column(GUID(), nullable=False, unique=True)
+    record:     Mapped[str]             = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime]        = mapped_column(MicroDateTime(), default=_utcnow)
+    written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class AuthOtpModel(Base):
@@ -5044,6 +5077,25 @@ class BackupRecordModel(Base):
     recorded_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class StandbyEventModel(Base):
+    """HxDR — one event of the standby link: link, unlink, promote (mig 222).
+
+    Recorded by the host tool (standby-velaris.sh → compliance/standby_cli.py).
+    In the database, so the history travels with the data across a switch-over.
+    `detail` is JSON: replication states, LSNs, what a promote could not bring.
+    """
+
+    __tablename__ = "dr_standby_events"
+    __table_args__ = (Index("ix_dr_standby_events_at", "occurred_at"),)
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    event:       Mapped[str]       = mapped_column(String(32), nullable=False)
+    peer:        Mapped[str | None] = mapped_column(String(255), nullable=True)
+    detail:      Mapped[str]       = mapped_column(Text, nullable=False, default="{}")
+    recorded_by: Mapped[str]       = mapped_column(String(64), nullable=False, default="standby-velaris.sh")
+    occurred_at: Mapped[datetime]  = mapped_column(MicroDateTime(), default=_utcnow)
+
+
 class LedgerAccountModel(Base):
     """HxLedger — a chart-of-accounts entry (§8.4, mig 150)."""
 
@@ -5902,6 +5954,59 @@ class HxGuardAuthzGenerationModel(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reason:     Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class PlatformGenerationModel(Base):
+    """Change counters for in-process caches, one row per topic (migration 219).
+
+    Generalises `HxGuardAuthzGenerationModel` (R5e step 5): a change bumps its
+    topic in the same transaction; every process polls all topics and reloads
+    the caches whose counter moved. See `velaris_shared/generations.py`.
+    """
+    __tablename__ = "platform_generations"
+
+    topic:      Mapped[str] = mapped_column(String(40), primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow)
+    reason:     Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class CommerceCaseRequestModel(Base):
+    """A case commerce-service asked case-service to open (migration 220, R5e step 7).
+
+    The request key makes the internal call idempotent; case-service's order
+    sweep uses it to find an order-case whose order was never written.
+    """
+    __tablename__ = "commerce_case_requests"
+    __table_args__ = (
+        Index("ix_commerce_case_requests_case", "case_id"),
+        Index("ix_commerce_case_requests_kind_created", "kind", "created_at"),
+    )
+
+    request_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    kind:        Mapped[str] = mapped_column(String(20), nullable=False)
+    case_id:     Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    created_at:  Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class JobLeaseModel(Base):
+    """Which process may run a background job right now (migration 221, R5e step 9).
+
+    One row per job. Taken when free or expired, renewed while the job runs,
+    released when it stops — so a job runs in one process however many run the
+    platform. See `velaris_shared/jobs/leases.py`.
+    """
+    __tablename__ = "job_leases"
+
+    job:         Mapped[str] = mapped_column(String(80), primary_key=True)
+    holder:      Mapped[str] = mapped_column(String(200), nullable=False)
+    expires_at:  Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow)
+    renewed_at:  Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
 class HxGuardTupleModel(Base):
@@ -9567,7 +9672,7 @@ class CustomerDisclosureModel(Base):
 
 # >>> 198 — case statuses as data, case actions as one dispatcher
 #
-# Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+# Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 #
 # The split these two tables encode: a STATUS is a label the customer's process
 # gives meaning to, so it lives in data and an operator may invent one. An
@@ -9990,6 +10095,55 @@ class LegalHoldModel(Base):
     release_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class LegalHoldSettingModel(Base):
+    """Per-tenant legal-hold settings (mig 218).
+
+    `approver_group_id` names the access group whose member must approve a
+    release someone else asked for. No row, or NULL, means a release needs no
+    second person — the behaviour before 218. Deliberately not a foreign key:
+    deleting the group must not switch the rule off.
+    """
+    __tablename__ = "legal_hold_settings"
+
+    tenant_id:         Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    approver_group_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    updated_by:        Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at:        Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+
+
+class LegalHoldReleaseRequestModel(Base):
+    """A request to release a legal hold, waiting for a second person (mig 218).
+
+    One open request per hold: `pending_key` is the hold id while pending and
+    NULL once decided — the same portable partial-unique trick as
+    `legal_holds.active_key`. Rows are never deleted; a decided request is the
+    record of who asked and who agreed.
+    """
+    __tablename__ = "legal_hold_release_requests"
+    __table_args__ = (
+        Index("ux_lh_release_requests_pending", "pending_key", unique=True),
+        Index("ix_lh_release_requests_hold", "hold_id", "status"),
+    )
+
+    id:                Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    hold_id:           Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("legal_holds.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:         Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    #: pending | approved | rejected | withdrawn | superseded
+    status:            Mapped[str] = mapped_column(String(12), nullable=False, default="pending")
+    pending_key:       Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason:            Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by:      Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_at:      Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+    #: The group that had to approve, as it was when the request was made.
+    approver_group_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    decided_by:        Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_at:        Mapped[datetime | None] = mapped_column(MicroDateTime(), nullable=True)
+    decision_note:     Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 # 8e (mig 214): an ORM change of owner moves the uniqueness key with it, as for
 # case types. A Core UPDATE of `tenant_id` must set `tenant_key` itself.
 def _inherited_tenant_key_follows(target, value, _old, _initiator):
@@ -9998,3 +10152,119 @@ def _inherited_tenant_key_follows(target, value, _old, _initiator):
 
 for _m in (FormDefinitionModel, RuleDefinitionModel, DataModelModel, BusinessCalendarModel):
     event.listen(_m.tenant_id, "set", _inherited_tenant_key_follows)
+
+
+class ReferenceTableModel(Base):
+    """A reference table — an admin-managed list a form reads (mig 225, Form Builder v2).
+
+    Branches, products, price bands: the same table feeds dropdowns, search
+    boxes and cascading options, and can fill other fields from the chosen
+    row. `columns` is `[{key, label, type}]`; the rows are `reference_rows`.
+    A tenant's table is its own; a NULL tenant is a platform table every
+    tenant reads and only the platform operator changes (path guard).
+    """
+    __tablename__ = "reference_tables"
+    __table_args__ = (
+        UniqueConstraint("tenant_key", "name", name="ux_reference_tables_tenant_name"),
+        Index("ix_reference_tables_tenant", "tenant_id"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:   Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    #: `str(tenant_id)` or "platform" — the namespace a name is unique in.
+    tenant_key:  Mapped[str] = mapped_column(String(64), nullable=False, default="platform")
+    name:        Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    columns:     Mapped[list] = mapped_column(PortableJSON(), nullable=False, default=list)
+    row_count:   Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by:  Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:  Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+    updated_at:  Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow, onupdate=_utcnow)
+
+
+class ReferenceRowModel(Base):
+    """One row of a reference table (mig 225). `data` is `{column key: value}`;
+    `search_text` is its values, lower-cased, for the search box."""
+    __tablename__ = "reference_rows"
+    __table_args__ = (
+        Index("ix_reference_rows_table", "table_id", "sort_order"),
+    )
+
+    id:          Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    table_id:    Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("reference_tables.id", ondelete="CASCADE"), nullable=False)
+    sort_order:  Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    data:        Mapped[dict] = mapped_column(PortableJSON(), nullable=False, default=dict)
+    search_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_active:   Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class FormSectionModel(Base):
+    """A reusable form section (mig 226, Form Builder §5 step 6).
+
+    `section_json` is `{title, description, fields}`. A form links it
+    (`section.section_ref = {id, version}`) and holds a copy of the fields;
+    saving the section bumps `version` and updates every linked form. A NULL
+    tenant is a platform section every tenant reads and only the operator changes.
+    """
+    __tablename__ = "form_sections"
+    __table_args__ = (
+        UniqueConstraint("tenant_key", "name", name="ux_form_sections_tenant_name"),
+        Index("ix_form_sections_tenant", "tenant_id"),
+    )
+
+    id:           Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    tenant_id:    Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    tenant_key:   Mapped[str] = mapped_column(String(64), nullable=False, default="platform")
+    name:         Mapped[str] = mapped_column(String(100), nullable=False)
+    description:  Mapped[str] = mapped_column(Text, nullable=False, default="")
+    version:      Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    section_json: Mapped[dict] = mapped_column(PortableJSON(), nullable=False, default=dict)
+    updated_by:   Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at:   Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+    updated_at:   Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow, onupdate=_utcnow)
+
+
+class FormSnapshotModel(Base):
+    """An unchangeable copy of a form as one or more cases used it (mig 226).
+    One row per distinct content (`content_hash`); kept when the form is deleted."""
+    __tablename__ = "form_snapshots"
+    __table_args__ = (
+        UniqueConstraint("form_id", "content_hash", name="ux_form_snapshots_form_hash"),
+    )
+
+    id:              Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=_new_uuid)
+    form_id:         Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    tenant_id:       Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    content_hash:    Mapped[str] = mapped_column(String(64), nullable=False)
+    name:            Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    definition_json: Mapped[dict] = mapped_column(PortableJSON(), nullable=False, default=dict)
+    created_at:      Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+
+
+class CaseFormVersionModel(Base):
+    """Which snapshot of a form a case reads (mig 226) — set the first time the
+    case uses a form whose settings say `versioning: "per_case"`."""
+    __tablename__ = "case_form_versions"
+
+    case_id:     Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), primary_key=True)
+    form_id:     Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("form_snapshots.id"), nullable=False)
+    pinned_at:   Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow)
+
+
+class FormDraftModel(Base):
+    """A person's unfinished answers to a case's form (mig 227, Form Builder §5 step 7).
+    Never validated, read by its owner only, removed when they submit."""
+    __tablename__ = "form_drafts"
+    __table_args__ = (Index("ix_form_drafts_user", "user_id"),)
+
+    case_id:     Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("case_instances.id", ondelete="CASCADE"), primary_key=True)
+    form_id:     Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True)
+    user_id:     Mapped[str] = mapped_column(String(255), primary_key=True)
+    values_json: Mapped[dict] = mapped_column(PortableJSON(), nullable=False, default=dict)
+    updated_at:  Mapped[datetime] = mapped_column(MicroDateTime(), default=_utcnow, onupdate=_utcnow)

@@ -1,7 +1,7 @@
 /**
  * The bulk action bar — the visible half of B3.
  *
- * Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+ * Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
  *
  * Three things this component exists to get right, all of which are about
  * partial failure rather than about the happy path:

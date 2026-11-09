@@ -30,6 +30,8 @@ const USER_ID_RE = /^[a-zA-Z0-9._@-]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TZ_RE = /^[A-Za-z][A-Za-z0-9_/+-]*$/;
 
+type Account = { user_id: string; username: string; deleted_at: string | null; purge_after: string | null };
+
 function _authHdr(): Record<string, string> {
   const t = getAccessToken();
   return t ? { Authorization: `Bearer ${t}` } : {};
@@ -79,6 +81,11 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ created: number; scanned: number; new_user_ids: string[] } | null>(null);
 
+  // Sign-in accounts by username (admin only): the account delete / undo
+  // works on these (Nov_TODO "User deletion v2"); without the right the
+  // actions simply do not show.
+  const [accounts, setAccounts] = useState<Record<string, Account>>({});
+
   // ── Autocomplete data ─────────────────────────────────────────
   const [allRoles, setAllRoles]   = useState<{ id: string; name: string }[]>([]);
   const [allGroups, setAllGroups] = useState<{ id: string; name: string }[]>([]);
@@ -92,6 +99,44 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
       const data = await apiJSON<Entry[]>(`/api/v1/user-directory?${params}`);
       setEntries(data);
     } catch (e: any) { setErr(e.message); setErrObj(e); }
+    try {
+      const acc = await apiJSON<{ users: Account[] }>("/api/v1/auth/real/users");
+      setAccounts(Object.fromEntries(acc.users.map(a => [a.username, a])));
+    } catch { setAccounts({}); }
+  }
+
+  async function deleteAccount(u: Entry, permanent: boolean) {
+    const acc = accounts[u.user_id];
+    if (!acc) return;
+    if (permanent) {
+      const typed = prompt(`Delete ${u.user_id} PERMANENTLY now? This cannot be undone: their access, `
+        + `memberships and personal data are removed (case history stays). Type the user ID to confirm.`);
+      if (typed !== u.user_id) return;
+    } else if (!confirm(`Delete ${u.user_id}? They are signed out everywhere at once. You can undo this `
+        + `until the account is removed for good (by default 30 days).`)) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch(`/api/v1/auth/real/users/${acc.user_id}${permanent ? "?permanent=true" : ""}`,
+                            { method: "DELETE", headers: _authHdr() });
+      if (!r.ok) {
+        let detail = `Delete failed: ${r.status}`;
+        try { detail = (await r.json())?.detail ?? detail; } catch { /* keep the status */ }
+        throw new Error(detail);
+      }
+      await load();
+    } catch (e: any) { setErr(e.message); setErrObj(e); }
+    finally { setBusy(false); }
+  }
+
+  async function undoDelete(u: Entry) {
+    const acc = accounts[u.user_id];
+    if (!acc || !confirm(`Restore ${u.user_id}? They will need to sign in again.`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await apiJSON(`/api/v1/auth/real/users/${acc.user_id}/restore`, { method: "POST" });
+      await load();
+    } catch (e: any) { setErr(e.message); setErrObj(e); }
+    finally { setBusy(false); }
   }
 
   async function loadAutocompleteData() {
@@ -294,14 +339,25 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
             <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
               {u.access_group_ids.length ? u.access_group_ids.map(g => <Chip key={g}>{allGroups.find(ag => ag.id === g)?.name || g}</Chip>) : <span style={{ color: "var(--text-muted)" }}>—</span>}
             </div>
-            <span style={{ fontSize: 11, fontWeight: 600, color: u.is_active ? "var(--status-completed)" : "var(--text-muted)" }}>
-              {u.is_active ? "Active" : "Inactive"}
-            </span>
-            <div style={{ display: "flex", gap: 4 }}>
-              <button onClick={() => { setEditing({ ...u }); setValidationErr(null); }} style={btn()}>Edit</button>
-              {u.is_active
-                ? <button onClick={() => deactivate(u.user_id)} style={{ ...btn(), color: "var(--status-failed)", borderColor: "color-mix(in srgb, var(--status-failed) 30%, var(--border-default))" }}>Deactivate</button>
-                : <button onClick={() => reactivate(u)} style={{ ...btn(), color: "var(--status-completed)", borderColor: "color-mix(in srgb, var(--status-completed) 30%, var(--border-default))" }}>Reactivate</button>}
+            {accounts[u.user_id]?.deleted_at
+              ? <span style={{ fontSize: 11, fontWeight: 600, color: "var(--status-failed)" }}
+                      title="Signed out and refused everywhere; removed for good on this date unless restored.">
+                  Deleted — removed {accounts[u.user_id].purge_after ? new Date(accounts[u.user_id].purge_after!).toLocaleDateString() : "soon"}
+                </span>
+              : <span style={{ fontSize: 11, fontWeight: 600, color: u.is_active ? "var(--status-completed)" : "var(--text-muted)" }}>
+                  {u.is_active ? "Active" : "Inactive"}
+                </span>}
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {accounts[u.user_id]?.deleted_at ? <>
+                <button disabled={busy} onClick={() => undoDelete(u)} style={{ ...btn(), color: "var(--status-completed)", borderColor: "color-mix(in srgb, var(--status-completed) 30%, var(--border-default))" }}>Undo delete</button>
+                <button disabled={busy} onClick={() => deleteAccount(u, true)} style={{ ...btn(), color: "var(--status-failed)", borderColor: "color-mix(in srgb, var(--status-failed) 30%, var(--border-default))" }}>Delete now</button>
+              </> : <>
+                <button onClick={() => { setEditing({ ...u }); setValidationErr(null); }} style={btn()}>Edit</button>
+                {u.is_active
+                  ? <button onClick={() => deactivate(u.user_id)} style={{ ...btn(), color: "var(--status-failed)", borderColor: "color-mix(in srgb, var(--status-failed) 30%, var(--border-default))" }}>Deactivate</button>
+                  : <button onClick={() => reactivate(u)} style={{ ...btn(), color: "var(--status-completed)", borderColor: "color-mix(in srgb, var(--status-completed) 30%, var(--border-default))" }}>Reactivate</button>}
+                {accounts[u.user_id] && <button disabled={busy} onClick={() => deleteAccount(u, false)} style={{ ...btn(), color: "var(--status-failed)", borderColor: "color-mix(in srgb, var(--status-failed) 30%, var(--border-default))" }}>Delete…</button>}
+              </>}
             </div>
           </div>
         ))}

@@ -13,7 +13,18 @@ worker_processes auto;
 events { worker_connections 1024; }
 
 http {
-    access_log /dev/stdout;
+    # The default "combined" format with a secret query value blanked: a
+    # socket's `token=` (browsers cannot set headers on a WebSocket, so the
+    # access token rides in the query string), a document `grant=`, a sign-in
+    # `code=`. The default format wrote them in full to the log (2026-10-19).
+    map $request $velaris_request_logged {
+        "~^(?<vx_pre>.*[?&](token|access_token|grant|code)=)[^&\s]*(?<vx_post>.*)$" "${vx_pre}[REDACTED]${vx_post}";
+        default $request;
+    }
+    log_format velaris_combined '$remote_addr - $remote_user [$time_local] '
+                                '"$velaris_request_logged" $status $body_bytes_sent '
+                                '"$http_referer" "$http_user_agent"';
+    access_log /dev/stdout velaris_combined;
     error_log  /dev/stderr;
 
     # ── Extraction seams ──────────────────────────────────────────
@@ -29,6 +40,9 @@ http {
     upstream analytics_service { server 127.0.0.1:${VELARIS_ANALYTICS_PORT}; }  # 13c: EXTRACTED 2026-08-23
     upstream hxgraph_service   { server 127.0.0.1:${VELARIS_HXGRAPH_PORT}; }  # 13d: EXTRACTED 2026-08-23
     upstream hxmigrate_service { server 127.0.0.1:${VELARIS_HXMIGRATE_PORT}; }  # 13e: EXTRACTED 2026-08-23
+    upstream commerce_service  { server 127.0.0.1:${VELARIS_COMMERCE_PORT}; }  # R5e step 7: EXTRACTED 2026-10-19
+    upstream portal_service    { server 127.0.0.1:${VELARIS_PORTAL_PORT}; }    # R5e step 8: EXTRACTED 2026-10-21
+    upstream user_service      { server 127.0.0.1:${VELARIS_USER_PORT}; }      # R5e step 10: EXTRACTED 2026-10-22
 
     map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 
@@ -45,14 +59,50 @@ http {
     # NOT on X-Forwarded-For: a header the client controls is a rate-limit
     # bypass, and behind a real proxy the fix is `set_real_ip_from`, not trust.
     #
+    # That proxy exists on every install: Studio's server runs on this box and
+    # connects from loopback, so until R6 (2026-10-30) every Studio user was ONE
+    # client sharing one bucket — two machines got 28 of 320 requests through
+    # between them. Studio now names the browser's address in X-Velaris-Client
+    # (set by Studio itself, overwriting anything the browser sent). It is
+    # believed from a loopback peer only; anything else is keyed on the peer, so
+    # a loopback caller without the header (a TLS front, a tunnel, a local
+    # script) is one client, as before. The header is stripped, and the services
+    # receive the same address as X-Forwarded-For / X-Real-IP — OVERWRITTEN, not
+    # appended, so an entry a client wrote never reaches them (it used to pick
+    # the services' own per-address limit key).
+    map $remote_addr $velaris_loopback_peer { 127.0.0.1 1; default 0; }
+    # VELARIS_GW_TRUST_CF_CONNECTING_IP=true (operator's choice, 2026-11-04):
+    # from a loopback peer, Cloudflare's Cf-Connecting-Ip names the client, so a
+    # tunnel's internet clients stop sharing one bucket. The switch is a FILE
+    # (options/cf-trust.map, written by start/update from .env), not a template
+    # variable: a glob matching nothing — no file, no mount, an old container —
+    # is off, and never a config nginx refuses.
+    map $velaris_loopback_peer $velaris_cf_trust {
+        default 0;
+        include /etc/nginx/velaris-options/cf-trust*.map;
+    }
+    map "$velaris_cf_trust|$http_cf_connecting_ip" $velaris_cf_client {
+        "~^1\|(?<cfaddr>[0-9A-Fa-f:.]{2,45})$" $cfaddr;
+        default "";
+    }
+    map "$velaris_loopback_peer|$http_x_velaris_client|$velaris_cf_client" $velaris_client {
+        "~^1\|(?<addr>[0-9A-Fa-f:.]{2,45})\|" $addr;
+        "~^1\|\|(?<cfaddr2>[0-9A-Fa-f:.]{2,45})$" $cfaddr2;
+        default $remote_addr;
+    }
+    #
     # Two zones because the surfaces differ. The portal is anonymous and public
     # and gets the tighter one; the rest of the API is authenticated and its
     # callers are Studio and the SDK, which burst legitimately.
     # The rates are substituted so an operator can raise them without editing a
     # repository file an update would overwrite. Unset (or set empty) renders
     # the values the platform has always shipped — see docker-compose.yml.
-    limit_req_zone $binary_remote_addr zone=velaris_portal:10m rate=${VELARIS_GW_RATE_PORTAL};
-    limit_req_zone $binary_remote_addr zone=velaris_api:10m    rate=${VELARIS_GW_RATE_API};
+    limit_req_zone $velaris_client zone=velaris_portal:10m rate=${VELARIS_GW_RATE_PORTAL};
+    limit_req_zone $velaris_client zone=velaris_api:10m    rate=${VELARIS_GW_RATE_API};
+    # Map tiles (Form Builder Location field, 2026-10-29): static files, and a
+    # map that pans asks for many byte ranges at once — its own budget, so a
+    # map never spends the API's.
+    limit_req_zone $velaris_client zone=velaris_map:10m    rate=50r/s;
     limit_req_status 429;
     limit_req_log_level warn;
 
@@ -66,7 +116,7 @@ http {
     # tight cap here does not stop an attacker so much as break a floor of
     # staff — and this must be safe on an install that takes the update
     # unattended. It is a ceiling on exhaustion, not traffic shaping.
-    limit_conn_zone $binary_remote_addr zone=velaris_ws:10m;
+    limit_conn_zone $velaris_client zone=velaris_ws:10m;
     limit_conn_status 429;
     limit_conn_log_level warn;
 
@@ -97,8 +147,8 @@ http {
 
         # Headers inherited by every location below.
         proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP         $velaris_client;
+        proxy_set_header X-Forwarded-For   $velaris_client;
         proxy_set_header X-Forwarded-Proto $scheme;
         # Workload identity (roadmap #18). Every service refuses a request that
         # does not carry this, so the gateway becomes the only CALLER and not
@@ -123,6 +173,7 @@ http {
         # treat "no secret configured" as "check off". Off stays off; turning it
         # on stays a deliberate operator step.
         proxy_set_header X-Velaris-Gateway "${VELARIS_GATEWAY_IDENTITY_SECRET}";
+        proxy_set_header X-Velaris-Client "";
         proxy_read_timeout 120s;
 
         # ── The rate limit lives HERE, at the server, not in one location ──
@@ -144,7 +195,7 @@ http {
         # never from a hardcoded service address.
         location = /.well-known/velaris-gateway {
             default_type application/json;
-            return 200 '{"gateway_base":"/api/v1","api_version":"1","services":{"analytics":"/api/v1/analytics","process_mining":"/api/v1/process-mining","graph":"/api/v1/graph","hxmigrate":"/api/v1/hxmigrate","importer":"/api/v1/importer","scout":"/api/v1/scout","scout_ai":"/api/v1/scout-ai","orchestrator":"/api/v1/orchestrator"}}';
+            return 200 '{"gateway_base":"/api/v1","api_version":"1","services":{"analytics":"/api/v1/analytics","process_mining":"/api/v1/process-mining","graph":"/api/v1/graph","hxmigrate":"/api/v1/hxmigrate","importer":"/api/v1/importer","scout":"/api/v1/scout","scout_ai":"/api/v1/scout-ai","orchestrator":"/api/v1/orchestrator","checkout":"/api/v1/checkout","payments":"/api/v1/payments","storefront":"/api/v1/storefront","marketplace":"/api/v1/marketplace","model_market":"/api/v1/model-market","portal":"/api/v1/portal"}}';
         }
 
         # ── Extraction sub-prefixes (seams) ───────────────────────
@@ -163,6 +214,24 @@ http {
         location /api/v1/scout         { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://hxmigrate_service; }
         location /api/v1/scout-ai      { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://hxmigrate_service; }
         location /api/v1/orchestrator  { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://hxmigrate_service; }
+        # R5e step 7: the commerce domain. Same prefixes and limits as before —
+        # including the anonymous public storefront and the signed webhooks.
+        location /api/v1/checkout      { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://commerce_service; }
+        location /api/v1/payments      { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://commerce_service; }
+        location /api/v1/storefront    { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://commerce_service; }
+        location /api/v1/marketplace   { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://commerce_service; }
+        location /api/v1/model-market  { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://commerce_service; }
+        # R5e step 10: sign-in and identity. Same prefixes and limits as before.
+        # Trailing slashes and exact matches on purpose: `/api/v1/identity/` also
+        # holds case-service's identity verification, and `POST
+        # /api/v1/auth/switch-context` is case-service's (access groups) — an
+        # exact match beats any prefix, so that one path stays where it was.
+        location /api/v1/auth/                     { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://user_service; }
+        location = /api/v1/auth/switch-context     { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service; }
+        location /api/v1/scim/                     { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://user_service; }
+        location /api/v1/identity/provisioning/    { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://user_service; }
+        location = /api/v1/user-directory          { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://user_service; }
+        location /api/v1/user-directory/           { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://user_service; }
 
         # ── WebSocket (realtime) ──────────────────────────────────
         location /api/v1/realtime {
@@ -173,10 +242,11 @@ http {
             # one, so the full set is repeated here — including the workload
             # identity header, without which the websocket would be refused.
             proxy_set_header Host              $host;
-            proxy_set_header X-Real-IP         $remote_addr;
-            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Real-IP         $velaris_client;
+            proxy_set_header X-Forwarded-For   $velaris_client;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Velaris-Gateway "${VELARIS_GATEWAY_IDENTITY_SECRET}";
+            proxy_set_header X-Velaris-Client "";
             proxy_set_header Upgrade    $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
             proxy_read_timeout 3600s;
@@ -192,10 +262,11 @@ http {
             proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service;
             proxy_http_version 1.1;
             proxy_set_header Host              $host;
-            proxy_set_header X-Real-IP         $remote_addr;
-            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Real-IP         $velaris_client;
+            proxy_set_header X-Forwarded-For   $velaris_client;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Velaris-Gateway "${VELARIS_GATEWAY_IDENTITY_SECRET}";
+            proxy_set_header X-Velaris-Client "";
             proxy_set_header Upgrade           $http_upgrade;
             proxy_set_header Connection        $connection_upgrade;
             proxy_read_timeout 3600s;
@@ -209,10 +280,11 @@ http {
             proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service;
             proxy_http_version 1.1;
             proxy_set_header Host              $host;
-            proxy_set_header X-Real-IP         $remote_addr;
-            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Real-IP         $velaris_client;
+            proxy_set_header X-Forwarded-For   $velaris_client;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Velaris-Gateway "${VELARIS_GATEWAY_IDENTITY_SECRET}";
+            proxy_set_header X-Velaris-Client "";
             proxy_set_header Upgrade           $http_upgrade;
             proxy_set_header Connection        $connection_upgrade;
             proxy_read_timeout 3600s;
@@ -237,6 +309,17 @@ http {
             limit_req zone=velaris_portal burst=20 nodelay;
             proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service;
         }
+        # R5e step 8: the customer portal and its Studio side are portal-service's.
+        # The trailing slash matters: `/api/v1/portals` is a case-service router
+        # and keeps matching the block above (longest prefix wins). Same limit.
+        location /api/v1/portal/ {
+            limit_req zone=velaris_portal burst=20 nodelay;
+            proxy_pass ${VELARIS_UPSTREAM_SCHEME}://portal_service;
+        }
+        location /api/v1/portal-admin/ {
+            limit_req zone=velaris_portal burst=20 nodelay;
+            proxy_pass ${VELARIS_UPSTREAM_SCHEME}://portal_service;
+        }
 
         # Everything else. burst=40 is generous on purpose: this must not be the
         # thing that makes a busy Studio session feel broken, and the point here
@@ -244,6 +327,45 @@ http {
         # /metrics are inside this too — a supervisor polling every few seconds
         # is nowhere near 20r/s, and exempting them by path would hand an
         # attacker an unlimited door.
+        # case-service's internal API (R5e step 7) is for sibling services on
+        # this install only — they call it directly, never through here. Without
+        # this block `location /` below would forward it.
+        location ^~ /internal { return 404; }
+
+        # ── Map tiles (Form Builder Location field, 2026-10-29) ──────
+        # This install's own map, from deploy/map-tiles/ — never a third-party
+        # tile server. Only these two paths are served; with no file there the
+        # answer is 404 and the Location field falls back to coordinates, which
+        # is what every install without tiles gets. nginx serves byte ranges
+        # itself, which is all a PMTiles reader asks for. Public on purpose:
+        # the portal is anonymous and a basemap holds nothing of the tenant's.
+        location = /api/v1/map/basemap.pmtiles {
+            limit_req zone=velaris_map burst=200 nodelay;
+            alias /srv/velaris-map/basemap.pmtiles;
+            expires 1d;
+        }
+        location /api/v1/map/fonts/ {
+            limit_req zone=velaris_map burst=200 nodelay;
+            alias /srv/velaris-map/fonts/;
+            expires 7d;
+        }
+        location /api/v1/map/ { return 404; }
+
+        # /metrics and /health/deep are for a scraper on this host (2026-11-04).
+        # A front on this box — cloudflared (the shipped tunnel example maps
+        # api.<domain> straight here), a host nginx, a TLS terminator — connects
+        # from loopback, so the gateway saw the internet as 127.0.0.1 and served
+        # every tenant's request paths and ids to anyone. A front always says so
+        # in one of these headers; a local scrape (bundled Prometheus) sends
+        # none, and is unchanged.
+        location ~ ^/(metrics|health/deep)$ {
+            if ($http_x_forwarded_for != "")  { return 404; }
+            if ($http_forwarded != "")        { return 404; }
+            if ($http_cf_connecting_ip != "") { return 404; }
+            if ($http_x_velaris_client != "") { return 404; }
+            proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service;
+        }
+
         location / {
             # No limit_req here: it is declared at the server level above and
             # inherited, so the ceiling is stated once for every location
@@ -273,11 +395,12 @@ http {
         # it, where the identity is known.
 
         proxy_set_header Host            $host;
-        proxy_set_header X-Real-IP       $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP       $velaris_client;
+        proxy_set_header X-Forwarded-For $velaris_client;
         # The apps-network edge is still the gateway, so it identifies as one.
         # Without this a bot container returning its work would be refused.
         proxy_set_header X-Velaris-Gateway "${VELARIS_GATEWAY_IDENTITY_SECRET}";
+        proxy_set_header X-Velaris-Client "";
         proxy_read_timeout 30s;
 
         location /api/v1/broker { proxy_pass ${VELARIS_UPSTREAM_SCHEME}://case_service; }

@@ -152,8 +152,15 @@ async def metrics(
     *,
     since: datetime | None = None,
     group_by: str = "model",
+    tenants: list[str] | None = None,
+    include_untenanted: bool = True,
 ) -> dict[str, Any]:
     """Aggregate recorded calls.
+
+    `tenants` (2026-11-04): only these tenant spellings — a tenant's admin
+    sees its own calls. `include_untenanted`: also the calls with no tenant
+    (jobs, and every call before 2026-11-04), which are the default tenant's.
+    None = every call (the platform operator).
 
     `group_by` is one of `model`, `provider`, `purpose`, `route` — the four
     axes a cost question is actually asked along ("which model", "which
@@ -182,12 +189,21 @@ async def metrics(
     ).group_by(column)
     if since is not None:
         q = q.where(LLMCallModel.created_at >= since)
+    scope = None
+    if tenants is not None:
+        from sqlalchemy import or_
+        scope = LLMCallModel.tenant_id.in_(tenants)
+        if include_untenanted:
+            scope = or_(scope, LLMCallModel.tenant_id.is_(None))
+        q = q.where(scope)
 
     rows = (await session.execute(q)).all()
 
     errors_q = select(func.count()).where(LLMCallModel.status != "ok")
     if since is not None:
         errors_q = errors_q.where(LLMCallModel.created_at >= since)
+    if scope is not None:
+        errors_q = errors_q.where(scope)
     errors = (await session.execute(errors_q)).scalar_one()
 
     groups = [{
@@ -215,4 +231,5 @@ async def metrics(
             "reports provider usage. Costs are an order-of-magnitude guide."
         ),
         "groups": groups,
+        "scope": "platform" if tenants is None else "tenant",
     }

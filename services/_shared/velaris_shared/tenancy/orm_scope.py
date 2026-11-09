@@ -56,8 +56,16 @@ def _criteria(scope: dict) -> list:
     cases = select(M.CaseInstanceModel.id).where(
         or_(M.CaseInstanceModel.tenant_id.in_(uuids), M.CaseInstanceModel.tenant_id.is_(None)))
 
+    # `case_id IN (the caller's cases)` and nothing else (R6 soak, 2026-11-02).
+    # It used to add `OR case_id IS NULL`. That branch can never match —
+    # case_id is NOT NULL with a foreign key in all four tables, on PostgreSQL
+    # and MySQL — but it stopped PostgreSQL from planning a hash join: past
+    # work_mem (≈120k cases) it re-read every case for every SLA row, an SLA
+    # count ran for over 8 minutes, and every analytics page timed out. Without
+    # it the plan is one hash join, and a row whose case is not the caller's
+    # (or does not exist) is still excluded — fail closed, as before.
     def by_case(cls):
-        return or_(cls.case_id.in_(cases), cls.case_id.is_(None))
+        return cls.case_id.in_(cases)
 
     out = [
         with_loader_criteria(M.CaseInstanceModel, own_guid, include_aliases=True),
@@ -84,7 +92,7 @@ async def staff_caller(request) -> Any:
     from fastapi import HTTPException
     from fastapi.security import HTTPAuthorizationCredentials
 
-    from velaris_shared.auth.dependencies import get_current_user
+    from velaris_shared.auth.dependencies import get_current_user, is_auth_check_busy
 
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
@@ -92,7 +100,11 @@ async def staff_caller(request) -> Any:
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=header[7:].strip())
     try:
         return await get_current_user(request, creds)
-    except HTTPException:
+    except HTTPException as exc:
+        # A busy database is "try again", not "no caller": scoped to nothing,
+        # the page would show an empty list as though the data were gone.
+        if is_auth_check_busy(exc):
+            raise
         return None
 
 

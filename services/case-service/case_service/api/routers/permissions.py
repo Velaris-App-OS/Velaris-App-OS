@@ -34,6 +34,7 @@ _DEFAULTS: dict[str, list[str]] = {
     # endpoint answers.
     "/case-config":    ["designer", "admin"],
     "/form-builder":   ["designer", "admin"],
+    "/reference-tables": ["designer", "admin"],   # Form Builder v2 step 3
     "/nlp-builder":    ["designer", "admin"],
     "/modeler":        ["designer", "admin"],
     "/app-builder":    ["designer", "admin"],

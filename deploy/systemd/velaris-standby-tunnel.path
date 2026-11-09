@@ -1,0 +1,11 @@
+[Unit]
+Description=Velaris standby — start the tunnel once a main server has linked this one
+
+[Path]
+# `link` writes this file over SSH as the install's owner, who has no sudo here.
+# Watching for it is how a link starts the tunnel without asking for a password.
+PathExists=__VELARIS_DIR__/.standby/tunnel.env
+Unit=velaris-standby-tunnel.service
+
+[Install]
+WantedBy=multi-user.target

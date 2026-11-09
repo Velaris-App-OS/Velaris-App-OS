@@ -1,4 +1,4 @@
-"""HELIX SDK Protocol: Case Manager.
+"""Velaris SDK Protocol: Case Manager.
 
 Defines the contract for case lifecycle management.  The default
 implementation lives in ``case-service``; clients can swap in

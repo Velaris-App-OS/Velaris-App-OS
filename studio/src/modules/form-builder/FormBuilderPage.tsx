@@ -5,6 +5,8 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import FormBuilder, { FormDefinition } from "./FormBuilder";
+import FormPreview from "./FormPreview";
+import { scenarioFrom } from "./Step7Editors";
 import { listForms, createForm, updateForm, deleteForm, createBranch } from "@shared/api/client";
 import { useCommit, useBranchMode, useCurrentUserGroups } from "@shared/hooks";
 import { CommitModal, CommitHistory, BranchModeBanner, ReviewerPicker, OwnershipPill } from "@shared/components";
@@ -45,6 +47,9 @@ export default function FormBuilderPage() {
   const [tab, setTab]           = useState<"build" | "history">("build");
   const [savedDef, setSavedDef] = useState<FormDefinition>(EMPTY_DEF);
   const [restoreBanner, setRestoreBanner] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  // View Form opened to record a test scenario (§5 step 7).
+  const [recordTest, setRecordTest] = useState(false);
   // Branch creation inline state
   const [branchingId, setBranchingId]     = useState<string | null>(null);
   const [branchName, setBranchName]       = useState("");
@@ -235,6 +240,12 @@ export default function FormBuilderPage() {
               + New Form
             </button>
           )}
+          {/* Approving sites moved to Admin > Security > Allowed sites (2026-11-04). */}
+          <button onClick={() => navigate("/allowed-sites")}
+            style={{ width: "100%", marginTop: 6, padding: "5px 0", fontSize: 11, background: "transparent", color: "var(--text-secondary)",
+              border: "1px dashed var(--border-default)", borderRadius: 6, cursor: "pointer" }}>
+            Allowed sites ↗
+          </button>
         </div>
 
         <div style={{ flex: 1, overflow: "auto", padding: 8 }}>
@@ -371,6 +382,12 @@ export default function FormBuilderPage() {
                 ))}
               </div>
 
+              <button onClick={() => setPreviewOpen(true)}
+                title="See the form as the person filling it in does"
+                style={{ padding: "6px 14px", fontSize: 13, fontWeight: 600, background: "var(--bg-surface)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer" }}>
+                👁 View Form
+              </button>
+
               {saveMsg && (
                 <span style={{ fontSize: 12, color: saveMsg.startsWith("Error") ? "#ef4444" : "#16a34a" }}>{saveMsg}</span>
               )}
@@ -416,7 +433,8 @@ export default function FormBuilderPage() {
                   </div>
                 )}
                 <div style={{ flex: 1, overflow: "auto" }}>
-                  <FormBuilder definition={def} onChange={handleChange} />
+                  <FormBuilder definition={def} onChange={handleChange} savedDefinition={savedDef} formId={selected?.id}
+                    onRecordTest={() => { setRecordTest(true); setPreviewOpen(true); }} />
                 </div>
               </div>
             )}
@@ -434,6 +452,22 @@ export default function FormBuilderPage() {
         )}
       </div>
     </div>
+    {previewOpen && selected && (
+      <FormPreview
+        name={selected.name}
+        formId={selected.id}
+        definition={def}
+        unsaved={JSON.stringify(def) !== JSON.stringify(savedDef)}
+        onClose={() => { setPreviewOpen(false); setRecordTest(false); }}
+        recording={recordTest}
+        onSaveTest={values => {
+          const n = ((def as any).tests?.length ?? 0) + 1;
+          const t = scenarioFrom(def, values, n);
+          handleChange({ ...def, tests: [...((def as any).tests ?? []), t] });
+          return `Saved as "${t.name}" (${t.expect.valid ? "accepted" : "refused"}) — run it from Test scenarios`;
+        }}
+      />
+    )}
     <CommitModal
       open={commitOpen} saving={commitSaving}
       componentType="form" componentName={selected?.name ?? "Form"}

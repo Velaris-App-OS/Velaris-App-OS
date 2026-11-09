@@ -1,0 +1,55 @@
+# Sourced by the nginx image's entrypoint before it renders the templates
+# (R1, 2026-10-30). Compose's `${VAR:-default}` already covers a value that is
+# unset or empty; this covers one that is MISTYPED — `VELARIS_CASE_PORT=820l`,
+# `VELARIS_GW_RATE_API=20/s` — which rendered into the config, nginx refused
+# to start, and the whole platform went down with it (the 2026-08-24 outage was
+# the empty case of the same fault). A bad value is replaced by the value the
+# gateway has always used, with one line in its log naming the variable.
+#
+# Copyright (c) 2024-2026 Velaris Contributors
+# SPDX-License-Identifier: BSL-1.1
+
+_velaris_fix() {   # variable, the default, what kind of value
+  eval "_v=\${$1:-}"
+  if [ -z "$_v" ] || ! _velaris_ok "$3" "$_v"; then
+    [ -n "$_v" ] && echo "velaris-gateway: $1='$_v' is not valid — using $2" >&2
+    eval "export $1=\"\$2\""
+  fi
+}
+
+_velaris_ok() {
+  case "$1" in
+    port)   case "$2" in *[!0-9]*|0*) return 1 ;; esac; [ "$2" -le 65535 ] ;;
+    count)  case "$2" in *[!0-9]*|0*) return 1 ;; esac; [ "${#2}" -le 7 ] ;;
+    rate)   case "$2" in *[!0-9]*r/s|*[!0-9]*r/m|0*) return 1 ;; [0-9]*r/s|[0-9]*r/m) [ "${#2}" -le 10 ] ;; *) return 1 ;; esac ;;
+    scheme) [ "$2" = http ] || [ "$2" = https ] ;;
+  esac
+}
+
+_velaris_fix VELARIS_UPSTREAM_SCHEME   http   scheme
+_velaris_fix VELARIS_CASE_SERVICE_PORT 8200   port
+_velaris_fix VELARIS_CASE_PORT         8201   port
+_velaris_fix VELARIS_ANALYTICS_PORT    8202   port
+_velaris_fix VELARIS_HXGRAPH_PORT      8203   port
+_velaris_fix VELARIS_HXMIGRATE_PORT    8204   port
+_velaris_fix VELARIS_COMMERCE_PORT     8207   port
+_velaris_fix VELARIS_PORTAL_PORT       8205   port
+_velaris_fix VELARIS_USER_PORT         8206   port
+_velaris_fix VELARIS_GW_RATE_API       20r/s  rate
+_velaris_fix VELARIS_GW_RATE_PORTAL    30r/m  rate
+_velaris_fix VELARIS_GW_WS_CONN_MAX    256    count
+
+# The workload-identity secret is rendered inside "…": a quote or backslash
+# would end the string, a `$` would be read as an nginx variable, a line break
+# would split the line — and nginx would not start. Only those are refused;
+# anything else a working install holds today still works. It is a secret, so
+# it is never replaced or printed — the gateway stops and names the variable.
+_velaris_nl="$(printf '\n_')"; _velaris_nl="${_velaris_nl%_}"
+case "${VELARIS_GATEWAY_IDENTITY_SECRET:-}" in
+  *'"'*|*'\'*|*'$'*|*"$_velaris_nl"*|*"$(printf '\r')"*)
+    echo "velaris-gateway: VELARIS_GATEWAY_IDENTITY_SECRET holds a quote, backslash, \$ or line break, which the gateway cannot carry — refusing to start" >&2
+    exit 1 ;;
+esac
+unset _velaris_nl
+export VELARIS_GATEWAY_IDENTITY_SECRET="${VELARIS_GATEWAY_IDENTITY_SECRET:-}"
+unset _v

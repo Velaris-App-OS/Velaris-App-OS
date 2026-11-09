@@ -178,7 +178,9 @@ async def generate_form_modification(
     description: str, *, current_name: str, current_definition: dict[str, Any],
 ) -> dict[str, Any]:
     description = _check_prompt(description)
-    current = {"fields": current_definition.get("fields", [])}
+    # A Form Builder form keeps its fields in sections (2026-10-28: this read
+    # only the flat `fields` of a draft-made form, so it saw nothing).
+    current = {"fields": form_builder.builder_to_draft_fields(current_definition)}
     raw = await _ai_generate_json(
         prompt=_current_block(current, description), system=FORM_MODIFY_PROMPT)
     if not raw or not isinstance(raw, dict):

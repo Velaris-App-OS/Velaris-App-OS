@@ -251,6 +251,9 @@ async def seal_once(session: AsyncSession, *, now: datetime | None = None) -> in
     return sealed
 
 
+_VERIFY_BLOCK = 5000
+
+
 async def verify_chain(session: AsyncSession) -> tuple[bool, str | None]:
     """Recompute every link. Returns (ok, first problem or a pruning note).
 
@@ -264,7 +267,23 @@ async def verify_chain(session: AsyncSession) -> tuple[bool, str | None]:
     prev_hash = GENESIS
     expected_seq = 1
     pruned: list[dict] = []
+    # Rows are read a block of batches at a time (2026-11-04): two queries per
+    # batch took 30 s on 89k batches — empty windows are sealed too, so the chain
+    # grows by the minute. Same rows, same `populate_existing`, same hash.
+    block: dict[int, tuple[list, list]] = {}
+    block_end = 0
     for batch in batches:
+        if batch.sequence > block_end:
+            block_start, block_end = batch.sequence, batch.sequence + _VERIFY_BLOCK - 1
+            block = {}
+            for model, slot in ((AIDecisionRecordModel, 0), (AIDecisionVerdictModel, 1)):
+                rows = (await session.execute(
+                    select(model)
+                    .where(model.chain_sequence.between(block_start, block_end))
+                    .execution_options(populate_existing=True)
+                )).scalars().all()
+                for row in rows:
+                    block.setdefault(row.chain_sequence, ([], []))[slot].append(row)
         if batch.sequence != expected_seq:
             return False, (f"sequence jumps from {expected_seq - 1} to "
                            f"{batch.sequence}: a sealed batch is missing")
@@ -287,16 +306,7 @@ async def verify_chain(session: AsyncSession) -> tuple[bool, str | None]:
         # `populate_existing` refreshes from the database instead of handing
         # back what this session already holds. Without it a verifier run on a
         # session that has the rows cached checks the cache, not the record.
-        records = list((await session.execute(
-            select(AIDecisionRecordModel)
-            .where(AIDecisionRecordModel.chain_sequence == batch.sequence)
-            .execution_options(populate_existing=True)
-        )).scalars().all())
-        verdicts = list((await session.execute(
-            select(AIDecisionVerdictModel)
-            .where(AIDecisionVerdictModel.chain_sequence == batch.sequence)
-            .execution_options(populate_existing=True)
-        )).scalars().all())
+        records, verdicts = block.get(batch.sequence, ([], []))
         if len(records) != batch.record_count or len(verdicts) != batch.verdict_count:
             return False, (
                 f"batch {batch.sequence} sealed {batch.record_count} record(s) "

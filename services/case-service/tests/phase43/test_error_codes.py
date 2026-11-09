@@ -23,8 +23,9 @@ from pathlib import Path
 
 from velaris_shared.core import error_codes as ec
 
-_ROUTER = (Path(__file__).resolve().parents[2]
-           / "case_service" / "api" / "routers" / "marketplace.py")
+# In commerce-service since R5e step 7.
+_ROUTER = (Path(__file__).resolve().parents[3] / "commerce-service"
+           / "commerce_service" / "api" / "routers" / "marketplace.py")
 
 
 def _router_src() -> str:

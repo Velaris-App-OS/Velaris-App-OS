@@ -4,10 +4,23 @@
  * Cohort: replay N historical cases, aggregate deltas + determinacy coverage.
  * Runs: history. Honesty first: coverage, exclusions, and the bias caveat ship
  * next to every number.
+ *
+ * Built on the shared Studio components (2026-10-20): it had hand-rolled tabs,
+ * raw inputs and a dozen hex colours that ignored the theme, so it looked like
+ * a different product from every module around it.
+ *
+ * Copyright (c) 2024-2026 Velaris Contributors
+ * SPDX-License-Identifier: BSL-1.1
  */
 import React, { useCallback, useEffect, useState } from "react";
-import { Button } from "@shared/components";
+import {
+  Banner, Button, Card, EmptyState, ErrorNote, FIELD_STYLE, MONO, Pill, SectionTitle,
+  Select, Spinner, Stat, SubPanel, TABLE, Tabs, TextInput, TimeAgo,
+} from "@shared/components";
+import type { PillTone } from "@shared/components";
 import { getAccessToken } from "@/auth/tokenManager";
+import { listCaseTypes } from "@shared/api/client";
+import type { CaseTypeSummary } from "@shared/types";
 
 const API = "/api/v1/hxreplay";
 
@@ -44,23 +57,82 @@ interface Run {
   summary?: any; result?: RunResult;
 }
 
+type TabKey = "single" | "cohort" | "runs";
+const TABS = [
+  { key: "single" as const, label: "Single case" },
+  { key: "cohort" as const, label: "Cohort" },
+  { key: "runs"   as const, label: "Runs" },
+];
+
+const LABEL: React.CSSProperties = {
+  fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, display: "block",
+};
+const HINT: React.CSSProperties = { fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 };
+const ROW: React.CSSProperties = {
+  display: "flex", gap: "var(--space-md)", flexWrap: "wrap", alignItems: "center",
+};
+const GRID: React.CSSProperties = {
+  display: "grid", gap: "var(--space-md)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+};
+const SCROLL: React.CSSProperties = {
+  ...MONO, whiteSpace: "pre-wrap", background: "var(--bg-input)", padding: "var(--space-md)",
+  borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)",
+  maxHeight: 300, overflow: "auto", margin: 0,
+};
+const GAP: React.CSSProperties = { marginBottom: "var(--space-md)" };
+
+const DETERMINACY_TONE: Record<string, PillTone> = {
+  determinate: "ok", estimated: "info", indeterminate: "warn",
+};
+const STATUS_TONE: Record<string, PillTone> = {
+  completed: "ok", done: "ok", running: "warn", queued: "muted", pending: "muted", failed: "bad",
+};
+const CLASS_COLOR: Record<string, string> = {
+  copied: "var(--text-secondary)", elided: "var(--text-muted)",
+  synthetic: "var(--status-completed)", recomputed: "var(--accent-text)",
+};
+
+function fmtSecs(s: number | null | undefined): string {
+  if (s == null) return "—";
+  if (s < 90) return `${Math.round(s)}s`;
+  if (s < 5400) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+function fmtPct(v: number | null | undefined): string {
+  return `${((v ?? 0) * 100).toFixed(1)}%`;
+}
 function fmtMoney(v: number | null | undefined, currency: string): string {
   if (v == null) return "—";
   return `${currency} ${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
+function Field({ label, children, grow }: { label: string; children: React.ReactNode; grow?: boolean }) {
+  return (
+    <div style={{ flex: grow ? 1 : undefined, minWidth: grow ? 240 : undefined }}>
+      <label style={LABEL}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Caveat({ children }: { children: React.ReactNode }) {
+  if (!children) return null;
+  return <div style={{ marginTop: "var(--space-sm)" }}><Banner tone="warn">{children}</Banner></div>;
+}
+
 function CostCard({ cost }: { cost: any }) {
   if (!cost) return null;
   return (
-    <div style={{ border: "1px solid #22c55e", borderRadius: 8, padding: "var(--space-lg)", marginBottom: "var(--space-md)" }}>
-      <b style={{ color: "#22c55e" }}>Cost delta (determinate cases only)</b>
-      <div style={{ fontSize: 30, fontWeight: 700 }}>{fmtMoney(cost.savings, cost.currency)} saved</div>
-      <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-        baseline {fmtMoney(cost.baseline_cost, cost.currency)} · counterfactual {fmtMoney(cost.counterfactual_cost, cost.currency)}
-        {" "}· rate {fmtMoney(cost.hourly_rate, cost.currency)}/h · {cost.cases} case(s)
+    <SubPanel tone="ok" style={{ marginTop: "var(--space-md)" }}>
+      <Stat label="Cost delta · determinate cases only" value={`${fmtMoney(cost.savings, cost.currency)} saved`} />
+      <div style={{ ...HINT, marginTop: 6 }}>
+        baseline {fmtMoney(cost.baseline_cost, cost.currency)} · counterfactual{" "}
+        {fmtMoney(cost.counterfactual_cost, cost.currency)} · rate{" "}
+        {fmtMoney(cost.hourly_rate, cost.currency)}/h · {cost.cases} case(s)
       </div>
-      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>{cost.basis}</div>
-    </div>
+      <div style={{ ...HINT, fontSize: 11, marginTop: 4 }}>{cost.basis}</div>
+    </SubPanel>
   );
 }
 
@@ -69,6 +141,7 @@ function RateCardEditor() {
   const [currency, setCurrency] = useState("USD");
   const [configured, setConfigured] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     void (async () => {
       const r = await fetch("/api/v1/costing/rate-card", { headers: authHdr() });
@@ -80,84 +153,73 @@ function RateCardEditor() {
     })();
   }, []);
   async function save() {
-    setMsg(null);
+    setMsg(null); setErr(null);
     const r = await fetch("/api/v1/costing/rate-card", {
       method: "PUT", headers: authHdr(),
       body: JSON.stringify({ hourly_rate: Number(rate) || 0, currency }) });
     if (r.ok) { setConfigured(true); setMsg("Saved."); }
-    else setMsg((await r.json()).detail ?? "Save failed");
+    else setErr((await r.json()).detail ?? "Save failed");
   }
   return (
-    <div style={S.card}>
-      <b>Rate card</b>
-      <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+    <Card style={GAP}>
+      <SectionTitle right={<Pill tone={configured ? "ok" : "muted"}>{configured ? "configured" : "not configured"}</Pill>}>
+        Rate card
+      </SectionTitle>
+      <div style={HINT}>
         Tenant default hourly rate for manual work — powers the cost delta on replay
-        results. {configured ? "" : "Not configured yet — replays show no cost block."}
+        results. {configured ? "" : "Until it is set, replays show no cost block."}
       </div>
-      <div style={{ ...S.row, marginTop: 8 }}>
-        <input style={{ ...S.input, minWidth: 110 }} value={rate} placeholder="hourly rate"
-               onChange={(e) => setRate(e.target.value)} />
-        <input style={{ ...S.input, minWidth: 70 }} value={currency} maxLength={8}
-               onChange={(e) => setCurrency(e.target.value)} />
+      <div style={{ ...ROW, marginTop: "var(--space-md)", alignItems: "flex-end" }}>
+        <Field label="Hourly rate">
+          <TextInput style={{ width: 130 }} value={rate} placeholder="e.g. 45"
+                     inputMode="decimal" onChange={(e) => setRate(e.target.value)} />
+        </Field>
+        <Field label="Currency">
+          <TextInput style={{ width: 90 }} value={currency} maxLength={8}
+                     onChange={(e) => setCurrency(e.target.value)} />
+        </Field>
         <Button onClick={save} disabled={!rate.trim()}>Save</Button>
-        {msg && <span style={{ fontSize: 12 }}>{msg}</span>}
+        {msg && <Pill tone="ok">{msg}</Pill>}
       </div>
-    </div>
+      {err && <ErrorNote style={{ marginTop: "var(--space-sm)" }}>{err}</ErrorNote>}
+    </Card>
   );
 }
 
-const S: Record<string, React.CSSProperties> = {
-  page:  { display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" },
-  tabs:  { display: "flex", gap: "var(--space-sm)", padding: "var(--space-md) var(--space-2xl) 0" },
-  tab:   { padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600, border: "1px solid var(--border-subtle)" },
-  body:  { flex: 1, overflow: "auto", padding: "var(--space-xl) var(--space-2xl)" },
-  card:  { border: "1px solid var(--border-subtle)", borderRadius: 8, padding: "var(--space-lg)", marginBottom: "var(--space-md)" },
-  row:   { display: "flex", gap: "var(--space-md)", alignItems: "center", flexWrap: "wrap" },
-  input: { padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border-subtle)", background: "var(--surface-2)", color: "var(--text-primary)", minWidth: 240 },
-  label: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, display: "block" },
-  mono:  { fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", fontSize: 12, background: "var(--surface-2)", padding: "var(--space-md)", borderRadius: 6, maxHeight: 300, overflow: "auto" },
-  pill:  { padding: "2px 8px", borderRadius: 999, fontSize: 11, fontWeight: 600 },
-  half:  { flex: 1, minWidth: 320 },
-  caveat:{ fontSize: 12, color: "var(--text-secondary)", borderLeft: "3px solid #f59e0b", paddingLeft: 10, marginTop: 8 },
-  big:   { fontSize: 30, fontWeight: 700 },
-};
-
-const CLASS_COLOR: Record<string, string> = {
-  copied: "var(--text-secondary)", elided: "#94a3b8", synthetic: "#22c55e", recomputed: "#3b82f6",
-};
-
-function fmtSecs(s: number | null | undefined): string {
-  if (s == null) return "—";
-  if (s < 90) return `${Math.round(s)}s`;
-  if (s < 5400) return `${Math.round(s / 60)}m`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
-
 function MetricsBlock({ title, m }: { title: string; m: Metrics | null }) {
-  if (!m) return <div style={S.card}><b>{title}</b><div>excluded</div></div>;
+  if (!m) {
+    return (
+      <SubPanel>
+        <Stat label={title} value="excluded" />
+      </SubPanel>
+    );
+  }
   return (
-    <div style={{ ...S.card, ...S.half }}>
-      <b>{title}</b>
-      <div style={S.big}>{fmtSecs(m.cycle_time_seconds)}</div>
-      <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+    <SubPanel>
+      <Stat label={`${title} · cycle time`} value={fmtSecs(m.cycle_time_seconds)} />
+      <div style={{ ...HINT, marginTop: 6 }}>
         {m.event_count} events · {m.manual_count} manual · {m.auto_count} auto
         {m.auto_ratio != null && <> · auto-ratio {(m.auto_ratio * 100).toFixed(0)}%</>}
         {!!m.elided_wall_seconds && <> · <b>{fmtSecs(m.elided_wall_seconds)} of work elided</b></>}
       </div>
-    </div>
+    </SubPanel>
   );
 }
 
 function TraceView({ nodes }: { nodes: TraceNode[] }) {
   return (
-    <div style={S.mono}>
-      {nodes.map((n, i) => (
-        <div key={i} style={{ color: CLASS_COLOR[n._class ?? "copied"], textDecoration: n._elided ? "line-through" : undefined }}>
-          [{n._class ?? "copied"}] {n.timestamp?.slice(0, 19) ?? "—"}  {n.activity}
-          {n.stage_id ? ` (stage ${n.stage_id})` : ""} {n.actor_type ? `· ${n.actor_type}` : ""}
-          {n.outcome ? ` > ${n.outcome}` : ""}
-        </div>
-      ))}
+    <div style={{ marginTop: "var(--space-md)" }}>
+      <label style={LABEL}>Replayed trace</label>
+      <div style={SCROLL}>
+        {nodes.map((n, i) => (
+          <div key={i} style={{ color: CLASS_COLOR[n._class ?? "copied"],
+                                textDecoration: n._elided ? "line-through" : undefined }}>
+            [{n._class ?? "copied"}] {n.timestamp?.slice(0, 19) ?? "—"}  {n.activity}
+            {n.stage_id ? ` (stage ${n.stage_id})` : ""} {n.actor_type ? `· ${n.actor_type}` : ""}
+            {n.outcome ? ` > ${n.outcome}` : ""}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -173,15 +235,23 @@ function CoverageView({ coverage }: { coverage?: Record<string, string> }) {
   const entries = Object.entries(coverage ?? {});
   if (entries.length === 0) return null;
   return (
-    <div style={{ marginTop: 8 }}>
-      <b style={{ fontSize: 12 }}>Decision-time input coverage</b>
-      <div style={S.mono}>
-        {entries.map(([k, v]) => (
-          <div key={k} style={{ color: v === "unknown" ? "#f59e0b" : undefined }}>
-            {k} — {COVERAGE_LABEL[v] ?? v}
-          </div>
-        ))}
-      </div>
+    <div style={{ marginTop: "var(--space-md)" }}>
+      <label style={LABEL}>Decision-time input coverage</label>
+      <table style={TABLE.table}>
+        <thead><tr><th style={TABLE.th}>Input</th><th style={TABLE.th}>Coverage</th></tr></thead>
+        <tbody>
+          {entries.map(([k, v]) => (
+            <tr key={k} style={TABLE.tr}>
+              <td style={{ ...TABLE.td, ...MONO }}>{k}</td>
+              <td style={TABLE.td}>
+                <Pill tone={v === "unknown" ? "warn" : v === "lineage" ? "ok" : "muted"}>
+                  {COVERAGE_LABEL[v] ?? v}
+                </Pill>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -192,7 +262,7 @@ const CANDIDATE_PLACEHOLDER = JSON.stringify(
                          actions: [{ action_type: "auto_approve" }] } }] }, null, 2);
 
 export default function HxReplay() {
-  const [tab, setTab] = useState<"single" | "cohort" | "runs">("single");
+  const [tab, setTab] = useState<TabKey>("single");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -205,6 +275,7 @@ export default function HxReplay() {
 
   // cohort
   const [caseTypeId, setCaseTypeId] = useState("");
+  const [caseTypes, setCaseTypes] = useState<CaseTypeSummary[] | null>(null);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [maxCases, setMaxCases] = useState("500");
@@ -212,12 +283,23 @@ export default function HxReplay() {
 
   // runs
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
 
   const loadRuns = useCallback(async () => {
-    const r = await apiFetch("/runs");
-    if (r.ok) setRuns((await r.json()).runs);
+    setRunsLoading(true);
+    try {
+      const r = await apiFetch("/runs");
+      if (r.ok) setRuns((await r.json()).runs);
+    } finally { setRunsLoading(false); }
   }, []);
   useEffect(() => { if (tab === "runs") void loadRuns(); }, [tab, loadRuns]);
+
+  // The cohort picker. A list that cannot be read falls back to typing the id,
+  // as before — the picker is a convenience, not a gate.
+  useEffect(() => {
+    if (tab !== "cohort" || caseTypes !== null) return;
+    listCaseTypes().then((r) => setCaseTypes(r.items ?? []), () => setCaseTypes([]));
+  }, [tab, caseTypes]);
 
   // deep-link prefill (HxBranch review: "Simulate on history" → /hxreplay?branch=…)
   useEffect(() => {
@@ -271,192 +353,256 @@ export default function HxReplay() {
   }
 
   const candidateEditor = (
-    <div style={{ marginTop: 8 }}>
-      <label style={S.label}>Candidate rule change (JSON) — or an HxBranch id below</label>
-      <textarea style={{ ...S.input, width: "100%", minHeight: 140, fontFamily: "var(--font-mono, monospace)", fontSize: 12 }}
-                value={candidateText} onChange={(e) => setCandidateText(e.target.value)} />
-      <label style={S.label}>HxBranch id (optional, a branch of a rule)</label>
-      <input style={S.input} value={branchId} onChange={(e) => setBranchId(e.target.value)} placeholder="branch uuid" />
-      <label style={{ ...S.label, marginTop: 8, cursor: "pointer" }}>
-        <input type="checkbox" checked={estimate} onChange={(e) => setEstimate(e.target.checked)} />{" "}
-        Estimate excluded cases (policy substitution / historical simulation — labelled,
-        kept separate from hard metrics)
+    <div style={{ marginTop: "var(--space-md)", display: "grid", gap: "var(--space-md)" }}>
+      <Field label="Candidate rule change (JSON) — or give an HxBranch id below">
+        <textarea style={{ ...FIELD_STYLE, ...MONO, width: "100%", minHeight: 160,
+                           boxSizing: "border-box", resize: "vertical" }}
+                  value={candidateText} onChange={(e) => setCandidateText(e.target.value)} />
+      </Field>
+      <Field label="HxBranch id (optional — a branch of a rule)">
+        <TextInput style={{ width: "100%", maxWidth: 420, boxSizing: "border-box" }} value={branchId}
+                   onChange={(e) => setBranchId(e.target.value)} placeholder="branch uuid" />
+      </Field>
+      <label style={{ ...HINT, display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+        <input type="checkbox" checked={estimate} onChange={(e) => setEstimate(e.target.checked)}
+               style={{ marginTop: 2 }} />
+        <span>
+          Estimate excluded cases (policy substitution / historical simulation — labelled,
+          kept separate from hard metrics)
+        </span>
       </label>
     </div>
   );
 
+  const selectedCaseTypeKnown = !!caseTypes?.some((c) => c.id === caseTypeId);
+
   return (
-    <div style={S.page}>
-      <div style={S.tabs}>
-        {(["single", "cohort", "runs"] as const).map((t) => (
-          <div key={t} style={{ ...S.tab, background: tab === t ? "var(--surface-2)" : "transparent" }}
-               onClick={() => setTab(t)}>
-            {t === "single" ? "Single Case" : t === "cohort" ? "Cohort" : "Runs"}
-          </div>
-        ))}
-      </div>
-      <div style={S.body}>
-        {error && <div style={{ ...S.card, borderColor: "#ef4444", color: "#ef4444" }}>{error}</div>}
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* No PageHeader here: `AppLayout` already renders one from `nav-data`. */}
+      <Tabs tabs={TABS} value={tab} onChange={(k) => setTab(k as TabKey)} />
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-lg) var(--space-2xl)",
+                    boxSizing: "border-box" }}>
+        {error && <ErrorNote style={GAP}>{error}</ErrorNote>}
 
         {tab === "single" && (
           <>
-            <div style={S.card}>
-              <b>Fork a real case</b>
-              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+            <Card style={GAP}>
+              <SectionTitle>Fork a real case</SectionTitle>
+              <div style={HINT}>
                 Replays the recorded case against the candidate config. Human and external
                 events are held fixed from the record; unprovable inputs exclude the case
                 rather than guessing.
               </div>
-              <label style={{ ...S.label, marginTop: 8 }}>Case id</label>
-              <input style={S.input} value={caseId} onChange={(e) => setCaseId(e.target.value)} placeholder="case uuid" />
-              {candidateEditor}
-              <div style={{ marginTop: 10 }}>
-                <Button onClick={runSingle} disabled={busy || !caseId.trim()}>{busy ? "Replaying…" : "Replay"}</Button>
+              <div style={{ marginTop: "var(--space-md)" }}>
+                <Field label="Case id">
+                  <TextInput style={{ width: "100%", maxWidth: 420, boxSizing: "border-box" }}
+                             value={caseId} onChange={(e) => setCaseId(e.target.value)}
+                             placeholder="case uuid" />
+                </Field>
               </div>
-            </div>
+              {candidateEditor}
+              <div style={{ marginTop: "var(--space-lg)" }}>
+                <Button onClick={runSingle} disabled={busy || !caseId.trim()}>
+                  {busy ? "Replaying…" : "Replay"}
+                </Button>
+              </div>
+            </Card>
 
             {single?.result && (
-              <div style={S.card}>
-                <div style={S.row}>
-                  <b>Result</b>
-                  <span style={{ ...S.pill,
-                                 background: single.result.determinacy === "determinate" ? "#22c55e22"
-                                   : single.result.determinacy === "estimated" ? "#a855f722" : "#f59e0b22",
-                                 color: single.result.determinacy === "determinate" ? "#22c55e"
-                                   : single.result.determinacy === "estimated" ? "#a855f7" : "#f59e0b" }}>
-                    {single.result.determinacy}
-                  </span>
+              <Card style={GAP}>
+                <SectionTitle right={
+                  <div style={ROW}>
+                    <Pill tone={DETERMINACY_TONE[single.result.determinacy] ?? "muted"}>
+                      {single.result.determinacy}
+                    </Pill>
+                    {single.anchored && <Pill tone="info" title="Recorded in the audit chain">anchored</Pill>}
+                  </div>
+                }>
+                  Result
+                </SectionTitle>
+                <div style={HINT}>
                   {single.result.divergence_point
-                    ? <span>diverges at <b>{single.result.divergence_point}</b></span>
-                    : <span>no divergence on this case</span>}
-                  {single.anchored && <span style={{ ...S.pill, background: "#3b82f622", color: "#3b82f6" }}>anchored</span>}
+                    ? <>Diverges at <b style={{ color: "var(--text-primary)" }}>{single.result.divergence_point}</b></>
+                    : "No divergence on this case."}
                 </div>
-                {single.result.exclusion_reason && (
-                  <div style={S.caveat}>{single.result.exclusion_reason}</div>
-                )}
-                <div style={{ ...S.row, marginTop: 10, alignItems: "stretch" }}>
+                <Caveat>{single.result.exclusion_reason}</Caveat>
+                <div style={{ ...GRID, marginTop: "var(--space-md)" }}>
                   <MetricsBlock title="Reality (recorded)" m={single.result.baseline_metrics} />
                   <MetricsBlock title="Counterfactual" m={single.result.counterfactual_metrics} />
                 </div>
                 <CostCard cost={single.summary?.cost} />
                 {single.result.trace?.nodes && <TraceView nodes={single.result.trace.nodes} />}
-                {single.result.trace?.note && <div style={S.caveat}>{single.result.trace.note}</div>}
+                <Caveat>{single.result.trace?.note}</Caveat>
                 <CoverageView coverage={single.result.trace?.input_coverage} />
-              </div>
+              </Card>
             )}
           </>
         )}
 
         {tab === "cohort" && (
           <>
-            <div style={S.card}>
-              <b>Replay a cohort</b>
-              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                Replays historical cases of one case-type against the candidate config and
+            <Card style={GAP}>
+              <SectionTitle>Replay a cohort</SectionTitle>
+              <div style={HINT}>
+                Replays historical cases of one case type against the candidate config and
                 aggregates the deltas. Runs in the background.
               </div>
-              <div style={{ ...S.row, marginTop: 8 }}>
-                <div><label style={S.label}>Case-type id</label>
-                  <input style={S.input} value={caseTypeId} onChange={(e) => setCaseTypeId(e.target.value)} placeholder="case-type uuid" /></div>
-                <div><label style={S.label}>From</label>
-                  <input style={{ ...S.input, minWidth: 150 }} type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} /></div>
-                <div><label style={S.label}>To</label>
-                  <input style={{ ...S.input, minWidth: 150 }} type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} /></div>
-                <div><label style={S.label}>Max cases</label>
-                  <input style={{ ...S.input, minWidth: 90 }} value={maxCases} onChange={(e) => setMaxCases(e.target.value)} /></div>
+              <div style={{ ...ROW, marginTop: "var(--space-md)", alignItems: "flex-end" }}>
+                <Field label="Case type" grow>
+                  {caseTypes === null ? <Spinner size={16} /> : caseTypes.length > 0 ? (
+                    <Select style={{ width: "100%" }} value={caseTypeId}
+                            onChange={(e) => setCaseTypeId(e.target.value)}>
+                      <option value="">Choose a case type…</option>
+                      {caseTypeId && !selectedCaseTypeKnown && <option value={caseTypeId}>{caseTypeId}</option>}
+                      {caseTypes.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}{c.version ? ` · v${c.version}` : ""}</option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <TextInput style={{ width: "100%", boxSizing: "border-box" }} value={caseTypeId}
+                               onChange={(e) => setCaseTypeId(e.target.value)} placeholder="case-type uuid" />
+                  )}
+                </Field>
+                <Field label="From">
+                  <TextInput type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+                </Field>
+                <Field label="To">
+                  <TextInput type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+                </Field>
+                <Field label="Max cases">
+                  <TextInput style={{ width: 100 }} inputMode="numeric" value={maxCases}
+                             onChange={(e) => setMaxCases(e.target.value)} />
+                </Field>
               </div>
               {candidateEditor}
-              <div style={{ marginTop: 10 }}>
-                <Button onClick={runCohort} disabled={busy || !caseTypeId.trim()}>{busy ? "Starting…" : "Run cohort replay"}</Button>
+              <div style={{ marginTop: "var(--space-lg)" }}>
+                <Button onClick={runCohort} disabled={busy || !caseTypeId.trim()}>
+                  {busy ? "Starting…" : "Run cohort replay"}
+                </Button>
               </div>
-            </div>
+            </Card>
 
             {cohortRun && (
-              <div style={S.card}>
-                <div style={S.row}>
-                  <b>Run {cohortRun.id.slice(0, 8)}</b>
-                  <span style={S.pill}>{cohortRun.status}</span>
-                  {cohortRun.anchored && <span style={{ ...S.pill, background: "#3b82f622", color: "#3b82f6" }}>anchored</span>}
-                  <Button onClick={refreshCohort}>Refresh</Button>
-                </div>
-                {cohortRun.error && <div style={S.caveat}>{cohortRun.error}</div>}
+              <Card style={GAP}>
+                <SectionTitle right={
+                  <div style={ROW}>
+                    <Pill tone={STATUS_TONE[cohortRun.status] ?? "muted"}>{cohortRun.status}</Pill>
+                    {cohortRun.anchored && <Pill tone="info" title="Recorded in the audit chain">anchored</Pill>}
+                    <Button variant="secondary" size="sm" onClick={refreshCohort}>Refresh</Button>
+                  </div>
+                }>
+                  Run <span style={MONO}>{cohortRun.id.slice(0, 8)}</span>
+                </SectionTitle>
+                {cohortRun.error && <ErrorNote>{cohortRun.error}</ErrorNote>}
+                {!cohortRun.summary && !cohortRun.error && (
+                  <div style={{ ...HINT, display: "flex", gap: 8, alignItems: "center" }}>
+                    <Spinner size={14} /> Replaying in the background — refresh to see the result.
+                  </div>
+                )}
                 {cohortRun.summary && (
                   <>
-                    <div style={{ ...S.row, marginTop: 8 }}>
-                      <div style={S.card}><div style={S.big}>{cohortRun.summary.cases}</div><div>cases</div></div>
-                      <div style={S.card}>
-                        <div style={S.big}>{((cohortRun.summary.coverage_ratio ?? 0) * 100).toFixed(1)}%</div>
-                        <div>determinate coverage ({cohortRun.summary.indeterminate} excluded)</div>
-                      </div>
-                      <div style={S.card}>
-                        <div style={S.big}>{((cohortRun.summary.divergence_rate ?? 0) * 100).toFixed(1)}%</div>
-                        <div>of determinate cases diverge</div>
-                      </div>
-                      <div style={S.card}>
-                        <div style={S.big}>{fmtSecs(cohortRun.summary.counterfactual?.elided_wall_seconds_total)}</div>
-                        <div>manual work elided</div>
-                      </div>
+                    <div style={GRID}>
+                      <SubPanel><Stat label="Cases" value={cohortRun.summary.cases} /></SubPanel>
+                      <SubPanel>
+                        <Stat label="Determinate coverage" value={fmtPct(cohortRun.summary.coverage_ratio)} />
+                        <div style={{ ...HINT, marginTop: 4 }}>{cohortRun.summary.indeterminate} excluded</div>
+                      </SubPanel>
+                      <SubPanel>
+                        <Stat label="Diverge" value={fmtPct(cohortRun.summary.divergence_rate)} />
+                        <div style={{ ...HINT, marginTop: 4 }}>of determinate cases</div>
+                      </SubPanel>
+                      <SubPanel>
+                        <Stat label="Manual work elided"
+                              value={fmtSecs(cohortRun.summary.counterfactual?.elided_wall_seconds_total)} />
+                      </SubPanel>
                     </div>
-                    <div style={{ ...S.row, alignItems: "stretch" }}>
-                      <div style={{ ...S.card, ...S.half }}>
-                        <b>Baseline cycle time</b>
-                        <div>mean {fmtSecs(cohortRun.summary.baseline?.cycle_time?.mean)} · p50 {fmtSecs(cohortRun.summary.baseline?.cycle_time?.p50)} · p90 {fmtSecs(cohortRun.summary.baseline?.cycle_time?.p90)}</div>
-                      </div>
-                      <div style={{ ...S.card, ...S.half }}>
-                        <b>Counterfactual cycle time</b>
-                        <div>mean {fmtSecs(cohortRun.summary.counterfactual?.cycle_time?.mean)} · p50 {fmtSecs(cohortRun.summary.counterfactual?.cycle_time?.p50)} · p90 {fmtSecs(cohortRun.summary.counterfactual?.cycle_time?.p90)}</div>
-                      </div>
+                    <div style={{ ...GRID, marginTop: "var(--space-md)" }}>
+                      {(["baseline", "counterfactual"] as const).map((k) => (
+                        <SubPanel key={k}>
+                          <Stat label={`${k === "baseline" ? "Baseline" : "Counterfactual"} cycle time · mean`}
+                                value={fmtSecs(cohortRun.summary[k]?.cycle_time?.mean)} />
+                          <div style={{ ...HINT, marginTop: 4 }}>
+                            p50 {fmtSecs(cohortRun.summary[k]?.cycle_time?.p50)} · p90{" "}
+                            {fmtSecs(cohortRun.summary[k]?.cycle_time?.p90)}
+                          </div>
+                        </SubPanel>
+                      ))}
                     </div>
                     <CostCard cost={cohortRun.summary.cost} />
                     {cohortRun.summary.estimated_block && (
-                      <div style={{ ...S.card, borderColor: "#a855f7" }}>
-                        <b style={{ color: "#a855f7" }}>Estimated cases ({cohortRun.summary.estimated_block.cases})</b>
-                        <div>cycle mean {fmtSecs(cohortRun.summary.estimated_block.cycle_time?.mean)} · p50 {fmtSecs(cohortRun.summary.estimated_block.cycle_time?.p50)} · p90 {fmtSecs(cohortRun.summary.estimated_block.cycle_time?.p90)}</div>
-                        <div style={{ fontSize: 12 }}>
-                          sources: {Object.entries(cohortRun.summary.estimated_block.sources ?? {}).map(([k, v]) => `${k}×${String(v)}`).join(" · ")}
+                      <SubPanel tone="info" style={{ marginTop: "var(--space-md)" }}>
+                        <Stat label={`Estimated cases (${cohortRun.summary.estimated_block.cases}) · cycle mean`}
+                              value={fmtSecs(cohortRun.summary.estimated_block.cycle_time?.mean)} />
+                        <div style={{ ...HINT, marginTop: 4 }}>
+                          p50 {fmtSecs(cohortRun.summary.estimated_block.cycle_time?.p50)} · p90{" "}
+                          {fmtSecs(cohortRun.summary.estimated_block.cycle_time?.p90)} · sources:{" "}
+                          {Object.entries(cohortRun.summary.estimated_block.sources ?? {}).map(([k, v]) => `${k}×${String(v)}`).join(" · ")}
                           {Object.keys(cohortRun.summary.estimated_block.outcome_distribution ?? {}).length > 0 &&
                             <> · outcomes: {Object.entries(cohortRun.summary.estimated_block.outcome_distribution).map(([k, v]) => `${k} ${(Number(v) * 100).toFixed(0)}%`).join(", ")}</>}
                         </div>
-                        <div style={S.caveat}>{cohortRun.summary.estimated_block.label}</div>
-                      </div>
+                        <Caveat>{cohortRun.summary.estimated_block.label}</Caveat>
+                      </SubPanel>
                     )}
                     {Object.keys(cohortRun.summary.exclusion_profile?.reasons ?? {}).length > 0 && (
-                      <div style={S.mono}>
-                        {Object.entries(cohortRun.summary.exclusion_profile.reasons).map(([k, v]) => (
-                          <div key={k}>{String(v)} × {k}</div>
-                        ))}
+                      <div style={{ marginTop: "var(--space-md)" }}>
+                        <label style={LABEL}>Why cases were excluded</label>
+                        <table style={TABLE.table}>
+                          <thead><tr><th style={TABLE.th}>Reason</th><th style={TABLE.th}>Cases</th></tr></thead>
+                          <tbody>
+                            {Object.entries(cohortRun.summary.exclusion_profile.reasons).map(([k, v]) => (
+                              <tr key={k} style={TABLE.tr}>
+                                <td style={TABLE.td}>{k}</td><td style={{ ...TABLE.td, ...MONO }}>{String(v)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     )}
-                    <div style={S.caveat}>{cohortRun.summary.bias_caveat}</div>
-                    <div style={S.caveat}>Assumption: {cohortRun.summary.assumption}</div>
+                    <Caveat>{cohortRun.summary.bias_caveat}</Caveat>
+                    {cohortRun.summary.assumption && <Caveat>Assumption: {cohortRun.summary.assumption}</Caveat>}
                   </>
                 )}
-              </div>
+              </Card>
             )}
           </>
         )}
 
         {tab === "runs" && (
           <>
-          <RateCardEditor />
-          <div style={S.card}>
-            <div style={S.row}><b>Replay runs</b><Button onClick={loadRuns}>Refresh</Button></div>
-            <table style={{ width: "100%", fontSize: 13, marginTop: 8 }}>
-              <thead><tr style={{ textAlign: "left", color: "var(--text-secondary)" }}>
-                <th>id</th><th>kind</th><th>status</th><th>anchored</th><th>created</th></tr></thead>
-              <tbody>
-                {runs.map((r) => (
-                  <tr key={r.id}>
-                    <td style={{ fontFamily: "var(--font-mono, monospace)" }}>{r.id.slice(0, 8)}</td>
-                    <td>{r.kind}</td><td>{r.status}</td>
-                    <td>{r.anchored ? "yes" : "no"}</td>
-                    <td>{r.created_at?.slice(0, 19) ?? "—"}</td>
-                  </tr>
-                ))}
-                {runs.length === 0 && <tr><td colSpan={5} style={{ color: "var(--text-secondary)" }}>No runs yet.</td></tr>}
-              </tbody>
-            </table>
-          </div>
+            <RateCardEditor />
+            <Card>
+              <SectionTitle right={
+                <Button variant="secondary" size="sm" onClick={loadRuns} disabled={runsLoading}>Refresh</Button>
+              }>
+                Replay runs
+              </SectionTitle>
+              {runsLoading && runs.length === 0 ? <Spinner /> : runs.length === 0 ? (
+                <EmptyState title="No runs yet"
+                  description="Replay a single case or a cohort and it will be listed here." />
+              ) : (
+                <table style={TABLE.table}>
+                  <thead>
+                    <tr>
+                      <th style={TABLE.th}>Run</th><th style={TABLE.th}>Kind</th>
+                      <th style={TABLE.th}>Status</th><th style={TABLE.th}>Anchored</th>
+                      <th style={TABLE.th}>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((r) => (
+                      <tr key={r.id} style={TABLE.tr}>
+                        <td style={{ ...TABLE.td, ...MONO }}>{r.id.slice(0, 8)}</td>
+                        <td style={TABLE.td}>{r.kind === "single" ? "Single case" : "Cohort"}</td>
+                        <td style={TABLE.td}><Pill tone={STATUS_TONE[r.status] ?? "muted"}>{r.status}</Pill></td>
+                        <td style={TABLE.td}>{r.anchored ? <Pill tone="info">anchored</Pill> : "—"}</td>
+                        <td style={TABLE.td}>{r.created_at ? <TimeAgo date={r.created_at} /> : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Card>
           </>
         )}
       </div>

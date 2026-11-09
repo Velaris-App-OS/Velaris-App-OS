@@ -3,9 +3,9 @@
 Gives HxNexus the vocabulary of every major BPM tool.
 
 Three functions:
-    translate(tool, concept, session)  — find the Helix equivalent
+    translate(tool, concept, session)  — find the Velaris equivalent
     analyze(tool, text, session)       — parse a raw BPM config fragment
-    compare(tool, question, session)   — side-by-side tool vs Helix explanation
+    compare(tool, question, session)   — side-by-side tool vs Velaris explanation
 
 All fall back to keyword matching when LLM is unavailable.
 """
@@ -95,7 +95,7 @@ async def translate(
     session: AsyncSession,
     llm=None,
 ) -> dict:
-    """Translate a BPM concept to its Helix equivalent.
+    """Translate a BPM concept to its Velaris equivalent.
 
     1. Checks bpm_concepts table first (fast, no LLM).
     2. If exact/close match found → return it with optional LLM enrichment.
@@ -252,7 +252,7 @@ async def compare(
     session: AsyncSession,
     llm=None,
 ) -> dict:
-    """Answer a 'how would I do X in Helix vs {tool}?' question."""
+    """Answer a 'how would I do X in Velaris vs {tool}?' question."""
     # Find related KB entries as grounding context
     related = await _find_concepts(session, tool, question, top_k=3)
     kb_context = "\n".join(

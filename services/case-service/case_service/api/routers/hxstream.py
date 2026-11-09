@@ -23,7 +23,10 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from velaris_shared import hxguard
-from velaris_shared.auth.dependencies import get_current_user
+from velaris_shared.auth.dependencies import (
+    WS_CLOSE_UNAUTHORIZED, authenticate_websocket, get_current_user,
+    is_auth_check_busy, watch_websocket_auth, websocket_close_code,
+)
 from velaris_shared.auth.models import AuthenticatedUser
 from velaris_shared.db.session import get_session
 from velaris_shared.db.models import TraceEventModel
@@ -152,6 +155,9 @@ async def event_bus_backlog(
     from case_service.integrations import event_bus
 
     _require_hxstream_access(user)
+    # The install's event bus — brokers, backlog: the platform operator's.
+    if await _tenant_scope(session, user) is not None:
+        raise HTTPException(403, "The event bus is the platform's; platform operator only.")
     s = get_settings()
     out = await event_bus.backlog(session)
     out |= {
@@ -160,6 +166,16 @@ async def event_bus_backlog(
         "topic_prefix": s.event_bus_topic_prefix,
     }
     return out
+
+
+async def _tenant_scope(session, user) -> list[str] | None:
+    """2026-11-04: "admin sees everything" was every tenant's admin seeing every
+    tenant's events and users. The platform operator still does (None); any
+    other admin sees its own tenant's — events carry the trusted tenant."""
+    from case_service.tenancy.identity import caller_tenant_tokens, is_platform_operator
+    if await is_platform_operator(session, user):
+        return None
+    return [str(t) for t in (await caller_tenant_tokens(session, user) or [])]
 
 
 @router.get("/events")
@@ -192,6 +208,9 @@ async def list_events(
         actor_user_id = own_id
     elif actor_user_id:
         stmt = stmt.where(TraceEventModel.actor_user_id == actor_user_id)
+    tenants = await _tenant_scope(session, user)
+    if tenants is not None:
+        stmt = stmt.where(TraceEventModel.tenant_id.in_(tenants))
 
     if case_id:
         try:
@@ -261,12 +280,17 @@ async def list_actors(
         )
         .limit(200)
     )
+    tenants = await _tenant_scope(session, user)
+    if tenants is not None:                       # its own tenant's actors only
+        actor_stmt = actor_stmt.where(TraceEventModel.tenant_id.in_(tenants))
     actor_ids = [r[0] for r in (await session.execute(actor_stmt)).all()]
 
     # Enrich with display names from user directory
     dir_stmt = select(UserDirectoryModel).where(
         UserDirectoryModel.user_id.in_(actor_ids)
     )
+    if tenants is not None:
+        dir_stmt = dir_stmt.where(UserDirectoryModel.tenant_id.in_(tenants))
     if q:
         pattern = f"%{q}%"
         dir_stmt = dir_stmt.where(
@@ -315,56 +339,40 @@ async def hxstream_ws(
     await websocket.accept()
 
     # ── Authenticate ────────────────────────────────────────────────
-    ws_user_id: str | None = None
-    is_admin = False
-
-    if token:
-        try:
-            from velaris_shared.auth.jwt_handler import decode_jwt_token
-            from velaris_shared.config import get_settings
-            # `public_key` must be passed or `decode_jwt_token` verifies HS256
-            # only (the algorithm is chosen internally from this argument, which
-            # is what stops algorithm-confusion attacks). Every other entry point
-            # passes it; this one did not, so on any deployment with
-            # VELARIS_CASE_AUTH_RSA_* set — where tokens are RS256 — the decode
-            # raised and the socket closed 4001 for every caller, authenticated
-            # or not. Found while migrating the role check below.
-            _settings = get_settings()
-            claims = decode_jwt_token(
-                token,
-                secret=_settings.auth_secret,
-                public_key=_settings.auth_rsa_public_key or "",
-            )
-            ws_user_id = str(claims.get("sub") or claims.get("preferred_username") or "")
-            roles = []
-            realm = claims.get("realm_access", {})
-            if isinstance(realm, dict):
-                roles = realm.get("roles", [])
-            if not roles:
-                roles = claims.get("roles", [])
-            # Phase 4 step 2. This one decides scope from a LOCAL `roles`
-            # variable built out of raw JWT claims, which is why an AST pass
-            # looking for `user.is_admin` walked straight past it. Same answer,
-            # asked of the privilege model: build the subject the claims
-            # describe and evaluate the read-all action against it.
-            is_admin = hxguard.user_allows(
-                AuthenticatedUser(user_id=ws_user_id, roles=list(roles)),
-                "platform.stream.read_all")
-        except Exception:
-            await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
-            await websocket.close(code=4001)
-            return
-    else:
+    # The same sign-in check as every HTTP route (2026-10-19). Until then this
+    # verified the signature only: a revoked token, a suspended account or an
+    # agent token got a stream, and issuer / audience were not checked.
+    if not token:
         await websocket.send_json({"type": "error", "message": "Authentication required"})
-        await websocket.close(code=4001)
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
         return
+    try:
+        user = await authenticate_websocket(websocket, token)
+    except HTTPException as exc:
+        busy = is_auth_check_busy(exc)
+        await websocket.send_json({"type": "error", "message":
+                                   "Server busy — try again" if busy else "Invalid or expired token"})
+        await websocket.close(code=websocket_close_code(exc))
+        return
+    ws_user_id: str = user.user_id
+    # Phase 4 step 2: the read-all decision is asked of the privilege model.
+    is_admin = hxguard.user_allows(user, "platform.stream.read_all")
 
     # Determine actor_scope: None = see all, str = see only own
     actor_scope: str | None = None if is_admin else ws_user_id
+    # A tenant's admin "sees all" of ITS tenant only (2026-11-04).
+    from velaris_shared.db.session import get_session_factory
+    async with get_session_factory()() as _s:
+        ws_tenants = await _tenant_scope(_s, user)
+    ws_tenants_set = set(ws_tenants) if ws_tenants is not None else None
 
     # ── Register subscriber ──────────────────────────────────────────
     sub_id = str(uuid.uuid4())
     q = _register_subscriber(sub_id)
+
+    pump_task: asyncio.Task | None = None
+    # Checked again while open: a revocation closes the stream within a minute.
+    watcher = asyncio.create_task(watch_websocket_auth(websocket, token))
 
     allowed_types: set[str] | None = None
     if event_types:
@@ -378,6 +386,8 @@ async def hxstream_ws(
                 event = await q.get()
                 # Role-based visibility filter
                 if actor_scope and event.get("actor_user_id") != actor_scope:
+                    continue
+                if ws_tenants_set is not None and str(event.get("tenant_id")) not in ws_tenants_set:
                     continue
                 # Optional client-specified filters
                 if case_id and event.get("case_id") != case_id:
@@ -402,7 +412,9 @@ async def hxstream_ws(
     except Exception:
         logger.exception("HxStream WS error for sub %s", sub_id)
     finally:
-        pump_task.cancel()
+        watcher.cancel()
+        if pump_task is not None:
+            pump_task.cancel()
         _unregister_subscriber(sub_id)
 
 

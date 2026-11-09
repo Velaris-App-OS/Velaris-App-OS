@@ -161,6 +161,19 @@ async def _run(args: argparse.Namespace) -> int:
         except dr.DRError as exc:
             _err(f"refused: {exc}")
             return 1
+        # A restore test run as part of taking this backup (backup-velaris.sh
+        # restores its own fresh dump into a throwaway database before
+        # encrypting it): recorded on the same row, with its measured duration.
+        if args.restore_test and args.status == dr.SUCCEEDED:
+            try:
+                await session.flush()
+                await dr.record_restore_test(
+                    session, row.id, result=args.restore_test,
+                    notes=args.restore_test_notes, actor_id=args.recorded_by,
+                    duration_seconds=args.restore_test_seconds,
+                )
+            except dr.DRError as exc:
+                _err(f"restore test not recorded: {exc}")
         await session.commit()
 
     mb = f"{size / 1_048_576:.1f} MB" if size else "size unknown"
@@ -183,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--error", help="Failure detail, when --status failed")
     p.add_argument("--recorded-by", default="update-velaris.sh")
     p.add_argument("--no-checksum", action="store_true", help="Skip hashing a large dump")
+    p.add_argument("--restore-test", choices=[dr.PASSED, dr.FAILED_TEST],
+                   help="Result of restoring this backup into a throwaway database")
+    p.add_argument("--restore-test-seconds", type=int, help="How long that restore took")
+    p.add_argument("--restore-test-notes", help="What the restore test checked or found")
     p.add_argument(
         "--strict", action="store_true",
         help="Exit non-zero if recording fails (default: never fail the caller)",

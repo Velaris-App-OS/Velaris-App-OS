@@ -5,7 +5,7 @@
 # ═══════════════════════════════════════════════════════════
 
 velaris:
-  version: "3.1.2"
+  version: "3.2.0"
   instance: "my-velaris"
 
   # ── Infrastructure ──
@@ -13,14 +13,14 @@ velaris:
   auth: keycloak
   database: postgresql
   cache: redis
-  events: redpanda
+  events: kafka
   search: opensearch
   storage: local
 
   # ── AI providers ──
   ai:
     providers: [ollama]
-    # Map features to models in Helix Studio settings
+    # Map features to models in Velaris Studio settings
 
   # ── Customer channels ──
   telephony: []

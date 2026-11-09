@@ -1,4 +1,4 @@
-"""HELIX P42 — HxNexus Polyglot Intelligence tests (22 tests).
+"""Velaris P42 — HxNexus Polyglot Intelligence tests (22 tests).
 
 Covers: bpm_concepts seed data (all 4 tools present), GET /polyglot/concepts
         (list, tool filter, search), POST /polyglot/translate (exact KB hit,

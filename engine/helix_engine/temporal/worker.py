@@ -101,7 +101,9 @@ async def _main() -> None:
     """Run the worker as a standalone process."""
     from helix_engine.temporal.client import connect
 
-    host = os.environ.get("TEMPORAL_HOST", "localhost:7233")
+    from velaris_shared.temporal_connect import temporal_target
+
+    host = temporal_target()
     queue = os.environ.get("TEMPORAL_TASK_QUEUE", DEFAULT_TASK_QUEUE)
 
     logger.info("worker_standalone_starting", host=host, task_queue=queue)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from case_service.marketplace.manifest_version import (
+from velaris_shared.apps.manifest_version import (
     READ_RELATIONS,
     VALID_V2_RELATIONS,
     WRITE_RELATIONS,
@@ -173,8 +173,9 @@ class TestItIsPersistedAtInstall:
         """Not from the registry cache — only the verified bundle is trusted."""
         import pathlib
 
-        src = (pathlib.Path(__file__).resolve().parents[2]
-               / "case_service" / "api" / "routers" / "marketplace.py").read_text()
+        # In commerce-service since R5e step 7.
+        src = (pathlib.Path(__file__).resolve().parents[3] / "commerce-service"
+               / "commerce_service" / "api" / "routers" / "marketplace.py").read_text()
         assert 'declared_permissions = manifest.get("_permissions")' in src
         assert "declared_permissions=declared_permissions," in src
         assert "declared_permissions=item.declared_permissions," in src, (

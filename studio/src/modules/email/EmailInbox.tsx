@@ -1,4 +1,4 @@
-// HELIX P25 — Email Inbox
+// Velaris P25 — Email Inbox
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getAccessToken } from "@/auth/tokenManager";

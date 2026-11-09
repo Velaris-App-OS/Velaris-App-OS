@@ -41,6 +41,7 @@ from velaris_shared.middleware.endpoint_rate_limit import rate_limit
 from case_service.core.timestamps import iso_utc
 from case_service.ledger import chain, evidence, records
 from case_service.tenancy.identity import resolve_tenant
+from velaris_shared.db.read_routing import get_read_session
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +188,7 @@ async def add_verdict(
 
 @router.get("/models")
 async def model_inventory(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("ai_ledger.records.read")),
 ) -> dict[str, Any]:
     """Which models decided anything here — from what ran, not from config."""
@@ -205,7 +206,7 @@ async def model_inventory(
 
 @router.get("/chain", dependencies=[Depends(_verify_rl)])
 async def verify(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("ai_ledger.chain.verify")),
 ) -> dict[str, Any]:
     """Recompute every link. This is the product claim executed as code."""
@@ -232,6 +233,8 @@ async def seal(
 async def evidence_pack(
     case_id: uuid.UUID | None = Query(None),
     days: int = Query(30, ge=1, le=3650),
+    # Stays on the main: the export's HxArbiter decision is recorded through this
+    # session (found in R5d 11b — read-only refused that write).
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(hxguard.guard("ai_ledger.evidence.export")),
 ) -> dict[str, Any]:

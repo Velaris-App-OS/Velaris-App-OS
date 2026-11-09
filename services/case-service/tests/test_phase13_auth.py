@@ -88,7 +88,7 @@ class TestJWTHandler:
 
 async def _mk_login_user(session, username: str, roles: list[str], password: str = "S3cure-pass!") -> str:
     """Real-auth era: login validates against velaris_users with a bcrypt hash."""
-    from case_service.api.routers.auth_real import _hash_password
+    from velaris_shared.auth.passwords import hash_password as _hash_password
     from velaris_shared.db.models import HelixUserModel
     session.add(HelixUserModel(
         username=username, email=f"{username}@test.local",

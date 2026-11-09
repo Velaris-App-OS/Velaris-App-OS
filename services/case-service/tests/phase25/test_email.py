@@ -1,4 +1,4 @@
-"""HELIX P25 — Email integration tests."""
+"""Velaris P25 — Email integration tests."""
 from __future__ import annotations
 
 import uuid

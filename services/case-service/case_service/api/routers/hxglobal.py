@@ -27,6 +27,7 @@ from case_service.hxglobal.protocol import get_region_adapter
 from case_service.hxglobal.health import poll_region_health
 from case_service.hxglobal.migration import migrate_tenant
 from case_service.hxglobal.sovereignty import resolve_region, log_access
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/global", tags=["hxglobal"])
 
@@ -519,7 +520,7 @@ async def get_access_log(
     region_id: Optional[uuid.UUID] = None,
     tenant_id: Optional[str] = None,
     limit: int = 100,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     q = select(RegionAccessLogModel).order_by(desc(RegionAccessLogModel.recorded_at)).limit(limit)

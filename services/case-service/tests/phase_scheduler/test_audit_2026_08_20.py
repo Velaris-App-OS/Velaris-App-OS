@@ -270,7 +270,7 @@ class TestBotEgressIsActuallyWired:
 
     def test_a_domain_grant_mints_a_per_job_identity(self, monkeypatch, tmp_path):
         from case_service.bots.runner import BotRunner
-        from case_service.marketplace import egress
+        from velaris_shared.apps import egress
 
         monkeypatch.setattr(egress, "egress_enabled", lambda: True)
         monkeypatch.setattr(egress, "_egress_dir", lambda: tmp_path)
@@ -296,7 +296,7 @@ class TestBotEgressIsActuallyWired:
 
     def test_no_domains_means_no_credential(self, monkeypatch, tmp_path):
         from case_service.bots.runner import BotRunner
-        from case_service.marketplace import egress
+        from velaris_shared.apps import egress
 
         monkeypatch.setattr(egress, "egress_enabled", lambda: True)
         monkeypatch.setattr(egress, "_egress_dir", lambda: tmp_path)

@@ -58,6 +58,9 @@ class SchedulerLoop:
             return
         if self._task is not None:
             return
+        # A stop() leaves the event set; a job lease taken back later (R5e
+        # step 9) starts the loop again, which must not exit at once.
+        self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="scheduler")
         log.info("scheduler started")
 
@@ -116,6 +119,15 @@ class SchedulerLoop:
                                     "due; the next occurrence stands"})
                 await session.commit()
                 log.warning("schedule %s missed its window", row.name)
+                return
+
+            # An archived (offboarded) tenant's automation stops with its
+            # people (R7) — said on the run, never silently.
+            from velaris_shared.tenancy.identity import tenant_closed
+            if await tenant_closed(session, getattr(row, "tenant_id", None)):
+                await service.record_run(session, row, status="skipped",
+                                         detail={"reason": "tenant archived"})
+                await session.commit()
                 return
 
             handler = actions.get(row.action_kind)

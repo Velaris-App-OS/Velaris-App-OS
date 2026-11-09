@@ -42,6 +42,7 @@ spec:
           ports:
             - containerPort: {{ .Values.caseService.port }}
           env:
+            {{- include "helix.authSecretEnv" . | nindent 12 }}
             - name: VELARIS_CASE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -49,8 +50,21 @@ spec:
                   key: {{ include "helix.dbSecretKey" . }}
             - name: VELARIS_CASE_DATABASE_BACKEND
               value: {{ include "helix.databaseBackend" . | quote }}
+            {{- include "helix.poolerEnv" . | nindent 12 }}
+            {{- include "helix.readReplicaEnv" . | nindent 12 }}
             - name: VELARIS_CASE_REDIS_URL
               value: {{ include "helix.redisUrl" . | quote }}
+            # R5e step 7: refuses /internal/v1 calls without it.
+            - name: VELARIS_INTERNAL_SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.internalService.existingSecret | default (printf "%s-internal" (include "helix.fullname" .)) }}
+                  key: internal-service-secret
+            {{- if .Values.jobs.enabled }}
+            # R5e step 9: the jobs Deployment runs the background jobs.
+            - name: VELARIS_CASE_RUN_JOBS
+              value: "false"
+            {{- end }}
             {{- range $k, $v := .Values.caseService.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}

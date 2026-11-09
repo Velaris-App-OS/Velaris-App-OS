@@ -1,4 +1,4 @@
-"""HELIX P30 — HxNexus AI Copilot tests (25 tests).
+"""Velaris P30 — HxNexus AI Copilot tests (25 tests).
 
 All LLM HTTP calls are mocked — no real Ollama/OpenAI/Anthropic traffic.
 """

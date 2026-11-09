@@ -1,7 +1,7 @@
 """P44 — Pass 5: Report.
 
 Produces the import report: what was converted automatically, what needs
-manual review, and what has no Helix equivalent.
+manual review, and what has no Velaris equivalent.
 """
 from __future__ import annotations
 

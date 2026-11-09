@@ -249,15 +249,17 @@ class TestDosPrevention:
     @pytest.mark.asyncio
     async def test_per_user_rate_limit(self, client: AsyncClient):
         """After 20 calls in 60s from same user, 429 must be returned."""
-        from case_service.api.routers.hxdbmanager import _EXECUTE_RATE
-        import collections, time as _time
+        from case_service.api.routers.hxdbmanager import _check_execute_rate
+        from velaris_shared import shared_state
 
-        # One fixed user instance: fill the bucket under ITS id and return the SAME
-        # instance from the override, so the bucket key provably matches the user the
+        # One fixed user instance: fill the window under ITS id and return the SAME
+        # instance from the override, so the key provably matches the user the
         # endpoint resolves. (Filling to the limit makes the rate check trip BEFORE the
         # SQL runs — so the test never depends on Postgres execution.)
         u = _make_user(["admin"])
-        _EXECUTE_RATE[u.user_id] = collections.deque([_time.monotonic()] * 20)
+        shared_state.reset_for_tests()
+        for _ in range(20):
+            assert await _check_execute_rate(u.user_id)
         _override(lambda: u)
         try:
             r = await client.post("/api/v1/hxdbmanager/execute", json={"sql": "SELECT 1"})
@@ -265,7 +267,7 @@ class TestDosPrevention:
             assert "rate limit" in r.json()["detail"].lower()
         finally:
             _clear()
-            _EXECUTE_RATE.pop(u.user_id, None)
+            shared_state.reset_for_tests()
 
 
 # ═══════════════════════════════════════════════════════

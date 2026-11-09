@@ -274,9 +274,11 @@ class ConnectorAction:
 
         row = await session.get(
             ConnectorRegistryModel, _uuid(cfg.get("connector_id"), "connector_id"))
-        if row is None:
+        # Its own tenant's, or — for the default tenant alone — the operator's
+        # (2026-11-04: a tenant-less connector passed for every tenant).
+        from velaris_shared.hxbridge.security import usable_by
+        if row is None or not await usable_by(session, row, schedule.tenant_id):
             raise ScheduleActionError("Connector not found.")
-        await _require_same_tenant(session, row.tenant_id, schedule, "Connector")
         return row
 
     async def validate(self, session, schedule, cfg):
@@ -288,6 +290,17 @@ class ConnectorAction:
                 f"connector fails silently every night.")
         if not isinstance(cfg.get("input") or {}, dict):
             raise ScheduleActionError("'input' must be an object.")
+        op = cfg.get("operation")
+        if op is not None:
+            from velaris_shared.hxbridge.operations import OperationError, validate_operations
+            try:
+                keys = {o["key"] for o in validate_operations(row.connector_type, row.config)}
+            except OperationError as exc:
+                raise ScheduleActionError(str(exc))
+            if not isinstance(op, str) or op not in keys:
+                raise ScheduleActionError(
+                    f"Connector '{row.name}' has no operation {op!r}"
+                    + (f" — it has: {', '.join(sorted(keys))}." if keys else "."))
 
     async def run(self, session, schedule, cfg):
         from case_service.hxbridge.executor import execute_connector
@@ -295,8 +308,9 @@ class ConnectorAction:
         connector = await self._connector(session, schedule, cfg)
         if not connector.enabled:
             raise ScheduleActionError(f"Connector '{connector.name}' is disabled.")
+        op = cfg.get("operation") if isinstance(cfg.get("operation"), str) else None
         response = await execute_connector(
-            session, connector, dict(cfg.get("input") or {}))
+            session, connector, dict(cfg.get("input") or {}), operation=op)
         return {"connector": connector.name,
                 "status": (response or {}).get("status"),
                 "ok": bool(response)}

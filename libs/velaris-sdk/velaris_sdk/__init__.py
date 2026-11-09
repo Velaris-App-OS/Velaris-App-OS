@@ -1,1 +1,1 @@
-"""HELIX SDK — Protocol definitions and plugin framework."""
+"""Velaris SDK — Protocol definitions and plugin framework."""

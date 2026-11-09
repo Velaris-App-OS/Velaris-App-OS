@@ -107,6 +107,13 @@ def detect_provider_misconfig(s) -> dict[str, str] | None:
     return None
 
 
+def _trusted_tenant():
+    """The signed-in caller's tenant for the AI-call record (2026-11-04); None
+    outside a request (a job), which the views read as the default tenant's."""
+    from velaris_shared.observability.context import tenant_id_var
+    return tenant_id_var.get()
+
+
 class EgressGuardedBackend:
     """Wraps an external backend so embeddings never leave the platform.
 
@@ -221,6 +228,7 @@ class GuardedBackend:
             raw = await self._inner.complete(prompt, **kwargs)
         except Exception as exc:
             self.last_usage = llmops.queue_call(
+                tenant_id=_trusted_tenant(),
                 **self._call_identity(),
                 purpose=purpose,
                 prompt_chars=len(prompt or "") + len(system),
@@ -243,6 +251,7 @@ class GuardedBackend:
         # call's numbers in place would let a failed completion be priced as the
         # successful one before it.
         self.last_usage = llmops.queue_call(
+                tenant_id=_trusted_tenant(),
             **self._call_identity(),
             purpose=purpose,
             prompt_chars=len(prompt or "") + len(system),

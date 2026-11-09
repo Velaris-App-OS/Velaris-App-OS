@@ -30,6 +30,10 @@ VELARIS_CASE_PORT="${VELARIS_CASE_PORT:-8201}"
 VELARIS_ANALYTICS_PORT="${VELARIS_ANALYTICS_PORT:-8202}"
 VELARIS_HXGRAPH_PORT="${VELARIS_HXGRAPH_PORT:-8203}"
 VELARIS_HXMIGRATE_PORT="${VELARIS_HXMIGRATE_PORT:-8204}"
+VELARIS_COMMERCE_PORT="${VELARIS_COMMERCE_PORT:-8207}"   # R5e step 7
+VELARIS_PORTAL_PORT="${VELARIS_PORTAL_PORT:-8205}"       # R5e step 8
+VELARIS_USER_PORT="${VELARIS_USER_PORT:-8206}"           # R5e step 10
+VELARIS_WORKER_PORT="${VELARIS_WORKER_PORT:-8208}"       # R5e step 9 (health only)
 VELARIS_STUDIO_PORT="${VELARIS_STUDIO_PORT:-5173}"
 
 # name:variable — the order they are reported in.
@@ -40,6 +44,10 @@ case-service:VELARIS_CASE_PORT
 analytics-service:VELARIS_ANALYTICS_PORT
 hxgraph-service:VELARIS_HXGRAPH_PORT
 hxmigrate-service:VELARIS_HXMIGRATE_PORT
+commerce-service:VELARIS_COMMERCE_PORT
+portal-service:VELARIS_PORTAL_PORT
+user-service:VELARIS_USER_PORT
+worker-service:VELARIS_WORKER_PORT
 studio:VELARIS_STUDIO_PORT"
 
 # ── Who holds a port ──────────────────────────────────────────────────────────
@@ -75,7 +83,18 @@ _velaris_port_owner() {
   local pid
   pid=$(ss -ltnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" \
         | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-  [ -n "$pid" ] || { echo "unknown"; return; }
+  if [ -z "$pid" ]; then
+    # The kernel hides another process's sockets from `ss -p` unless uid AND gid
+    # match — and setup re-runs itself under `sg docker`, so every one of our own
+    # units read "unknown" and the update agent was refused (2026-10-20). The
+    # socket's cgroup needs no such access; an `ss` without --cgroup prints
+    # nothing here and we fall through to "unknown", as before.
+    if ss -ltnH --cgroup 2>/dev/null | grep -E "[:.]${port}[[:space:]]" \
+         | grep -qE 'cgroup:[^ ]*/velaris-[^ /]*\.service'; then
+      echo "velaris"; return
+    fi
+    echo "unknown"; return
+  fi
 
   # Started by one of our units?
   if grep -qs 'velaris-' "/proc/$pid/cgroup" 2>/dev/null; then echo "velaris"; return; fi

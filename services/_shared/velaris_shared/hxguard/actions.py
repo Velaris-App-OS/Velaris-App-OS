@@ -607,7 +607,7 @@ ACTION_GATES: dict[str, tuple[str, ...]] = {
     "platform.push.configure": ('push.py::upsert_ct_override',),
     "platform.push.operate": ('push.py::test_send',),
     "platform.push.read": ('push.py::admin_delivery_logs', 'push.py::admin_list_devices', 'push.py::get_ct_overrides'),
-    "platform.status.read": ('status.py::authz_parity', 'status.py::internal_status'),
+    "platform.status.read": ('status.py::authz_parity', 'status.py::internal_status', 'status.py::readiness'),
     "platform.updates.approve": ('platform_updates.py::approve_plan', 'platform_updates.py::approve_run', 'platform_updates.py::halt_plan'),
     "platform.updates.approve_prod": ('platform_updates.py::approve_prod',),
     "platform.updates.configure": ('platform_updates.py::put_update_settings',),
@@ -1047,6 +1047,12 @@ _reg(_a("legal.holds.place", "endpoint", ['admin', 'security'],
         "Places a legal hold on a case: it cannot be deleted, anonymized, erased or moved until released."))
 _reg(_a("legal.holds.release", "endpoint", ['admin'],
         "Releases a legal hold, after which retention and erasure apply to the case again."))
+# 2026-10-14 — which access group must approve a release (mig 218). Setting it
+# when none is set is this privilege; CHANGING or clearing one already set also
+# needs membership of that group (or the superadmin), so the person the rule
+# constrains cannot simply switch it off. Approving is membership, not a privilege.
+_reg(_a("legal.holds.configure", "endpoint", ['admin'],
+        "Names the access group whose member must approve a legal hold release."))
 # Erasing a customer from the rep desk is irreversible and legal in weight.
 _reg(_a("engage.profile.erase", "endpoint", ['admin'],
         "Erases a customer from the rep desk: profile anonymised, identifiers and call numbers removed."))
@@ -1200,6 +1206,12 @@ _reg(_a("design.branches.write", "endpoint", ['admin', 'designer', 'developer'],
         "Creates, edits, deletes or pulls an artifact branch, or records a commit."))
 _reg(_a("design.forms.write", "endpoint", ['admin', 'designer'],
         "Creates, changes or deletes a form definition."))
+_reg(_a("design.reference.read", "endpoint", ['admin', 'designer', 'developer'],
+        "Reads reference tables (branches, products, price bands) and their rows."))
+_reg(_a("design.reference.write", "endpoint", ['admin', 'designer'],
+        "Creates, changes or deletes a reference table, or replaces its rows."))
+_reg(_a("design.embeds.manage", "endpoint", ['admin'],
+        "Approves the sites a form may embed (and whether embeds show on the portal)."))
 _reg(_a("casework.queues.write", "endpoint", ['admin', 'manager'],
         "Creates a work queue in the caller's tenant."))
 _reg(_a("platform.logs.read", "endpoint", ['admin', 'security', 'designer'],

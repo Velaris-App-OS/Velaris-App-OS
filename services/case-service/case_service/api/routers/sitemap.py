@@ -1,4 +1,4 @@
-"""Site Map API — static catalog of all HELIX modules.
+"""Site Map API — static catalog of all Velaris modules.
 
 Provides a central index of every route in the Studio with
 descriptions, categories, and API endpoints. Used by the
@@ -9,7 +9,6 @@ SPDX-License-Identifier: BSL-1.1
 """
 from __future__ import annotations
 
-import httpx
 from fastapi import APIRouter, Depends
 
 from velaris_shared.auth.dependencies import get_current_user
@@ -93,7 +92,7 @@ PHASES = [
 
 @router.get("/modules")
 async def list_modules():
-    """List every module/page in HELIX Studio."""
+    """List every module/page in Velaris Studio."""
     return {"modules": MODULES, "total": len(MODULES)}
 
 
@@ -133,22 +132,19 @@ async def search_modules(q: str = ""):
 
 @router.get("/ai-status")
 async def ai_status():
-    """Probe whether the AI backend (Ollama) is reachable.
+    """Is the configured AI model ready? Drives Studio's degraded-mode banner.
 
-    Returns {ai_available, degraded_modules} so the frontend can show a
-    degraded-mode banner in AI-dependent modules without blocking their
-    non-AI features.
+    Asked only whether Ollama answered until R4 (2026-10-30): a box with a cloud
+    model and no Ollama showed "AI unavailable", and a box with Ollama but no
+    model pulled showed nothing. Now the same answer as the Status screen's
+    "AI model" line (case_service/readiness.py). No session, no tenant data: the
+    route is open to every signed-in Studio page.
     """
+    from case_service import readiness
     settings = get_settings()
-    ollama_url = settings.ai_ollama_url.rstrip("/")
-    available = False
-
-    try:
-        async with httpx.AsyncClient(timeout=3.0, follow_redirects=False) as client:
-            resp = await client.get(f"{ollama_url}/api/tags")
-            available = resp.status_code < 400
-    except Exception:
-        available = False
+    models = await readiness._ollama_models(settings)
+    completion, _embedding = await readiness.check_ai(settings, models)
+    available = completion["state"] == readiness.WORKING
 
     # ai_dependency tri-state (roadmap #11, §4.4): none | optional | required.
     # When AI is down: "required" modules are unavailable, "optional" run degraded.

@@ -46,7 +46,7 @@ echo "uv=$UV  npm=$NPM"
 echo "database=$(grep -E '^\s+database:' "$VELARIS_DIR/velaris.yaml" | head -1 | sed -E 's/.*database:[[:space:]]*//')"
 echo
 
-for unit in velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio; do
+for unit in velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio; do
   sed -e "s|__VELARIS_USER__|$VELARIS_USER|g" \
       -e "s|__VELARIS_DIR__|$VELARIS_DIR|g" \
       -e "s|__VELARIS_HOME__|$VELARIS_HOME|g" \
@@ -68,11 +68,34 @@ if ! systemctl is-enabled --quiet docker 2>/dev/null; then
 fi
 
 systemctl daemon-reload
-systemctl enable velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio
+# Until this run, case-service's unit may have been running commerce-service,
+# portal-service and user-service beside it (velaris-exec.sh does that while their units are
+# missing — an update cannot install units). Now that the units exist, restart
+# case-service once so it stops doing so and the ports (8207, 8205, 8206) are free for
+# the real units — then start them, or a service that was running before this
+# is down after it (found 2026-10-20: checkout, payments and marketplace 502
+# until a manual start).
+_handover=()
+for _pair in "commerce_service:velaris-commerce-service" "portal_service:velaris-portal-service" \
+             "user_service:velaris-user-service"; do
+  if pgrep -f "uvicorn ${_pair%%:*}.main:app" >/dev/null 2>&1 \
+     && ! systemctl is-active --quiet "${_pair#*:}" 2>/dev/null; then
+    _handover+=("${_pair#*:}")
+  fi
+done
+if systemctl is-active --quiet velaris-case-service 2>/dev/null && [ "${#_handover[@]}" -gt 0 ]; then
+  echo "  case-service was running ${_handover[*]} beside it — restarting it once"
+  systemctl restart velaris-case-service
+  for _u in "${_handover[@]}"; do
+    echo "  starting $_u in its place"
+    systemctl start "$_u"
+  done
+fi
+systemctl enable velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio
 echo
 echo "Installed and enabled (start on boot). Now:"
 echo "  ./stop-velaris.sh                                   # clear the nohup'd processes first"
-echo "  sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio"
+echo "  sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio"
 echo "  systemctl status velaris-studio"
 echo "  journalctl -u velaris-studio -f"
 echo

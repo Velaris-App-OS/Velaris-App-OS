@@ -3,12 +3,48 @@
 #  VELARIS Startup Script
 #  Run after every reboot to bring the full environment up.
 #
-#  Usage:  ./start-velaris.sh
+#  Usage:  ./start-velaris.sh          production mode (default)
+#          ./start-velaris.sh --dev    development: auto-reload, Vite dev server
+#
+#  Mode can also be set in .env: VELARIS_RUN_MODE=production|development.
 # ═══════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
 VELARIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# R5c: a server linked as a STANDBY runs only its two replica databases
+# (standby-velaris.sh). Starting the platform here would start a second
+# PostgreSQL on the replicas' own data. standby.json exists only while linked.
+if [ -f "$VELARIS_DIR/.standby/standby.json" ]; then
+  echo "✗ This server is linked as a Velaris standby ($VELARIS_DIR/.standby/standby.json)." >&2
+  echo "  The platform must not run here while it is one. To use it on its own, unlink it" >&2
+  echo "  first: ./standby-velaris.sh unlink   (on the main server)" >&2
+  exit 1
+fi
+# An old main whose standby was promoted: running it again means two servers
+# taking writes. demoted.json stays until it is linked as the new main's standby.
+if [ -f "$VELARIS_DIR/.standby/demoted.json" ]; then
+  echo "✗ This server was replaced by its standby ($VELARIS_DIR/.standby/demoted.json)." >&2
+  echo "  Starting it would make two main servers. To bring it back as a standby:" >&2
+  echo "  ./standby-velaris.sh retire   then link it from the new main." >&2
+  exit 1
+fi
+# Step 12 (automatic failover): this main stopped itself after losing both the
+# witness and its standby — the standby may have taken over. Its agent lifts
+# this by itself once the witness confirms this server still holds the lease.
+if [ -f "$VELARIS_DIR/.standby/fenced.json" ]; then
+  echo "✗ This server stopped itself: it lost both the failover witness and its standby" >&2
+  echo "  ($VELARIS_DIR/.standby/fenced.json). The standby may have taken over." >&2
+  echo "  Check: ./standby-velaris.sh failover status   (it restarts by itself if it still holds the lease)" >&2
+  exit 1
+fi
+_RUN_MODE_ARG=""
+for _a in "$@"; do
+  case "$_a" in
+    --dev) _RUN_MODE_ARG=development ;;
+    --prod|--production) _RUN_MODE_ARG=production ;;
+  esac
+done
 COMPOSE_FILE="$VELARIS_DIR/deploy/docker-compose/docker-compose.yml"
 # Scratch files and error logs go to a directory only this user can write. A
 # fixed name under /tmp can be pre-created, or pointed somewhere else, by any
@@ -32,6 +68,15 @@ esac
 DB_CONTAINER="docker-compose-velaris-db-1"
 DB_USER="velaris"
 DB_NAME="velaris"
+# Database calls go through deploy/external-services.sh (sourced above with the
+# compose profiles). Without that file — a partial copy — the bundled calls this
+# script always made.
+if ! type velaris_psql >/dev/null 2>&1; then
+  velaris_is_external() { return 1; }
+  velaris_psql()        { docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"; }
+  velaris_pg_isready()  { docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U "$DB_USER" -q; }
+  velaris_pg_url()      { printf '%s' "${VELARIS_CASE_DATABASE_URL:-}"; }
+fi
 
 # ── Step 0: OpenBao secrets (Group K, opt-in) ─────────────────────
 # Enabled by the sentinel file deploy/openbao/enabled. When active, .env is
@@ -41,6 +86,10 @@ DB_NAME="velaris"
 if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
   echo "▶ Step 0: OpenBao secrets..."
   [ -f "$VELARIS_DIR/.env" ] || touch "$VELARIS_DIR/.env"   # compose interpolation needs the file to exist
+  # One-time move of file storage to raft (OpenBao 2.7 has no file backend).
+  # Must run before OpenBao starts; a failure is reported and Step 0 carries on.
+  "$VELARIS_DIR/scripts/openbao-storage-migrate.sh" \
+    || echo -e "  \033[0;33m⚠ OpenBao storage migration failed — see above\033[0m"
   # Every failure below degrades to "continue on the existing .env" — Step 0
   # must never be the reason the platform fails to start (set -e is active).
   if ! docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d openbao 2>/dev/null; then
@@ -49,7 +98,7 @@ if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
   BAO_HEALTH="000"
   for i in $(seq 1 15); do
     BAO_HEALTH=$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
-      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || echo "000")
+      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || true)
     [ "$BAO_HEALTH" != "000" ] && break
     sleep 1
   done
@@ -91,18 +140,27 @@ echo ""
 # GATE 1: Product key verification (MUST PASS — first check, always)
 # ════════════════════════════════════════════════════════════════════
 # If systemd already supervises Velaris, starting a second copy from a shell
-# gives two processes racing for 8100/8201/8202/8203/8204/5173. The nohup copy usually wins
+# gives two processes racing for 8100/8201/8202/8203/8204/8205/8206/8207/8208/5173. The nohup copy usually wins
 # the bind, systemd's restarts fail quietly, and the whole thing disappears at
 # the next logout. Refuse instead.
 if systemctl is-active --quiet velaris-case-service 2>/dev/null \
    || systemctl is-active --quiet velaris-engine 2>/dev/null; then
   yellow "  ⚠ Velaris is already running under systemd."
-  echo   "    Status:   sudo systemctl status velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio"
-  echo   "    Restart:  sudo systemctl restart velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio"
+  # Name only the units this box has: commerce-, portal- and user-service run
+  # inside case-service's unit until `sudo deploy/systemd/install.sh` installs
+  # their own (R5e steps 7, 8, 10).
+  _units="velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-commerce-service.service" ] && _units="$_units velaris-commerce-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-portal-service.service" ] && _units="$_units velaris-portal-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-user-service.service" ] && _units="$_units velaris-user-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-worker-service.service" ] && _units="$_units velaris-worker-service"
+  _units="$_units velaris-studio"
+  echo   "    Status:   sudo systemctl status $_units"
+  echo   "    Restart:  sudo systemctl restart $_units"
   echo   "    Logs:     sudo journalctl -u velaris-case-service -f"
   echo ""
   echo   "    To run from this shell instead:"
-  echo   "      sudo systemctl stop velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio"
+  echo   "      sudo systemctl stop $_units"
   exit 0
 fi
 
@@ -190,10 +248,25 @@ if [ "$DB_FAMILY" = "mysql" ]; then
   DB_PASSWORD="${VELARIS_DB_PASSWORD:-}"
   # The mysql:8 client speaks to both MySQL 8 and MariaDB 10.6+/11 servers (the mariadb
   # image dropped the `mysql` command, so mysql:8 is the portable client for both).
+  # TLS when VELARIS_CASE_DATABASE_URL names ?ssl_ca= (deploy/external-services.sh);
+  # nothing added otherwise.
+  _MY_TLS_MOUNTS=(); _MY_TLS_FLAGS=()
+  if type velaris_mysql_tls_mounts >/dev/null 2>&1; then
+    mapfile -t _MY_TLS_MOUNTS < <(velaris_mysql_tls_mounts)
+    mapfile -t _MY_TLS_FLAGS < <(velaris_mysql_tls_flags)
+  fi
   mysql_client() {
-    docker run --rm -i --network host -e MYSQL_PWD="$DB_PASSWORD" mysql:8 \
-      mysql --connect-timeout=10 -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$@"
+    MYSQL_PWD="$DB_PASSWORD" docker run --rm -i --network host -e MYSQL_PWD "${_MY_TLS_MOUNTS[@]}" mysql:8.4.11 \
+      mysql --connect-timeout=10 -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "${_MY_TLS_FLAGS[@]}" "$@"
   }
+fi
+
+# ── Guard: parts on other servers must be secured ────────────────
+# VELARIS_EXTERNAL_SERVICES unset = everything bundled, nothing checked. When a
+# part is listed, starting without its TLS/authentication settings is refused
+# (deploy/external-services.sh names what is missing).
+if type velaris_external_check >/dev/null 2>&1 && ! velaris_external_check; then
+  exit 1
 fi
 
 # ── Guard: Docker accessible? ────────────────────────────────────
@@ -214,7 +287,7 @@ docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" down --remove-o
 sudo systemctl stop postgresql 2>/dev/null || true
 
 # Host processes only — these ports belong to uvicorn/vite, not to Docker.
-for port in 8100 8201 8202 8203 8204 5173; do
+for port in 8100 8201 8202 8203 8204 8205 8206 8207 8208 5173; do
   fuser -k "${port}/tcp" 2>/dev/null || true
 done
 
@@ -236,7 +309,31 @@ echo ""
 
 # ── Step 1: Start Docker infrastructure ──────────────────────────
 echo "▶ Starting Docker infrastructure..."
-docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d
+# Redpanda was replaced by Kafka; remove a leftover broker (compose-profiles.sh).
+type velaris_retire_redpanda >/dev/null 2>&1 && velaris_retire_redpanda
+# A pooler turned off since the last start (compose-profiles.sh).
+type velaris_retire_pooler >/dev/null 2>&1 && velaris_retire_pooler
+# Event bus on without a broker password (bus turned on later, or an install
+# from before the password): generate and store one (compose-profiles.sh).
+type velaris_ensure_event_bus_password >/dev/null 2>&1 && velaris_ensure_event_bus_password
+# Cache turned on without a password: give it one (Valkey restarts with it).
+type velaris_ensure_cache_password >/dev/null 2>&1 && velaris_ensure_cache_password
+# The internal service secret (R5e step 7) — every install has one.
+type velaris_ensure_internal_secret >/dev/null 2>&1 && velaris_ensure_internal_secret
+# The gateway's optional settings, as include files (never template variables).
+type velaris_gateway_options >/dev/null 2>&1 && velaris_gateway_options
+# deploy/tls/certs before Docker can create it as root (the gateway mounts it).
+# shellcheck source=deploy/tls/certs-dir.sh
+[ -f "$VELARIS_DIR/deploy/tls/certs-dir.sh" ] && . "$VELARIS_DIR/deploy/tls/certs-dir.sh" && velaris_tls_certs_dir "$VELARIS_DIR"
+# Parts on other servers (VELARIS_EXTERNAL_SERVICES): their bundled containers
+# are not started. Nothing external = the list is empty = a plain `up -d`.
+_UP_SVCS=""
+if type velaris_compose_up_services >/dev/null 2>&1; then
+  velaris_retire_external_containers "$COMPOSE_FILE" "$VELARIS_DIR/.env"
+  _UP_SVCS="$(velaris_compose_up_services "$COMPOSE_FILE" "$VELARIS_DIR/.env")" || exit 1
+fi
+# shellcheck disable=SC2086
+docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d $_UP_SVCS
 echo "  Waiting for services to initialise..."
 sleep 10
 
@@ -253,7 +350,9 @@ echo ""
 echo "  Checking containers:"
 _CHECK_SVCS="velaris-db temporal temporal-ui cache mailpit"
 [ "${VELARIS_BUNDLED_MINIO_ACTIVE:-false}" = true ] && _CHECK_SVCS="$_CHECK_SVCS minio"
+_EXT_SVCS=" $(type velaris_external_compose_services >/dev/null 2>&1 && velaris_external_compose_services) "
 for svc in $_CHECK_SVCS; do
+  case "$_EXT_SVCS" in *" $svc "*) green "    – $svc on another server"; continue ;; esac
   if docker ps --format '{{.Names}}' | grep -q "$svc"; then
     green "    ✓ $svc running"
   else
@@ -263,9 +362,11 @@ done
 echo ""
 
 # ── Step 2: Wait for Temporal ────────────────────────────────────
-echo "▶ Waiting for Temporal (port 7233)..."
+_TEMPORAL_TARGET="$(type velaris_temporal_target >/dev/null 2>&1 && velaris_temporal_target || echo localhost:7233)"
+_TEMPORAL_HOST="${_TEMPORAL_TARGET%:*}"; _TEMPORAL_PORT="${_TEMPORAL_TARGET##*:}"
+echo "▶ Waiting for Temporal ($_TEMPORAL_TARGET)..."
 for i in $(seq 1 30); do
-  if nc -z localhost 7233 2>/dev/null; then
+  if nc -z "$_TEMPORAL_HOST" "$_TEMPORAL_PORT" 2>/dev/null; then
     green "  ✓ Temporal ready"; break
   fi
   [ "$i" -eq 30 ] && yellow "  ⚠ Temporal not ready after 30s — continuing"
@@ -283,14 +384,58 @@ if [ "$DB_FAMILY" = "mysql" ]; then
     sleep 1
   done
 else
-  echo "▶ Waiting for PostgreSQL (port 5432)..."
+  if velaris_is_external database; then
+    echo "▶ Waiting for PostgreSQL (on another server, over TLS)..."
+  else
+    echo "▶ Waiting for PostgreSQL (port 5432)..."
+  fi
   for i in $(seq 1 20); do
-    if docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q 2>/dev/null; then
+    if velaris_pg_isready 2>/dev/null; then
       green "  ✓ PostgreSQL ready"; break
     fi
-    [ "$i" -eq 20 ] && { red "  ✗ PostgreSQL not ready — check: docker logs $DB_CONTAINER"; exit 1; }
+    if [ "$i" -eq 20 ]; then
+      if velaris_is_external database; then
+        red "  ✗ PostgreSQL on another server not reachable — check VELARIS_CASE_DATABASE_URL, its sslrootcert, and the server's firewall"
+      else
+        red "  ✗ PostgreSQL not ready — check: docker logs $DB_CONTAINER"
+      fi
+      exit 1
+    fi
     sleep 1
   done
+  # Query statistics (VELARIS_DB_QUERY_STATS): applied before the services
+  # connect, so the one restart it may need lands on an idle database. Unset =
+  # untouched; a database on another server is skipped by the script.
+  "$VELARIS_DIR/scripts/db-query-stats.sh" || yellow "  ⚠ query statistics not applied — ./scripts/db-query-stats.sh"
+  # R5d 6a: the platform will connect through the bundled pooler, so it must be
+  # up. Never a silent switch to direct: that would put on the database the
+  # load the operator chose to pool. Not active (setting empty) = no wait.
+  if [ "${VELARIS_POOLER_ACTIVE:-false}" = true ]; then
+    echo "▶ Waiting for the connection pooler (port 6432)..."
+    for i in $(seq 1 20); do
+      _pcid="$(docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" ps -q velaris-pooler 2>/dev/null || true)"
+      if [ -n "$_pcid" ] && [ "$(docker inspect -f '{{.State.Health.Status}}' "$_pcid" 2>/dev/null)" = healthy ]; then
+        # Over its socket (VELARIS_CASE_DATABASE_POOLER_SOCKET): the socket must
+        # be there too — the platform has no TCP fallback, by design.
+        _psock="$(grep -E '^VELARIS_CASE_DATABASE_POOLER_SOCKET=' "$VELARIS_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
+        case "$_psock" in
+          1|true|yes|on)
+            if [ -S "$VELARIS_DIR/deploy/docker-compose/pooler-socket/.s.PGSQL.6432" ]; then
+              green "  ✓ Connection pooler ready (socket)"; break
+            fi ;;
+          *) green "  ✓ Connection pooler ready"; break ;;
+        esac
+      fi
+      if [ "$i" -eq 20 ]; then
+        red "  ✗ Connection pooler not ready — check: docker compose logs velaris-pooler"
+        red "    (or empty VELARIS_CASE_DATABASE_POOLER_URL in .env to connect directly)"
+        red "    With VELARIS_CASE_DATABASE_POOLER_SOCKET on: deploy/docker-compose/pooler-socket must"
+        red "    belong to this install's owner (the pooler refuses a root-owned one)."
+        exit 1
+      fi
+      sleep 1
+    done
+  fi
 fi
 echo ""
 
@@ -329,7 +474,7 @@ if [ "$DB_FAMILY" = "mysql" ]; then
   green "  ✓ Migrations: $APPLIED applied, $SKIPPED already up-to-date"
   echo ""
 else
-docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q <<'SQL'
+velaris_psql -q <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename   TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -338,10 +483,12 @@ SQL
 
 APPLIED=0; SKIPPED=0; FAILED=0
 
+# What is already applied, read ONCE: one query, not one per file — against a
+# database on another server each query is a client container (~1 s).
+_APPLIED_MIGRATIONS="$(velaris_psql -tAq -c "SELECT filename FROM schema_migrations;" </dev/null 2>/dev/null || true)"
 for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -name "*.sql" | sort); do
   filename="$(basename "$migration_file")"
-  EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-    -c "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")
+  EXISTS=""; grep -qxF "$filename" <<<"$_APPLIED_MIGRATIONS" && EXISTS=1
   if [ "$EXISTS" = "1" ]; then
     echo "    skip  $filename"; SKIPPED=$((SKIPPED + 1)); continue
   fi
@@ -351,10 +498,10 @@ for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -n
   # is how an install ended up with 080 "applied" and its column unchanged
   # (repaired by 217). setup-velaris.sh and update-velaris.sh already had it;
   # this runner was missed until 2026-10-11.
-  if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+  if velaris_psql -q \
       -v ON_ERROR_STOP=1 < "$migration_file" 2>"$VELARIS_SCRATCH/migration_err.log"; then
-    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
-      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;"
+    velaris_psql -q \
+      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;" </dev/null
     green "✓"; APPLIED=$((APPLIED + 1))
   else
     red "FAILED"; cat "$VELARIS_SCRATCH/migration_err.log"; FAILED=$((FAILED + 1))
@@ -387,14 +534,14 @@ if [ -f "$MANIFEST_FILE" ]; then
   if [ "$DB_FAMILY" = "mysql" ]; then
     DB_COUNT=$(mysql_client "$DB_NAME" -N -e "SELECT COUNT(*) FROM scheduled_releases;" 2>/dev/null | tr -d '[:space:]' || echo 0)
   else
-    DB_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-      -c "SELECT COUNT(*) FROM scheduled_releases;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+    DB_COUNT=$(velaris_psql -tAq \
+      -c "SELECT COUNT(*) FROM scheduled_releases;" </dev/null 2>/dev/null | tr -d '[:space:]' || echo 0)
   fi
   echo "▶ Syncing release manifest ($DB_COUNT features in DB, $MANIFEST_COUNT in manifest)..."
   if [ "$DB_FAMILY" = "mysql" ]; then
     _man_ok=0; mysql_client "$DB_NAME" < "$MANIFEST_FILE" 2>"$VELARIS_SCRATCH/manifest_err.log" && _man_ok=1
   else
-    _man_ok=0; docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q < "$MANIFEST_FILE" 2>"$VELARIS_SCRATCH/manifest_err.log" && _man_ok=1
+    _man_ok=0; velaris_psql -q < "$MANIFEST_FILE" 2>"$VELARIS_SCRATCH/manifest_err.log" && _man_ok=1
   fi
   if [ "$_man_ok" = "1" ]; then
     if [ "$MANIFEST_COUNT" -gt "$DB_COUNT" ]; then
@@ -416,6 +563,10 @@ if [ "$DB_FAMILY" = "mysql" ]; then
   # No password in the URL — check_superadmin.py reads VELARIS_DB_PASSWORD from the
   # env (sourced from .env above), so a special-char password can't corrupt the URL.
   SUPERADMIN_DB_URL="mysql://${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+elif velaris_is_external database; then
+  # The platform's own URL and TLS (check_superadmin.py reads the TLS from
+  # VELARIS_CASE_DATABASE_URL). Passed in the environment, never on a command line.
+  SUPERADMIN_DB_URL="$(velaris_pg_url)"
 else
   SUPERADMIN_DB_URL="postgresql://velaris:${VELARIS_DB_PASSWORD:-velaris_dev_password}@localhost:5432/velaris"
 fi
@@ -441,6 +592,16 @@ cd "$VELARIS_DIR"
 _EXTRAS=""
 uv run python -c "import faster_whisper" >/dev/null 2>&1 && _EXTRAS="$_EXTRAS --extra intelligence"
 uv run python -c "import av" >/dev/null 2>&1 && _EXTRAS="$_EXTRAS --extra kyc"
+# The MySQL/MariaDB driver (aiomysql + pymysql) is an extra: without it a
+# MySQL/MariaDB install cannot reach its own database, and `uv sync` (exact)
+# would remove one installed by hand. Fixed 2026-10-16 — it was never installed.
+case "${DATABASE_BACKEND:-postgresql}" in mysql|mariadb) _EXTRAS="$_EXTRAS --extra mysql" ;; esac
+# The event bus client: needed when the bus is on (compose-profiles.sh), kept
+# when already present. Without it the relay stays off even with the bus "on".
+if [ "${VELARIS_EVENT_BROKER_ACTIVE:-false}" = true ] \
+   || uv run python -c "import aiokafka" >/dev/null 2>&1; then
+  _EXTRAS="$_EXTRAS --extra events"
+fi
 uv sync --all-packages $_EXTRAS --quiet 2>/dev/null && green "  ✓ Dependencies up to date$([ -n "$_EXTRAS" ] && echo " (extras preserved:$_EXTRAS)")" || yellow "  ⚠ uv sync had warnings — continuing"
 echo ""
 
@@ -453,6 +614,21 @@ export VELARIS_SERVICE_REGISTRY='{"order-service":"http://localhost:3001","notif
 green "  ✓ Environment ready (database: $DATABASE_BACKEND)"
 
 # ── Step 5b: Check Ollama ─────────────────────────────────────────
+if velaris_is_external ai; then
+  # Ollama on another server, behind a proxy that checks the bearer key. The
+  # key goes to curl on stdin (-K -), never on a command line.
+  _OLLAMA_URL="${VELARIS_CASE_AI_OLLAMA_URL%/}"
+  echo "▶ Checking Ollama (HxNexus AI backend, on another server)..."
+  if [ -z "$_OLLAMA_URL" ]; then
+    green "  – no Ollama URL set — the platform uses no Ollama"
+  elif printf 'header = "Authorization: Bearer %s"\n' "${VELARIS_CASE_AI_OLLAMA_API_KEY:-}" \
+       | curl -sf --max-time 5 ${VELARIS_CASE_AI_OLLAMA_TLS_CA:+--cacert "$VELARIS_CASE_AI_OLLAMA_TLS_CA"} \
+           -K - "$_OLLAMA_URL/api/tags" > /dev/null 2>&1; then
+    green "  ✓ Ollama reachable at $_OLLAMA_URL"
+  else
+    yellow "  ⚠ Ollama at $_OLLAMA_URL not reachable (or the key was refused) — HxNexus will show offline"
+  fi
+else
 echo "▶ Checking Ollama (HxNexus AI backend, port 11434)..."
 if curl -s --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
   # An online Ollama with NO models pulled makes every AI feature (chat,
@@ -469,6 +645,7 @@ if curl -s --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
 else
   yellow "  ⚠ Ollama not reachable — HxNexus will show offline"
 fi
+fi
 echo ""
 
 # ── Internal TLS (roadmap #18) ────────────────────────────────────
@@ -482,12 +659,59 @@ echo ""
 [ -f "$VELARIS_DIR/deploy/ports/velaris-ports.sh" ] && . "$VELARIS_DIR/deploy/ports/velaris-ports.sh"
 : "${VELARIS_ENGINE_PORT:=8100}" "${VELARIS_CASE_PORT:=8201}" "${VELARIS_ANALYTICS_PORT:=8202}"
 : "${VELARIS_HXGRAPH_PORT:=8203}" "${VELARIS_HXMIGRATE_PORT:=8204}" "${VELARIS_STUDIO_PORT:=5173}"
+: "${VELARIS_COMMERCE_PORT:=8207}" "${VELARIS_PORTAL_PORT:=8205}" "${VELARIS_WORKER_PORT:=8208}"
+: "${VELARIS_USER_PORT:=8206}"
+# A mistyped port is the default too, with a line saying so (R1).
+. "$VELARIS_DIR/deploy/ports.sh"
+for _p in VELARIS_ENGINE_PORT:8100 VELARIS_CASE_PORT:8201 VELARIS_ANALYTICS_PORT:8202 \
+          VELARIS_HXGRAPH_PORT:8203 VELARIS_HXMIGRATE_PORT:8204 VELARIS_STUDIO_PORT:5173 \
+          VELARIS_COMMERCE_PORT:8207 VELARIS_PORTAL_PORT:8205 VELARIS_WORKER_PORT:8208 \
+          VELARIS_USER_PORT:8206; do
+  printf -v "${_p%%:*}" '%s' "$(_velaris_port "${_p%%:*}" "${_p##*:}")"
+done
 
 _velaris_tls_args() { :; }
+
+# ── Run mode (Nov_TODO R5e step 1, 2026-10-16) ───────────────────
+# production (default): no auto-reload, Studio served from its built bundle,
+#   logs kept. development (--dev, or VELARIS_RUN_MODE=development): what this
+#   script always did — uvicorn --reload and the Vite dev server.
+# ONE worker per service in both modes, deliberately: case-service starts its
+#   background loops (backup and update watchers, event-bus relay, schedulers)
+#   in every process, so N workers would run them N times, and without the
+#   shared cache live updates and per-process caches would split across workers.
+#   More workers come after shared state (R5e item 4) and the worker-service
+#   split (item 6) — not before.
+VELARIS_RUN_MODE="${_RUN_MODE_ARG:-${VELARIS_RUN_MODE:-production}}"
+case "$VELARIS_RUN_MODE" in development|dev) VELARIS_RUN_MODE=development ;; *) VELARIS_RUN_MODE=production ;; esac
+# Logs: an owner-only directory in the install, rotated at every start (5 kept).
+# Never fixed names under /tmp: another local user can pre-create those as
+# symlinks and have the service's output written into a file of their choosing.
+VELARIS_LOG_DIR="${VELARIS_LOG_DIR:-$VELARIS_DIR/logs}"
+mkdir -p "$VELARIS_LOG_DIR" && chmod 700 "$VELARIS_LOG_DIR"
+_svc_log() {
+  local f="$VELARIS_LOG_DIR/velaris-$1.log" i
+  for i in 4 3 2 1; do [ -f "$f.$i" ] && mv -f "$f.$i" "$f.$((i + 1))"; done
+  [ -f "$f" ] && mv -f "$f" "$f.1"
+  ( umask 077; : > "$f" )
+  printf '%s' "$f"
+}
+# uvicorn reload flags — only in development. Each argument is a source dir to watch.
+_reload_args() {
+  [ "$VELARIS_RUN_MODE" = development ] || return 0
+  printf -- '--reload'
+  local d; for d in "$@"; do printf -- ' --reload-dir %s' "$d"; done
+}
+echo "  Run mode: $VELARIS_RUN_MODE (logs: $VELARIS_LOG_DIR)"
+
 # Same reasoning: a plain http probe is exactly what the script did before.
 _velaris_probe() { curl -sf --max-time 3 "http://localhost:$1/health" >/dev/null 2>&1; }
 # shellcheck source=/dev/null
 [ -f "$VELARIS_DIR/deploy/tls/uvicorn-tls-args.sh" ] && . "$VELARIS_DIR/deploy/tls/uvicorn-tls-args.sh"
+# Processes per service (VELARIS_WORKERS_<SERVICE>) — prints nothing when unset or 1.
+_velaris_workers_args() { :; }
+# shellcheck source=/dev/null
+[ -f "$VELARIS_DIR/deploy/workers-args.sh" ] && . "$VELARIS_DIR/deploy/workers-args.sh"
 
 # ── Step 6: Start Engine ──────────────────────────────────────────
 echo "▶ Starting Velaris Engine (port 8100)..."
@@ -500,12 +724,12 @@ cd "$VELARIS_DIR"
 # Velaris/, dist — which is ~18,600 inotify watches EACH. Since #13b-e made
 # this four processes that is 65,000+ of the kernel's 65,536 default, and the
 # next thing to start (Studio's vite) dies with ENOSPC. Seen 2026-08-24.
+_LOG_ENGINE="$(_svc_log engine)"
 nohup uv run uvicorn helix_engine.main:app \
-  --host 127.0.0.1 --port "${VELARIS_ENGINE_PORT}" --reload \
-  --reload-dir engine \
+  --host 127.0.0.1 --port "${VELARIS_ENGINE_PORT}" $(_reload_args engine) \
   --proxy-headers \
-  > /tmp/velaris-engine.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-engine.log"
+  > "$_LOG_ENGINE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_ENGINE"
 for i in $(seq 1 20); do
   if curl -s http://localhost:8100/health > /dev/null 2>&1; then
     green "  ✓ Engine ready on port 8100"; break
@@ -518,13 +742,13 @@ echo ""
 # ── Step 7: Start Case Service ────────────────────────────────────
 echo "▶ Starting Case Service (loopback 127.0.0.1:8201, only reachable via API gateway on 8200)..."
 # shellcheck disable=SC2046 - deliberate word splitting; the values are ours
-nohup uv run uvicorn case_service.main:app $(_velaris_tls_args case-service) \
-  --host 127.0.0.1 --port "${VELARIS_CASE_PORT}" --reload \
-  --reload-dir services/case-service --reload-dir services/_shared \
+_LOG_CASE_SERVICE="$(_svc_log case-service)"
+nohup uv run uvicorn case_service.main:app $(_velaris_tls_args case-service) $(_velaris_workers_args case-service) \
+  --host 127.0.0.1 --port "${VELARIS_CASE_PORT}" $(_reload_args services/case-service services/_shared) \
   --proxy-headers \
   --app-dir services/case-service \
-  > /tmp/velaris-case-service.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-case-service.log"
+  > "$_LOG_CASE_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_CASE_SERVICE"
 for i in $(seq 1 20); do
   if _velaris_probe "${VELARIS_CASE_PORT}"; then
     green "  ✓ Case Service ready on port 8201"; break
@@ -541,13 +765,13 @@ echo ""
 echo "▶ Starting Analytics Service (loopback 127.0.0.1:8202, reachable via the gateway on 8200)..."
 cd "$VELARIS_DIR"
 # shellcheck disable=SC2046 - deliberate word splitting; the values are ours
-nohup uv run uvicorn analytics_service.main:app $(_velaris_tls_args analytics-service) \
-  --host 127.0.0.1 --port "${VELARIS_ANALYTICS_PORT}" --reload \
-  --reload-dir services/analytics-service --reload-dir services/_shared \
+_LOG_ANALYTICS_SERVICE="$(_svc_log analytics-service)"
+nohup uv run uvicorn analytics_service.main:app $(_velaris_tls_args analytics-service) $(_velaris_workers_args analytics-service) \
+  --host 127.0.0.1 --port "${VELARIS_ANALYTICS_PORT}" $(_reload_args services/analytics-service services/_shared) \
   --proxy-headers \
   --app-dir services/analytics-service \
-  > /tmp/velaris-analytics-service.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-analytics-service.log"
+  > "$_LOG_ANALYTICS_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_ANALYTICS_SERVICE"
 for i in $(seq 1 20); do
   if _velaris_probe "${VELARIS_ANALYTICS_PORT}"; then
     green "  ✓ Analytics Service ready on port 8202"; break
@@ -562,13 +786,13 @@ echo ""
 echo "▶ Starting HxGraph Service (loopback 127.0.0.1:8203, reachable via the gateway on 8200)..."
 cd "$VELARIS_DIR"
 # shellcheck disable=SC2046 - deliberate word splitting; the values are ours
-nohup uv run uvicorn hxgraph_service.main:app $(_velaris_tls_args hxgraph-service) \
-  --host 127.0.0.1 --port "${VELARIS_HXGRAPH_PORT}" --reload \
-  --reload-dir services/hxgraph-service --reload-dir services/_shared \
+_LOG_HXGRAPH_SERVICE="$(_svc_log hxgraph-service)"
+nohup uv run uvicorn hxgraph_service.main:app $(_velaris_tls_args hxgraph-service) $(_velaris_workers_args hxgraph-service) \
+  --host 127.0.0.1 --port "${VELARIS_HXGRAPH_PORT}" $(_reload_args services/hxgraph-service services/_shared) \
   --proxy-headers \
   --app-dir services/hxgraph-service \
-  > /tmp/velaris-hxgraph-service.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-hxgraph-service.log"
+  > "$_LOG_HXGRAPH_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_HXGRAPH_SERVICE"
 for i in $(seq 1 20); do
   if _velaris_probe "${VELARIS_HXGRAPH_PORT}"; then
     green "  ✓ HxGraph Service ready on port 8203"; break
@@ -584,18 +808,114 @@ echo ""
 echo "▶ Starting HxMigrate Service (loopback 127.0.0.1:8204, reachable via the gateway on 8200)..."
 cd "$VELARIS_DIR"
 # shellcheck disable=SC2046 - deliberate word splitting; the values are ours
-nohup uv run uvicorn hxmigrate_service.main:app $(_velaris_tls_args hxmigrate-service) \
-  --host 127.0.0.1 --port "${VELARIS_HXMIGRATE_PORT}" --reload \
-  --reload-dir services/hxmigrate-service --reload-dir services/_shared \
+_LOG_HXMIGRATE_SERVICE="$(_svc_log hxmigrate-service)"
+nohup uv run uvicorn hxmigrate_service.main:app $(_velaris_tls_args hxmigrate-service) $(_velaris_workers_args hxmigrate-service) \
+  --host 127.0.0.1 --port "${VELARIS_HXMIGRATE_PORT}" $(_reload_args services/hxmigrate-service services/_shared) \
   --proxy-headers \
   --app-dir services/hxmigrate-service \
-  > /tmp/velaris-hxmigrate-service.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-hxmigrate-service.log"
+  > "$_LOG_HXMIGRATE_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_HXMIGRATE_SERVICE"
 for i in $(seq 1 20); do
   if _velaris_probe "${VELARIS_HXMIGRATE_PORT}"; then
     green "  ✓ HxMigrate Service ready on port 8204"; break
   fi
   [ "$i" -eq 20 ] && yellow "  ⚠ HxMigrate Service not ready after 20s"
+  sleep 1
+done
+echo ""
+
+# ── Step 7e: Start Commerce Service ──────────────────────────────
+# Extracted from case-service at R5e step 7 — checkout, payments, storefront,
+# marketplace and the model market. Loopback-only; asks case-service for case
+# work over its internal API (VELARIS_INTERNAL_SERVICE_SECRET).
+echo "▶ Starting Commerce Service (loopback 127.0.0.1:${VELARIS_COMMERCE_PORT}, reachable via the gateway on 8200)..."
+cd "$VELARIS_DIR"
+# shellcheck disable=SC2046 - deliberate word splitting; the values are ours
+_LOG_COMMERCE_SERVICE="$(_svc_log commerce-service)"
+VELARIS_SERVICE_NAME=commerce-service \
+nohup uv run uvicorn commerce_service.main:app $(_velaris_tls_args commerce-service) $(_velaris_workers_args commerce-service) \
+  --host 127.0.0.1 --port "${VELARIS_COMMERCE_PORT}" $(_reload_args services/commerce-service services/_shared) \
+  --proxy-headers \
+  --app-dir services/commerce-service \
+  > "$_LOG_COMMERCE_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_COMMERCE_SERVICE"
+for i in $(seq 1 20); do
+  if _velaris_probe "${VELARIS_COMMERCE_PORT}"; then
+    green "  ✓ Commerce Service ready on port ${VELARIS_COMMERCE_PORT}"; break
+  fi
+  [ "$i" -eq 20 ] && yellow "  ⚠ Commerce Service not ready after 20s"
+  sleep 1
+done
+echo ""
+
+# ── Step 7f: Start Portal Service ────────────────────────────────
+# Extracted from case-service at R5e step 8 — the customer portal, customer
+# accounts and portal admin. Loopback-only; asks case-service for case work
+# over its internal API (VELARIS_INTERNAL_SERVICE_SECRET).
+echo "▶ Starting Portal Service (loopback 127.0.0.1:${VELARIS_PORTAL_PORT}, reachable via the gateway on 8200)..."
+cd "$VELARIS_DIR"
+# shellcheck disable=SC2046 - deliberate word splitting; the values are ours
+_LOG_PORTAL_SERVICE="$(_svc_log portal-service)"
+VELARIS_SERVICE_NAME=portal-service \
+nohup uv run uvicorn portal_service.main:app $(_velaris_tls_args portal-service) $(_velaris_workers_args portal-service) \
+  --host 127.0.0.1 --port "${VELARIS_PORTAL_PORT}" $(_reload_args services/portal-service services/_shared) \
+  --proxy-headers \
+  --app-dir services/portal-service \
+  > "$_LOG_PORTAL_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_PORTAL_SERVICE"
+for i in $(seq 1 20); do
+  if _velaris_probe "${VELARIS_PORTAL_PORT}"; then
+    green "  ✓ Portal Service ready on port ${VELARIS_PORTAL_PORT}"; break
+  fi
+  [ "$i" -eq 20 ] && yellow "  ⚠ Portal Service not ready after 20s"
+  sleep 1
+done
+echo ""
+
+# ── Step 7h: Start User Service ──────────────────────────────────
+# Extracted from case-service at R5e step 10 — sign-in, MFA, SSO, SAML, SCIM
+# and the user directory. Loopback-only; asks case-service only to send the
+# password-reset mail (VELARIS_INTERNAL_SERVICE_SECRET). Every service still
+# checks tokens itself, so nothing waits on it per request.
+echo "▶ Starting User Service (loopback 127.0.0.1:${VELARIS_USER_PORT}, reachable via the gateway on 8200)..."
+cd "$VELARIS_DIR"
+# shellcheck disable=SC2046 - deliberate word splitting; the values are ours
+_LOG_USER_SERVICE="$(_svc_log user-service)"
+VELARIS_SERVICE_NAME=user-service \
+nohup uv run uvicorn user_service.main:app $(_velaris_tls_args user-service) $(_velaris_workers_args user-service) \
+  --host 127.0.0.1 --port "${VELARIS_USER_PORT}" $(_reload_args services/user-service services/_shared) \
+  --proxy-headers \
+  --app-dir services/user-service \
+  > "$_LOG_USER_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_USER_SERVICE"
+for i in $(seq 1 20); do
+  if _velaris_probe "${VELARIS_USER_PORT}"; then
+    green "  ✓ User Service ready on port ${VELARIS_USER_PORT}"; break
+  fi
+  [ "$i" -eq 20 ] && yellow "  ⚠ User Service not ready after 20s"
+  sleep 1
+done
+echo ""
+
+# ── Step 7g: Start Worker Service ────────────────────────────────
+# case-service's code in worker mode (R5e step 9): the background jobs, each
+# under a job lease — so while case-service also starts them
+# (VELARIS_CASE_RUN_JOBS unset) one of the two runs each. No API; health only.
+echo "▶ Starting Worker Service (loopback 127.0.0.1:${VELARIS_WORKER_PORT}, background jobs)..."
+cd "$VELARIS_DIR"
+# shellcheck disable=SC2046 - deliberate word splitting; the values are ours
+_LOG_WORKER_SERVICE="$(_svc_log worker-service)"
+VELARIS_SERVICE_NAME=worker-service \
+nohup uv run uvicorn case_service.worker.main:app $(_velaris_tls_args worker-service) $(_velaris_workers_args worker-service) \
+  --host 127.0.0.1 --port "${VELARIS_WORKER_PORT}" $(_reload_args services/case-service services/_shared) \
+  --app-dir services/case-service \
+  > "$_LOG_WORKER_SERVICE" 2>&1 &
+echo "  PID: $! | Logs: tail -f $_LOG_WORKER_SERVICE"
+for i in $(seq 1 30); do
+  if _velaris_probe "${VELARIS_WORKER_PORT}"; then
+    green "  ✓ Worker Service ready on port ${VELARIS_WORKER_PORT}"; break
+  fi
+  [ "$i" -eq 30 ] && yellow "  ⚠ Worker Service not ready after 30s"
   sleep 1
 done
 echo ""
@@ -638,9 +958,27 @@ else
   green "  ✓ Studio dependencies up to date"
 fi
 
-nohup npm run dev -- --host 0.0.0.0 --port "$VELARIS_STUDIO_PORT" --strictPort \
-  > /tmp/velaris-studio.log 2>&1 &
-echo "  PID: $! | Logs: tail -f /tmp/velaris-studio.log"
+_LOG_STUDIO="$(_svc_log studio)"
+if [ "$VELARIS_RUN_MODE" = development ]; then
+  nohup npm run dev -- --host 0.0.0.0 --port "$VELARIS_STUDIO_PORT" --strictPort \
+    > "$_LOG_STUDIO" 2>&1 &
+else
+  # Production serves the BUILT bundle (as the systemd unit does). The Vite dev
+  # server is a development tool: bound to 0.0.0.0 it exposed its module and
+  # file-serving endpoints to the network. Rebuild only when a source is newer.
+  if [ ! -f dist/index.html ] \
+     || [ -n "$(find src public index.html package.json vite.config.ts -newer dist/index.html -print -quit 2>/dev/null)" ]; then
+    echo "  Building Studio (sources changed)..."
+    if npm run build >"$VELARIS_LOG_DIR/velaris-studio-build.log" 2>&1; then
+      green "  ✓ Studio built"
+    else
+      yellow "  ⚠ Studio build FAILED — see $VELARIS_LOG_DIR/velaris-studio-build.log"
+    fi
+  fi
+  nohup npm run preview -- --host 0.0.0.0 --port "$VELARIS_STUDIO_PORT" --strictPort \
+    > "$_LOG_STUDIO" 2>&1 &
+fi
+echo "  PID: $! | Logs: tail -f $_LOG_STUDIO"
 sleep 3
 echo ""
 cd "$VELARIS_DIR"
@@ -685,9 +1023,8 @@ echo "║  Temporal UI:   http://localhost:8233                 ║"
 echo "║  MinIO Console: http://localhost:9001                 ║"
 echo "║  Mailpit UI:    http://localhost:8025                 ║"
 echo "╠═══════════════════════════════════════════════════════╣"
-echo "║  Engine logs:   tail -f /tmp/velaris-engine.log       ║"
-echo "║  Case logs:     tail -f /tmp/velaris-case-service.log ║"
-echo "║  Studio logs:   tail -f /tmp/velaris-studio.log       ║"
+echo "║  Logs:          $VELARIS_LOG_DIR/velaris-<service>.log"
+echo "║  Run mode:      $VELARIS_RUN_MODE (default production; --dev = auto-reload)"
 echo "╠═══════════════════════════════════════════════════════╣"
 echo "║  Stop:          ./stop-velaris.sh                     ║"
 echo "╠═══════════════════════════════════════════════════════╣"

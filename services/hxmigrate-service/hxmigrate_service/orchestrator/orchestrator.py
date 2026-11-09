@@ -169,7 +169,7 @@ async def generate_code_for_task(
     ollama_url: str = "http://localhost:11434",
     ollama_model: str = "qwen2.5-coder:7b",
 ) -> str:
-    """Generate HELIX code for a task using its analysis."""
+    """Generate Velaris code for a task using its analysis."""
     task = await session.get(MigrationTaskModel, task_id)
     if not task:
         raise ValueError("Task not found")

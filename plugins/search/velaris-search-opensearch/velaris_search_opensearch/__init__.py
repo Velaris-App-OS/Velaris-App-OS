@@ -1,4 +1,4 @@
-"""HELIX search plugin: opensearch."""
+"""Velaris search plugin: opensearch."""
 
 class OpensearchBackend:
     """opensearch implementation of the search Protocol."""

@@ -1,4 +1,4 @@
-"""HELIX ai plugin: ollama."""
+"""Velaris ai plugin: ollama."""
 
 class OllamaBackend:
     """ollama implementation of the ai Protocol."""

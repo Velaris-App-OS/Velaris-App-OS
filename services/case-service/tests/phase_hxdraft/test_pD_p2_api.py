@@ -413,7 +413,9 @@ async def test_modify_form_preserves_other_definition_keys(client, monkeypatch,
     assert a.status_code == 201, a.text
     session.expire_all()
     f2 = await session.get(FormDefinitionModel, form_id)
-    assert len(f2.definition_json["fields"]) == 2
+    # An old flat-`fields` form comes out in Form Builder sections (2026-10-28).
+    keys = [f["field_key"] for f in f2.definition_json["sections"][0]["fields"]]
+    assert keys == ["amount", "reason"] and "fields" not in f2.definition_json
     assert f2.definition_json["layout"] == {"columns": 2}   # untouched
 
 

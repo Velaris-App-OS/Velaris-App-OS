@@ -267,6 +267,11 @@ async def audit_anchor_loop() -> None:
     while True:
         try:
             from velaris_shared.db.session import get_analytics_session_factory
+            # Catch up first, in committed batches, so the receipt covers every
+            # row and a backlog bigger than one batch is cleared (2026-11-06).
+            from velaris_shared.db.session import get_session_factory
+            from case_service.compliance.audit_chain import seal_all_pending
+            await seal_all_pending(get_session_factory())
             async with get_analytics_session_factory()() as session:
                 # commit unconditionally — anchor_chain_tip also seals
                 # pending rows, which must persist even on a skip

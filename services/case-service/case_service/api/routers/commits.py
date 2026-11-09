@@ -1,6 +1,6 @@
 """P61 — Platform-wide Commit pattern.
 
-Every save action in Helix is a Commit — a named, auditable change
+Every save action in Velaris is a Commit — a named, auditable change
 with a mandatory message. Commits are recorded here and trigger
 HxWork story advancement via HxNexus NLP.
 """

@@ -7,9 +7,9 @@ was HTTP webhook delivery, so an event reached whoever had subscribed a URL and
 nobody else. Analytics, HxShield detection, the lakehouse and event sourcing all
 need to read the same stream, and none of them are webhooks.
 
-This drains the outbox onto the **durable log** §2.1 names (Redpanda, already in
-`docker-compose`, Kafka-wire-compatible), so any number of consumers can read at
-their own pace and replay from any offset.
+This drains the outbox onto the **durable log** §2.1 names (Apache Kafka, the
+`events` service in `docker-compose`, started only when the bus is on), so any
+number of consumers can read at their own pace and replay from any offset.
 
 Three deliberate choices:
 
@@ -56,6 +56,35 @@ _CLAIM_TTL = 60           # seconds before a stalled claim is retryable
 
 class EventBusUnavailable(RuntimeError):
     """The broker or its client library is not usable."""
+
+
+def _auth_kwargs(username: str, password: str, tls_ca: str = "") -> dict:
+    """Client settings for the broker's SASL/PLAIN listener.
+
+    No password means no SASL: right for an operator's own broker that runs
+    without authentication, and the only behaviour before November 2026. The
+    bundled broker always requires one, so against it an empty password fails
+    to connect — the relay reports that as unavailable and the outbox keeps
+    every event until it is fixed.
+
+    A CA file (VELARIS_CASE_EVENT_BUS_TLS_CA — a broker on another server)
+    turns on TLS with hostname checking: SASL_SSL, or plain SSL without a
+    password. Empty = no TLS, as before.
+    """
+    tls: dict = {}
+    if tls_ca:
+        from aiokafka.helpers import create_ssl_context
+
+        tls = {"ssl_context": create_ssl_context(cafile=tls_ca)}
+    if not password:
+        return {"security_protocol": "SSL", **tls} if tls else {}
+    return {
+        "security_protocol": "SASL_SSL" if tls else "SASL_PLAINTEXT",
+        "sasl_mechanism": "PLAIN",
+        "sasl_plain_username": username or "velaris",
+        "sasl_plain_password": password,
+        **tls,
+    }
 
 
 def _load_producer_class():
@@ -125,15 +154,17 @@ class EventBusRelay:
     cycle retries — at-least-once, same as HTTP delivery.
     """
 
-    def __init__(self, session_factory, *, brokers: str, topic_prefix: str = "velaris") -> None:
+    def __init__(self, session_factory, *, brokers: str, topic_prefix: str = "velaris",
+                 username: str = "", password: str = "", tls_ca: str = "") -> None:
         self._factory = session_factory
         self._brokers = brokers
+        self._auth = _auth_kwargs(username, password, tls_ca)
         self._prefix = topic_prefix
         self._producer = None
         self._task: asyncio.Task | None = None
         self._running = False
-        #: Topics already known to exist. Redpanda does not auto-create by
-        #: default, and a producer against a missing topic fails with
+        #: Topics already known to exist. The bundled broker has topic
+        #: auto-creation switched off, and a producer against a missing topic fails with
         #: UnknownTopicOrPartitionError — which would leave the relay retrying
         #: forever against a broker that was working fine.
         self._ensured: set[str] = set()
@@ -163,7 +194,7 @@ class EventBusRelay:
         if self._producer is not None:
             return self._producer
         producer_cls = _load_producer_class()
-        producer = producer_cls(bootstrap_servers=self._brokers, acks="all")
+        producer = producer_cls(bootstrap_servers=self._brokers, acks="all", **self._auth)
         try:
             await producer.start()
         except Exception as exc:
@@ -185,7 +216,7 @@ class EventBusRelay:
         except Exception as exc:                  # pragma: no cover
             raise EventBusUnavailable(f"aiokafka admin unavailable: {exc}") from exc
 
-        admin = AIOKafkaAdminClient(bootstrap_servers=self._brokers)
+        admin = AIOKafkaAdminClient(bootstrap_servers=self._brokers, **self._auth)
         try:
             await admin.start()
             try:
@@ -206,8 +237,9 @@ class EventBusRelay:
 
     async def _run(self) -> None:
         while self._running:
+            published = 0
             try:
-                await self.drain_once()
+                published = await self.drain_once()
             except EventBusUnavailable as exc:
                 # Expected when the wheel is absent or the broker is down. Log
                 # once per cycle at info: the outbox is still safe on disk, so
@@ -216,7 +248,10 @@ class EventBusRelay:
                 await self._close_producer()
             except Exception as exc:
                 logger.warning("event bus relay cycle error: %s", exc)
-            await asyncio.sleep(_POLL_INTERVAL)
+            # A full batch means more rows are waiting: take the next at once
+            # (as the webhook relay, R6 soak 2026-11-06 L2); pause only when
+            # the queue is drained or the broker failed.
+            await asyncio.sleep(0 if published >= _BATCH_SIZE else _POLL_INTERVAL)
 
     async def drain_once(self) -> int:
         """Publish one batch. Returns how many events were published."""

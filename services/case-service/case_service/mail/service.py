@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .parser import parse_rfc822
+from .parser import parse_rfc822, quoted_message_ids
 from .smtp_client import build_mime_message, send_via_smtp
 from .templates import render_template
 from .threader import (
@@ -18,6 +18,9 @@ from .threader import (
 )
 
 log = logging.getLogger(__name__)
+
+#: What a stored message says in place of a body that held a one-time code.
+SECRET_BODY_PLACEHOLDER = "[not stored: this message carried a one-time code]"
 
 
 class ConsentRefused(Exception):
@@ -84,8 +87,15 @@ class EmailService:
         purpose: str | None = None,
         tenant_id: str | None = None,
         calendar_ics: str | None = None,
+        secret_body: bool = False,
     ):
         """Send an email, enforcing purpose limitation for gated purposes.
+
+        `secret_body`: the message carries a one-time code (sign-in, password
+        reset, bank-details verification). It is sent as written, but the stored
+        row keeps no body — `email_messages` is read through the mail API by
+        anyone holding `platform.email.read`, and a stored code is a way into the
+        account it was sent to (found R5e step 10, 2026-10-22).
 
         `purpose` defaults to `case_processing`, which is **never gated**: case
         correspondence is lawful under contract or legal obligation, and making
@@ -178,7 +188,9 @@ class EmailService:
             account_id=account.id, message_id=msg_id, in_reply_to=in_reply_to,
             references=refs, from_address=account.address,
             to_addresses=to_addresses, cc_addresses=cc_addresses or [],
-            subject=rendered_subject, body_text=rendered_text, body_html=rendered_html,
+            subject=rendered_subject,
+            body_text=SECRET_BODY_PLACEHOLDER if secret_body else rendered_text,
+            body_html=None if secret_body else rendered_html,
             status="queued", is_read=True,
         )
         session.add(row)
@@ -190,9 +202,13 @@ class EmailService:
             return row
 
         try:
+            from .egress import connect_host
+            smtp_host = await connect_host(account.smtp_host, account.tenant_id,
+                                           verified_tls=bool(account.smtp_use_tls),
+                                           session=session)
             await send_via_smtp(
                 mime_message=mime,
-                host=account.smtp_host, port=account.smtp_port,
+                host=smtp_host, port=account.smtp_port,
                 username=account.smtp_username, password=account.smtp_password,
                 use_tls=account.smtp_use_tls,
             )
@@ -233,6 +249,27 @@ class EmailService:
             existing = (await session.execute(q)).scalar_one_or_none()
             if existing is not None:
                 return existing
+            # A message we sent with a one-time code (`secret_body`) comes back
+            # from a polled Sent / All Mail folder tagged with the account's
+            # tenant, so the per-tenant check above misses the row we wrote
+            # without one — and the copy would store the code after all.
+            withheld = (await session.execute(select(EmailMessageModel).where(
+                EmailMessageModel.message_id == parsed["message_id"],
+                EmailMessageModel.body_text == SECRET_BODY_PLACEHOLDER,
+            ).limit(1))).scalar_one_or_none()
+            if withheld is not None:
+                return withheld
+
+        # A reply to, or a bounce of, a message we sent with a one-time code
+        # (`secret_body`) usually quotes it — a bounce encloses the original
+        # whole. Recorded, but without its body. Closed 2026-10-22 (R5e step 10).
+        quoted = quoted_message_ids(raw)
+        if quoted and (await session.execute(select(EmailMessageModel.id).where(
+                EmailMessageModel.message_id.in_(quoted),
+                EmailMessageModel.body_text == SECRET_BODY_PLACEHOLDER,
+        ).limit(1))).first() is not None:
+            parsed["body_text"] = SECRET_BODY_PLACEHOLDER
+            parsed["body_html"] = None
 
         case_id = await resolve_case_id_from_message(
             session,

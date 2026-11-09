@@ -3,7 +3,7 @@ Tests for velaris_ir.models.process
 =================================
 
 These tests verify the IR data structures — the shared vocabulary that
-every Helix component depends on.  If these break, everything breaks.
+every Velaris component depends on.  If these break, everything breaks.
 
 Run with:  pytest libs/helix-ir/python/tests/test_process.py -v
 """

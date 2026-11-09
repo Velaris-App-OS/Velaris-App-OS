@@ -26,6 +26,7 @@ from velaris_shared.auth.dependencies import get_current_user
 from velaris_shared.db import repository as repo
 from velaris_shared.db.models import CaseAssignmentModel, CaseSLAInstanceModel
 from velaris_shared.db.session import get_session
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/queues", tags=["queues"], dependencies=[Depends(get_current_user)])
 
@@ -179,7 +180,7 @@ async def get_queue_item_count(
 @router.get("/{queue_id}/stats", response_model=QueueStatsResponse)
 async def get_queue_stats(
     queue_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
 ):
     """Queue health: counts and SLA distribution."""
     queue = await repo.get_work_queue(session, queue_id)

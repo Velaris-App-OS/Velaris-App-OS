@@ -1,6 +1,6 @@
 """Stage-level status and actions — the second half of the 198 model.
 
-Design: `docs/Future/CASE-ACTIONS-STATUS-DESIGN.md` (§7).
+Design: `docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md` (§7).
 Implementation: `case_service/case_actions/stages.py`.
 
 What these pin, beyond "the feature works":

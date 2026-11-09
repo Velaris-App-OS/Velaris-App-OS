@@ -1,3 +1,4 @@
+import { OperationPicker } from "../form-builder/LookupEditor";
 import React, { useState, useEffect } from "react";
 import type { StageDef, StepDef, AssignmentDef, SLAPolicyDef } from "./StagePipeline";
 import { SLAPolicyTreeLink } from "./SLAPolicyTreeLink";
@@ -482,7 +483,7 @@ const STEP_TYPE_TITLES: Record<string, string> = {
 function ConnectorCallSection({
   config, onChange, stepType = "service_task",
 }: {
-  config: { connector_id?: string; input_mapping?: string; output_mapping?: string; blocking?: boolean };
+  config: { connector_id?: string; input_mapping?: string; output_mapping?: string; blocking?: boolean; operation?: string };
   onChange: (cfg: any) => void;
   stepType?: string;
 }) {
@@ -512,6 +513,9 @@ function ConnectorCallSection({
           ))}
         </select>
       </Field>
+      {/* A connector's named operations (2026-11-04); the step runs the one saved here. */}
+      <OperationPicker connector={connectors.find((c: any) => c.id === config.connector_id)}
+        value={(config as any).operation} onChange={op => up({ operation: op })} />
       <Field label='Input Mapping (JSON: {"connector_param": "case_field"})'>
         <textarea
           value={config.input_mapping ?? "{}"}

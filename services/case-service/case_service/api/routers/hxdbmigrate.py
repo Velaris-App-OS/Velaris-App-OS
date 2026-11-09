@@ -167,6 +167,34 @@ async def get_source_types(
 
 # ── sources CRUD ────────────────────────────────────────────────────────────────
 
+async def _is_operator(session: AsyncSession, user: AuthenticatedUser) -> bool:
+    from case_service.tenancy.identity import is_platform_operator
+    return await is_platform_operator(session, user)
+
+
+async def _tenant_source(session: AsyncSession, tenant_id) -> bool:
+    """A source of any tenant but the default (the operator's) connects only to a
+    public address, pinned at connect time (2026-11-04)."""
+    from case_service.tenancy.identity import DEFAULT_TENANT, same_tenant_as_default
+    return not await same_tenant_as_default(session, tenant_id or DEFAULT_TENANT)
+
+
+async def _require_reachable_host(session: AsyncSession, user: AuthenticatedUser, host: str) -> None:
+    """A tenant may connect to a database on the internet, never to this
+    install's own network (2026-11-04): a demo tenant aimed a source at
+    127.0.0.1:5432 and the error told it whether the platform's database
+    password was right. The platform operator's LAN sources are unchanged."""
+    from velaris_shared.hxbridge.security import validate_outbound_host
+    from velaris_shared.tenancy.identity import is_platform_operator
+    if await is_platform_operator(session, user):
+        return
+    try:
+        await validate_outbound_host(host)
+    except ValueError:
+        raise HTTPException(400, "That database host is not reachable from this platform: "
+                                 "private and internal addresses are refused.")
+
+
 @router.post("/sources", status_code=201)
 async def create_source(
     body: SourceCreate,
@@ -180,10 +208,12 @@ async def create_source(
         raise HTTPException(400, str(exc))
 
     port = body.port or source_mod.default_port(st)
+    await _require_reachable_host(session, user, body.host)
     # Validate host + credentials by actually connecting read-only before persisting.
     try:
         await source_mod.test_connection(st, body.host, port, body.database,
-                                         body.username, body.password, body.ssl_mode)
+                                         body.username, body.password, body.ssl_mode,
+                                         public_only=not await _is_operator(session, user))
     except source_mod.SourceError as exc:
         raise HTTPException(400, str(exc))
 
@@ -254,9 +284,12 @@ async def test_source(
 ):
     await _require_admin(session, user)
     s = await _get_source(session, user, source_id)
+    await _require_reachable_host(session, user, s.host)
     pw = decrypt_credentials(s.credentials).get("password", "")
     try:
-        await source_mod.test_connection(s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode)
+        await source_mod.test_connection(s.source_type, s.host, s.port, s.database, s.username, pw,
+                                         s.ssl_mode,
+                                         public_only=await _tenant_source(session, s.tenant_id))
         ok = True
     except source_mod.SourceError as exc:
         ok = False
@@ -292,7 +325,8 @@ async def analyze_source(
     )
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             result = await report.analyze_source(src_session, deep=body.deep)
         if body.ai:
@@ -398,7 +432,8 @@ async def generate_case_type(
     pw = decrypt_credentials(s.credentials).get("password", "")
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             return await casegen.generate_case_type(src_session, body.table, body.status_column)
     except source_mod.SourceError as exc:
@@ -479,7 +514,8 @@ async def migrate_data(
     )
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             result = await migrate_mod.migrate_table(
                 src_session, session,
@@ -546,7 +582,8 @@ async def sync_source_table(
     )
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             result = await sync_mod.sync_table(
                 src_session, session,
@@ -586,7 +623,8 @@ async def get_sync_status(
     pw = decrypt_credentials(s.credentials).get("password", "")
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             status = await sync_mod.sync_status(src_session, session, source_id=s.id)
     except source_mod.SourceError as exc:
@@ -635,7 +673,8 @@ async def cutover_source(
     synced_tables: list[str] = []
     try:
         async with source_mod.source_session(
-            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode
+            s.source_type, s.host, s.port, s.database, s.username, pw, s.ssl_mode,
+            public_only=await _tenant_source(session, s.tenant_id),
         ) as src_session:
             for table_name, ct_id in pairs:
                 ct = await repo.get_case_type(session, ct_id) if ct_id else None

@@ -1,0 +1,14 @@
+[Unit]
+Description=Velaris — copy purged accounts' signed records to the off-box backup destinations
+Documentation=file://__VELARIS_DIR__/docs/recovery-runbook.md
+
+[Service]
+Type=oneshot
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+Environment=HOME=__VELARIS_HOME__
+ExecStart=__VELARIS_DIR__/backup-velaris.sh --push-deletions --quiet
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-deletions-push

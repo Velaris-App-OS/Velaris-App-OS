@@ -1,7 +1,7 @@
 /**
  * P61 — HxWork: Development Lifecycle Board
  *
- * Boards are scoped to Helix artifacts (case types, integrations, rules, etc.).
+ * Boards are scoped to Velaris artifacts (case types, integrations, rules, etc.).
  * Cards are user stories about building those artifacts — NOT case instances.
  * Stories auto-advance when a commit is made to the linked artifact.
  *

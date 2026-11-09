@@ -23,6 +23,7 @@ from case_service.tenancy.identity import same_tenant
 from velaris_shared.db import repository as repo
 from velaris_shared.config import get_settings
 from velaris_shared.db.session import get_session
+from velaris_shared.db.read_routing import get_cutoff_session
 
 router = APIRouter(prefix="/costing", tags=["costing"])
 
@@ -228,7 +229,7 @@ async def export_billing(
     case_type_id: str | None = None,
     days: int = 30,
     fmt: str = "json",
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_cutoff_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Per-case billable cost lines for invoicing (HxCheckout / storefront).

@@ -249,6 +249,11 @@ class Creator:
                             "title":  sec.title,
                             "fields": [
                                 {
+                                    # field_key + id are what the renderer and the
+                                    # server read; "key" alone left every field of
+                                    # an imported form sharing one empty key.
+                                    "id":          f.field_key,
+                                    "field_key":   f.field_key,
                                     "key":         f.field_key,
                                     "label":       f.label,
                                     "type":        f.field_type,

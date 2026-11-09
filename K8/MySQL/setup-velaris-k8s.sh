@@ -78,7 +78,7 @@ fi
 
 # ── Step 2: images ─────────────────────────────────────────────────
 step "Step 2/7 — Container images"
-IMAGES=(case-service analytics-service hxgraph-service hxmigrate-service engine)
+IMAGES=(case-service analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service engine)
 # The DB SDK is BYO: without this build arg the images carry asyncpg only and
 # cannot open a MySQL connection at all.
 BUILD_ARGS=(--build-arg DB_EXTRAS="[mysql]")

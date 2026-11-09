@@ -42,8 +42,12 @@ async def _get_connector(session: AsyncSession, connector_type: str, connector_i
     else:
         q = q.where(ConnectorRegistryModel.tenant_id == tenant_id)
     row = (await session.execute(q.limit(1))).scalar_one_or_none()
-    if row is None:
+    from velaris_shared.hxbridge.security import check_connector_targets, usable_by
+    # A connector named by id must be this tenant's (or, for the default
+    # tenant, the operator's), and reach only public targets (2026-11-04).
+    if row is None or not await usable_by(session, row, tenant_id):
         raise ValueError(f"No enabled {connector_type} connector found")
+    await check_connector_targets(session, row.tenant_id, row.config)
     return row, decrypt_credentials(row.credentials)
 
 

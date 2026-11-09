@@ -1,4 +1,4 @@
-"""HELIX P34 — SLA v2 & Escalation tests."""
+"""Velaris P34 — SLA v2 & Escalation tests."""
 from __future__ import annotations
 
 import uuid

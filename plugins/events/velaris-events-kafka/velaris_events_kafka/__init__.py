@@ -1,4 +1,4 @@
-"""HELIX events plugin: kafka."""
+"""Velaris events plugin: kafka."""
 
 class KafkaBackend:
     """kafka implementation of the events Protocol."""

@@ -240,7 +240,8 @@ async def _refused_now(session: AsyncSession, case_id) -> str | None:
 async def run_one(session: AsyncSession, job) -> dict:
     """Index one claimed job's document. Never raises — it records instead."""
     from velaris_shared.db.models import DocumentModel, DocumentVersionModel, DocumentChunkModel
-    from case_service.hxnexus.service import index_document
+    from case_service.hxnexus.service import index_document, not_embedded_note
+    report: dict = {}
     from case_service.storage import get_storage_backend
 
     # Read off the row BEFORE any rollback. A rollback expires every loaded
@@ -319,6 +320,7 @@ async def run_one(session: AsyncSession, job) -> dict:
         data = await get_storage_backend().get(ver.storage_key)
         chunks = await index_document(
             session, doc.id, job_case_id, data, doc.content_type, job_tenant_id,
+            report=report,
         )
     except Exception as exc:  # noqa: BLE001 — the outcome is a row, not a 500
         await session.rollback()
@@ -334,9 +336,12 @@ async def run_one(session: AsyncSession, job) -> dict:
                 "status": "failed" if exhausted else "pending",
                 "error": message}
 
-    await _finish(session, job_id, document_id, status="done", chunks=chunks)
+    # Done, but said: chunks no embedding model reached are on the row (R4).
+    note = not_embedded_note(report)
+    await _finish(session, job_id, document_id, status="done", chunks=chunks, error=note)
     return {"document_id": str(document_id), "status": "done",
-            "filename": doc.filename, "chunks": chunks}
+            "filename": doc.filename, "chunks": chunks,
+            **({"warning": note} if note else {})}
 
 
 def staged_key_for(document_id) -> str:
@@ -375,14 +380,15 @@ async def _run_staged(session: AsyncSession, job_id, document_id, case_id, tenan
     are the customer's file, kept only as long as the work needs them. A retry
     that is still pending keeps them.
     """
-    from case_service.hxnexus.service import index_document
+    from case_service.hxnexus.service import index_document, not_embedded_note
+    report: dict = {}
     from case_service.storage import get_storage_backend
 
     try:
         data = await get_storage_backend().get(key)
         chunks = await index_document(
             session, document_id, case_id, data,
-            content_type or "application/octet-stream", tenant_id,
+            content_type or "application/octet-stream", tenant_id, report=report,
         )
     except Exception as exc:  # noqa: BLE001 — the outcome is a row, not a 500
         await session.rollback()
@@ -396,10 +402,12 @@ async def _run_staged(session: AsyncSession, job_id, document_id, case_id, tenan
         return {"document_id": str(document_id),
                 "status": "failed" if exhausted else "pending", "error": message}
 
-    await _finish(session, job_id, document_id, status="done", chunks=chunks)
+    note = not_embedded_note(report)
+    await _finish(session, job_id, document_id, status="done", chunks=chunks, error=note)
     await discard_staged(key)
     return {"document_id": str(document_id), "status": "done",
-            "filename": filename, "chunks": chunks}
+            "filename": filename, "chunks": chunks,
+            **({"warning": note} if note else {})}
 
 
 async def reclaim_stale(session: AsyncSession,

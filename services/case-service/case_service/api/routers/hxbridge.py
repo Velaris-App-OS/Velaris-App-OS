@@ -13,6 +13,7 @@ Endpoints:
   GET  /hxbridge/events                       unified inbound + outbound events (paginated)
   GET  /hxbridge/calls                        list integration call history (legacy alias)
   GET  /hxbridge/dlq                          list dead letter queue items
+  GET  /hxbridge/overflow/{call_id}           a call's full response, when it was too large to store inline
   POST /hxbridge/dlq/{id}/retry               manually retry a DLQ item
   POST /webhooks/{connector_id}/receive       inbound webhook receiver
 """
@@ -45,6 +46,7 @@ from velaris_shared.core.error_codes import (
     CONN_DISABLED_400,
     CONN_NOTFOUND_404,
     CONN_ROLE_403,
+    CONN_FORM_LOOKUP_403,
     CONN_UNKNOWN_TYPE_400,
     coded,
 )
@@ -76,6 +78,7 @@ class ConnectorUpdate(BaseModel):
 
 class SandboxRequest(BaseModel):
     input_data: dict = {}
+    operation:  Optional[str] = None     # one of the connector's named operations
 
 
 class FormLookupRequest(BaseModel):
@@ -83,6 +86,9 @@ class FormLookupRequest(BaseModel):
     form_id:       Optional[str] = None
     field_key:     Optional[str] = None
     case_id:       Optional[uuid.UUID] = None
+    # Honoured only for `integration.connectors.execute` (the builder's Test);
+    # everyone else runs the operation the saved form field names.
+    operation:     Optional[str] = None
 
 
 # ── Connector types ───────────────────────────────────────────────────────────
@@ -126,8 +132,14 @@ async def create_connector(
     # No connector recorded an owner until 2026-09-30, and a NULL one is shared
     # with every tenant (list_connectors). The platform operator's stays that
     # way, as before; a tenant's is its own.
+    owner = await tenant_for_write(session, user, None)
+    from velaris_shared.hxbridge.security import check_connector_config
+    try:
+        await check_connector_config(session, body.connector_type, owner, body.config)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     connector = ConnectorRegistryModel(
-        tenant_id=await tenant_for_write(session, user, None),
+        tenant_id=owner,
         name=body.name,
         connector_type=body.connector_type,
         description=body.description,
@@ -178,18 +190,21 @@ async def list_connectors(
     # Scope to user's tenant + global connectors (tenant_id IS NULL).
     # Superadmin sees everything. A caller with NO tenant claim is the default
     # tenant — until 2026-09-17 it too saw every tenant's connectors.
+    # A connector with no tenant is the operator's, carrying the operator's
+    # credentials: the default tenant's alone since 2026-11-04 (it was shared
+    # with every tenant, a website demo tenant included). The path guard
+    # applies the same rule to every by-id route.
     if "superadmin" not in (user.roles or []):
+        from case_service.tenancy.identity import default_tenant_tokens, same_tenant_as_default
         if user.tenant_id:
             mine = [str(user.tenant_id)]
         else:
-            from case_service.tenancy.identity import default_tenant_tokens
             mine = await default_tenant_tokens(session)
-        stmt = stmt.where(
-            or_(
-                ConnectorRegistryModel.tenant_id.in_(mine),
-                ConnectorRegistryModel.tenant_id.is_(None),
-            )
-        )
+        if await same_tenant_as_default(session, user.tenant_id or "default"):
+            stmt = stmt.where(or_(ConnectorRegistryModel.tenant_id.in_(mine),
+                                  ConnectorRegistryModel.tenant_id.is_(None)))
+        else:
+            stmt = stmt.where(ConnectorRegistryModel.tenant_id.in_(mine))
 
     rows = (await session.execute(stmt)).scalars().all()
     return {"connectors": [_connector_out(r) for r in rows], "total": len(rows)}
@@ -226,7 +241,13 @@ async def update_connector(
     connector = await _get_or_404(session, connector_id)
     if body.name        is not None: connector.name        = body.name
     if body.description is not None: connector.description = body.description
-    if body.config      is not None: connector.config      = body.config
+    if body.config      is not None:
+        from velaris_shared.hxbridge.security import check_connector_config
+        try:
+            await check_connector_config(session, connector.connector_type, connector.tenant_id, body.config)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        connector.config = body.config
     if body.credentials is not None:
         await hxvault.ensure_dek(session, user.tenant_id)
         connector.credentials = encrypt_credentials(body.credentials, tenant_id=user.tenant_id, vault=True)
@@ -290,7 +311,13 @@ async def test_connector(
     connector = await _get_or_404(session, connector_id)
     creds = decrypt_credentials(connector.credentials or {})
     try:
-        impl = get_connector(connector.connector_type, connector.config or {}, creds)
+        from velaris_shared.hxbridge.security import check_connector_targets
+        await check_connector_targets(session, connector.tenant_id, connector.config)
+        from velaris_shared.hxbridge.security import platform_owned, runtime_config
+        from velaris_shared.hxbridge.operations import apply_operation
+        impl = get_connector(connector.connector_type, runtime_config(
+            apply_operation(connector.connector_type, connector.config, None),
+            await platform_owned(session, connector.tenant_id)), creds)
         ok = await impl.test()
     except Exception as exc:
         ok = False
@@ -317,7 +344,8 @@ async def sandbox_execute(
     if not connector.enabled:
         raise coded(400, CONN_DISABLED_400, "Connector is disabled")
     try:
-        result = await execute_connector(session, connector, body.input_data)
+        result = await execute_connector(session, connector, body.input_data,
+                                         operation=body.operation)
         return {"ok": True, "result": result}
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}
@@ -330,24 +358,85 @@ async def form_lookup(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Execute a connector as a form field lookup; logs an audit trail row."""
+    """Execute a connector as a form field lookup; logs an audit trail row.
+
+    Runs only what a saved form says (2026-10-28): the form's lookup field
+    names this connector, and only its mapped inputs are sent. Until then any
+    signed-in user ran any of the tenant's connectors with any input and read
+    the raw response. Free input stays for `integration.connectors.execute`
+    (the builder's Test, which runs before the form is saved).
+    """
     connector = await _get_or_404(session, connector_id)
     if not connector.enabled:
         raise coded(400, CONN_DISABLED_400, "Connector is disabled")
+    input_data, operation = body.input_data, body.operation
+    if not hxguard.user_allows(user, "integration.connectors.execute"):
+        input_data, operation = await _saved_form_lookup_input(session, user, connector_id, body)
     tenant_id = getattr(user, "tenant_id", None) or "default"
     try:
         result = await form_lookup_connector(
-            session, connector, body.input_data,
+            session, connector, input_data,
             tenant_id=tenant_id,
             form_id=body.form_id,
             field_key=body.field_key,
             user_id=user.user_id,
             case_id=body.case_id,
+            operation=operation,
         )
         await session.commit()
         return {"ok": True, "result": result}
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+async def _saved_form_lookup_input(
+    session: AsyncSession, user: AuthenticatedUser,
+    connector_id: uuid.UUID, body: FormLookupRequest,
+) -> tuple[dict, str | None]:
+    """The inputs a saved form's lookup field allows — and the operation it
+    names — or a 403.
+
+    The form must be the caller's tenant's (the path guard does not see a body
+    `form_id`), its field `field_key` a lookup on this connector — or a choice
+    field whose options come from it. Only the parameters in the field's input
+    mapping are passed on.
+    """
+    from velaris_shared.db.models import FormDefinitionModel
+    from velaris_shared.forms import field_key_of
+    from velaris_shared.tenancy.identity import may_reach_tenant
+
+    def refuse():
+        raise coded(403, CONN_FORM_LOOKUP_403, "This lookup is not part of a saved form")
+
+    if not body.form_id or not body.field_key:
+        refuse()
+    try:
+        form_uuid = uuid.UUID(str(body.form_id))
+    except ValueError:
+        refuse()
+    form = await session.get(FormDefinitionModel, form_uuid)
+    if form is None or not await may_reach_tenant(session, user, form.tenant_id):
+        refuse()
+    for section in (form.definition_json or {}).get("sections", []) or []:
+        for f in (section.get("fields", []) if isinstance(section, dict) else []) or []:
+            if not isinstance(f, dict) or field_key_of(f) != body.field_key:
+                continue
+            # A lookup field's `source`, or a choice field whose options come
+            # from a connector (`options_source`, Form Builder part 4).
+            if f.get("type") == "connector_lookup" and isinstance(f.get("source"), dict):
+                src = f["source"]
+            elif f.get("type") in ("dropdown", "radio", "multi_select") \
+                    and isinstance(f.get("options_source"), dict) and f["options_source"].get("kind") == "connector":
+                src = f["options_source"]
+            else:
+                refuse()
+            if str(src.get("connector_id", "")) != str(connector_id):
+                refuse()
+            mapping = src.get("input_mapping")
+            allowed = mapping.keys() if isinstance(mapping, dict) else ()
+            op = src.get("operation") if isinstance(src.get("operation"), str) else None
+            return {k: body.input_data.get(k, "") for k in allowed}, op
+    refuse()
 
 
 # ── Rotate credentials ────────────────────────────────────────────────────────
@@ -462,6 +551,37 @@ async def list_calls(
     return {"calls": [_call_out(r) for r in rows], "total": len(rows)}
 
 
+# ── Large responses (2026-11-08) ──────────────────────────────────────────────
+# A response above `connector_overflow_threshold_bytes` is kept on disk and the
+# call records `{"_overflow": true, "ref_url": "/api/v1/hxbridge/overflow/<id>"}`.
+# That URL had no route. It is read like the call history: connector read
+# permission, and only a call of a connector the caller's tenant may see.
+
+@router.get("/overflow/{call_id}")
+async def get_overflow(
+    call_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    _: AuthenticatedUser = Depends(hxguard.guard("integration.connectors.read")),
+):
+    import json as _json
+    import os
+    from velaris_shared.config import get_settings
+    from case_service.tenancy.identity import scope_to_caller
+    stmt = select(IntegrationCallModel).where(IntegrationCallModel.id == call_id)
+    stmt = await scope_to_caller(stmt, IntegrationCallModel, session, _,
+                                 via=(IntegrationCallModel.connector_id, ConnectorRegistryModel))
+    call = (await session.execute(stmt)).scalars().first()
+    if call is None or not (isinstance(call.response, dict) and call.response.get("_overflow")):
+        raise HTTPException(status_code=404, detail="Not found")
+    path = os.path.join(get_settings().storage_local_path, "connector-overflow", f"{call.id}.json")
+    try:
+        with open(path) as f:
+            body = _json.load(f)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="The stored response is no longer available")
+    return {"call_id": str(call.id), "connector_id": str(call.connector_id), "response": body}
+
+
 # ── Dead letter queue ─────────────────────────────────────────────────────────
 
 @router.get("/dlq")
@@ -554,6 +674,14 @@ def _connector_out(c: ConnectorRegistryModel, include_config: bool = False) -> d
     }
     d["credential_expires_at"]   = c.credential_expires_at.isoformat() if getattr(c, "credential_expires_at", None) else None
     d["credentials_updated_at"] = c.credentials_updated_at.isoformat() if getattr(c, "credentials_updated_at", None) else None
+    # Named operations (2026-11-04) — key, label, method only: what a form
+    # builder offers. Paths stay in the config.
+    from velaris_shared.hxbridge.operations import OperationError, validate_operations
+    try:
+        d["operations"] = [{"key": o["key"], "label": o["label"], "method": o["method"]}
+                           for o in validate_operations(c.connector_type, c.config)]
+    except OperationError:
+        d["operations"] = []
     if include_config:
         d["config"]      = c.config or {}
         d["credentials"] = mask_credentials(c.credentials or {})

@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import SLARiskBadge from "./SLARiskBadge";
+import { loadPrefill } from "../form-builder/prefill";
+import { useFormDraft } from "../form-builder/drafts";
 import { useNavigate } from "react-router-dom";
 import { useApi, useInterval } from "@shared/hooks";
 import { useAuth } from "@/auth";
@@ -21,7 +23,6 @@ import {
   completeAssignment,
   dismissAssignment,
   getAssignmentForm,
-  getCaseVariables,
   submitForm,
   initiatePaymentRequest,
   listCasePaymentRequests,
@@ -1299,7 +1300,9 @@ function MyWorkView() {
 
       {/* ── Case Assignments ── */}
       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: "var(--space-md)" }}>Case Assignments</div>
-      {loading && <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-2xl)" }}><Spinner size={28} /></div>}
+      {/* The spinner is for the first load only: a background refresh must not
+          unmount the rows — an open form (and what was typed in it) lives there. */}
+      {loading && items.length === 0 && <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-2xl)" }}><Spinner size={28} /></div>}
 
       {!loading && items.length === 0 && (
         <EmptyState
@@ -1308,7 +1311,7 @@ function MyWorkView() {
         />
       )}
 
-      {!loading && items.length > 0 && (
+      {items.length > 0 && (
         <>
           <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
             {items.map((a) => (
@@ -1692,7 +1695,8 @@ function QueueDetailView({ queueId, onBack }: { queueId: string; onBack: () => v
         </div>
       )}
 
-      {loading && <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-2xl)" }}><Spinner size={28} /></div>}
+      {/* First load only — a refresh must not unmount an open form (see above). */}
+      {loading && assignments.length === 0 && <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-2xl)" }}><Spinner size={28} /></div>}
 
       {!loading && assignments.length === 0 && (
         <EmptyState
@@ -1701,7 +1705,7 @@ function QueueDetailView({ queueId, onBack }: { queueId: string; onBack: () => v
         />
       )}
 
-      {!loading && assignments.length > 0 && (
+      {assignments.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
           {assignments.map((a) => (
             <AssignmentRow key={a.id} assignment={a} showClaim onClaim={async () => {
@@ -1730,17 +1734,28 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
   assignment: CaseAssignment;
   showClaim?: boolean;
   allowDirectComplete?: boolean;  // skip claimed_at check (for self-assigned / My Work)
-  onClaim?: () => void;
-  onComplete?: () => void;
-  onDismiss?: () => void;
+  onClaim?: () => void | Promise<void>;
+  onComplete?: () => void | Promise<void>;
+  onDismiss?: () => void | Promise<void>;
 }) {
   const { user } = useAuth();
   const CURRENT_USER = user?.user_id ?? "current-user";
   const [showForm, setShowForm] = React.useState(false);
   const [formData, setFormData] = React.useState<any>(null);
+  // Save as draft (§5 step 7): the person's own unfinished answers, restored on open.
+  const draft = useFormDraft(showForm ? assignment.case_id : undefined, showForm ? formData?.id : undefined);
   const [prefillValues, setPrefillValues] = React.useState<Record<string, any>>({});
   const [loadingForm, setLoadingForm] = React.useState(false);
   const [confirmDismiss, setConfirmDismiss] = React.useState(false);
+  const [completeError, setCompleteError] = React.useState<string | null>(null);
+
+  // A refusal (403: not the assignee's access group) must be shown, not lost.
+  const guarded = async (act?: () => void | Promise<void>) => {
+    setCompleteError(null);
+    try { await act?.(); }
+    catch (e: any) { setCompleteError(e?.message || "That did not work."); }
+  };
+  const finish = () => guarded(onComplete);
 
   const isOverdue = assignment.due_at && isPast(assignment.due_at);
   const isDueToday = assignment.due_at && isToday(assignment.due_at);
@@ -1748,35 +1763,21 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
   const handleComplete = async () => {
     // Check if assignment has a form
     setLoadingForm(true);
+    setCompleteError(null);
     try {
       const formInfo = await getAssignmentForm(assignment.id);
       if (formInfo.has_form && formInfo.form) {
-        // Pre-fill from case variables (Case Variables Phase 3): explicit
-        // per-field `variable` binding wins, else field_key match. Reads are
-        // redacted server-side — masked values show as ***.
-        let prefill: Record<string, any> = {};
-        try {
-          const { variables } = await getCaseVariables(assignment.case_id);
-          for (const section of formInfo.form.definition_json?.sections ?? []) {
-            for (const field of section.fields ?? []) {
-              const key = field.field_key || field.id;
-              const source = field.variable || key;
-              if (variables[source] !== undefined && variables[source] !== null) {
-                prefill[key] = variables[source];
-              }
-            }
-          }
-        } catch { /* variables unavailable — open the form unfilled */ }
-        setPrefillValues(prefill);
+        // Pre-fill from case variables — one rule with Case Manager (form-builder/prefill.ts).
+        setPrefillValues(await loadPrefill(assignment.case_id, formInfo.form.definition_json));
         setFormData(formInfo.form);
         setShowForm(true);
       } else {
         // No form — complete directly
-        onComplete?.();
+        await finish();
       }
     } catch (e) {
       // Fallback — complete directly
-      onComplete?.();
+      await finish();
     } finally {
       setLoadingForm(false);
     }
@@ -1822,6 +1823,9 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
             {assignment.assignee_type}: {assignment.assignee_id} · <TimeAgo date={assignment.assigned_at} />
           </div>
+          {completeError && (
+            <div role="alert" style={{ fontSize: 11, color: "var(--status-failed)", marginTop: 2 }}>{completeError}</div>
+          )}
         </div>
 
         {/* Due date */}
@@ -1840,7 +1844,7 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
 
         {/* Actions */}
         {showClaim && assignment.status === "active" && !assignment.claimed_at && onClaim && (
-          <Button size="sm" onClick={(e: any) => { e.stopPropagation(); onClaim(); }}>Claim</Button>
+          <Button size="sm" onClick={(e: any) => { e.stopPropagation(); guarded(onClaim); }}>Claim</Button>
         )}
         {assignment.status === "active" && (assignment.claimed_at || allowDirectComplete) && onComplete && (
           <Button size="sm" variant="secondary" disabled={loadingForm}
@@ -1853,7 +1857,7 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <span style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Remove?</span>
               <button
-                onClick={(e: any) => { e.stopPropagation(); setConfirmDismiss(false); onDismiss(); }}
+                onClick={(e: any) => { e.stopPropagation(); setConfirmDismiss(false); guarded(onDismiss); }}
                 style={{ padding: "3px 10px", fontSize: 11, borderRadius: 4, border: "none", background: "var(--status-failed)", color: "#fff", cursor: "pointer", fontWeight: 600 }}
               >Yes</button>
               <button
@@ -1876,7 +1880,7 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
       </div>
 
       {/* Form modal */}
-      {showForm && formData && (
+      {showForm && formData && draft.ready && (
         <div onClick={() => setShowForm(false)} style={{
           position: "fixed", inset: 0, background: "var(--bg-overlay)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
@@ -1885,12 +1889,16 @@ function AssignmentRow({ assignment, showClaim, allowDirectComplete, onClaim, on
             width: 600, maxHeight: "80vh", overflow: "auto",
           }}>
             <FormRenderer
+              key={draft.key}
               formName={formData.name}
               definition={formData.definition_json}
-              initialValues={prefillValues}
+              initialValues={{ ...prefillValues, ...draft.values }}
               caseId={assignment.case_id}
+              formId={formData.id}
               onSubmit={handleFormSubmit}
               onCancel={() => setShowForm(false)}
+              notice={draft.notice}
+              secondaryAction={draft.action}
             />
           </div>
         </div>

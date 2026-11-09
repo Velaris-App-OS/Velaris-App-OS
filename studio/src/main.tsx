@@ -6,8 +6,12 @@ import { PermissionsProvider, usePermissions } from "@/auth/PermissionsContext";
 import { ThemeProvider } from "@/theme/ThemeContext";
 import ProtectedRoute from "@/auth/ProtectedRoute";
 import RequireRole from "@/auth/RequireRole";
+import { NAV_DATA } from "@/app/nav-data";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { fetchWithBusyRetry } from "@shared/api/busyRetry";
+import { noteDataAsOf } from "@shared/api/dataAsOf";
+import BusyBanner from "@shared/components/BusyBanner";
 
 // ── Global 401 interceptor ────────────────────────────────────────────────────
 // Monkey-patch fetch once at boot. Access tokens are short-lived (15 min) by
@@ -35,7 +39,11 @@ const _EXCLUDED_401 = [
 ];
 const _origFetch = window.fetch.bind(window);
 window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
-  const response = await _origFetch(...args);
+  // A "server busy" refusal of the sign-in check is retried here, for every
+  // caller, before anything below sees it (shared/api/busyRetry.ts).
+  const response = await fetchWithBusyRetry(_origFetch, args);
+  // R5d 11b: a read served from a replica says how current it is.
+  noteDataAsOf(response);
   if (response.status === 401) {
     const url = typeof args[0] === "string" ? args[0] : (args[0] as Request).url;
     const isExcluded = _EXCLUDED_401.some(p => url.includes(p));
@@ -94,8 +102,10 @@ const HxStatus = lazy(() => import("@modules/hxstatus/HxStatus"));
 const HelpCenter = lazy(() => import("@modules/help/HelpCenter"));
 const HxGraph = lazy(() => import("@modules/hxgraph/HxGraph"));
 const FormBuilderPage = lazy(() => import("@modules/form-builder/FormBuilderPage"));
+const ReferenceTablesPage = lazy(() => import("@modules/form-builder/ReferenceTablesPage"));
 const HxBranch = lazy(() => import("@modules/hxbranch/HxBranch"));
 const HxLogs = lazy(() => import("@modules/hxlogs/HxLogs"));
+const AllowedSites = lazy(() => import("@modules/allowed-sites/AllowedSites"));
 const HxDBManager = lazy(() => import("@modules/hxdbmanager/HxDBManager"));
 const HxBridge = lazy(() => import("@modules/hxbridge/HxBridge"));
 const HxAnalytics = lazy(() => import("@modules/hxanalytics/HxAnalytics"));
@@ -147,14 +157,33 @@ function PageLoading() {
   return <div style={{ padding: 24, color: "var(--text-muted, #6b7280)" }}>Loading…</div>;
 }
 
+function UnknownPage() {
+  return (
+    <div style={{ padding: "var(--space-xl, 32px)", color: "var(--text-primary)" }}>
+      <h2 style={{ margin: "0 0 8px", fontSize: 18 }}>Page not found</h2>
+      <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--text-secondary)" }}>
+        There is nothing at <code>{window.location.pathname}</code>. It may have moved, or the link is mistyped.
+      </p>
+      <Link to="/">Go to the dashboard</Link>
+    </div>
+  );
+}
+
 function PermRoute({ path, pageName, children }: { path: string; pageName: string; children: React.ReactNode }) {
-  const { getRouteRoles } = usePermissions();
+  const { getRouteRoles, isOperator } = usePermissions();
+  // The install's own screens (nav-data `operatorOnly`): a tenant's admin gets
+  // the denied page rather than an empty screen of refused calls (2026-11-04).
+  const operatorOnly = NAV_DATA.some(e => e.path === path && e.operatorOnly);
+  if (operatorOnly && !isOperator) {
+    return <RequireRole allowedRoles={["platform_operator"]} pageName={pageName} deny>{children}</RequireRole>;
+  }
   return <RequireRole allowedRoles={getRouteRoles(path)} pageName={pageName}>{children}</RequireRole>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider><AuthProvider><FeatureFlagsProvider><BrowserRouter><PermissionsProvider>
+     <BusyBanner />
      <SamlHandoffGate>
       <Suspense fallback={<PageLoading />}>
       <Routes>
@@ -178,6 +207,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="/case-designer"  element={<PermRoute path="/case-designer"  pageName="Case Designer"> <CaseDesigner />    </PermRoute>} />
           <Route path="/case-config"    element={<PermRoute path="/case-config"    pageName="Case Configuration"> <CaseConfig />  </PermRoute>} />
           <Route path="/form-builder"   element={<PermRoute path="/form-builder"   pageName="Form Builder">  <FormBuilderPage /> </PermRoute>} />
+          <Route path="/reference-tables" element={<PermRoute path="/reference-tables" pageName="Reference Tables"> <ReferenceTablesPage /> </PermRoute>} />
           <Route path="/nlp-builder"    element={<PermRoute path="/nlp-builder"    pageName="NLP Builder">   <NLPBuilder />      </PermRoute>} />
           <Route path="/modeler"        element={<PermRoute path="/modeler"        pageName="BPMN Modeler">  <Modeler />         </PermRoute>} />
           <Route path="/app-builder"    element={<PermRoute path="/app-builder"    pageName="App Builder">   <AppBuilder />      </PermRoute>} />
@@ -230,6 +260,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="/hxshield"      element={<PermRoute path="/hxshield"      pageName="HxShield">     <HxShield />              </PermRoute>} />
           <Route path="/hxstream"      element={<PermRoute path="/hxstream"      pageName="HxStream">     <HxStream />              </PermRoute>} />
           <Route path="/hxstatus"      element={<PermRoute path="/hxstatus"      pageName="HxStatus">     <HxStatus />              </PermRoute>} />
+          <Route path="/allowed-sites" element={<PermRoute path="/allowed-sites" pageName="Allowed sites"><AllowedSites /></PermRoute>} />
           <Route path="/hxlogs"        element={<PermRoute path="/hxlogs"        pageName="HxLogs">       <HxLogs />                </PermRoute>} />
           <Route path="/hxdbmanager"   element={<PermRoute path="/hxdbmanager"   pageName="HxDBManager">  <HxDBManager />           </PermRoute>} />
           <Route path="/compliance"    element={<PermRoute path="/compliance"    pageName="Compliance">   <ComplianceDashboard />   </PermRoute>} />
@@ -247,6 +278,10 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="/email-admin"    element={<PermRoute path="/email-admin"    pageName="Email Admin">         <EmailAdmin />       </PermRoute>} />
           <Route path="/push-admin"     element={<PermRoute path="/push-admin"     pageName="Push Notifications">  <PushAdmin />        </PermRoute>} />
           <Route path="/hxglobal"       element={<PermRoute path="/hxglobal"       pageName="HxGlobal">            <HxGlobal />         </PermRoute>} />
+          {/* Signed in already: /login (a bookmark, a link in a mail) goes home. */}
+          <Route path="/login" element={<Navigate to="/" replace />} />
+          {/* Any other unknown address said nothing — a blank page. */}
+          <Route path="*" element={<UnknownPage />} />
         </Route>
         {/* Public portal — no auth, no AppLayout */}
         <Route path="/portal/:slug/login" element={<PortalLogin />} />

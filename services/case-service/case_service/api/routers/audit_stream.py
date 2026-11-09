@@ -27,8 +27,36 @@ from velaris_shared.db.models import AuditStreamTargetModel
 from velaris_shared.db.session import get_session
 from velaris_shared.hxguard import service as hxguard
 
+# 2026-11-04: a target is the platform operator's (no tenant — EVERY event) or
+# a tenant's (its own tenant's events only, by security_events.tenant_id,
+# migration 230). Until then any tenant's admin, holding `audit.stream.write`,
+# could ship the whole install's events to an endpoint of their own. The path
+# guard keeps each target to its owner (`null_is_default`).
 router = APIRouter(prefix="/audit-stream", tags=["audit-stream"],
                    dependencies=[Depends(get_current_user)])
+
+
+async def _tenant_of_caller(session: AsyncSession, user) -> str | None:
+    """None for the platform operator (a platform target); else the caller's
+    tenant slug (a tenant target)."""
+    from case_service.tenancy.identity import is_platform_operator, tenant_slug
+    if await is_platform_operator(session, user):
+        return None
+    return await tenant_slug(session, getattr(user, "tenant_id", None))
+
+
+async def _public_endpoint(url: str) -> None:
+    """A tenant's SIEM is on the internet: a tenant may not make this install
+    send to its own network (the operator's internal SIEM is unaffected)."""
+    from velaris_shared.hxbridge.security import validate_outbound_url
+    if urlsplit(url).scheme.lower() != "https":
+        raise coded(400, "VEL-AUDIT-STREAM-URL-400", "A tenant's SIEM endpoint must be https.")
+    try:
+        await validate_outbound_url(url)
+    except ValueError:
+        raise coded(400, "VEL-AUDIT-STREAM-URL-400",
+                    "That endpoint is not reachable from this platform: private and "
+                    "internal addresses are refused.")
 
 #: The transports that exist. `splunk_hec` is built and tested; CEF-over-syslog
 #: and Azure Monitor are the two named as not built, and adding one is an
@@ -162,19 +190,20 @@ async def create_target(
                     f"'{body.kind}' is not a transport this platform speaks. "
                     f"Known: {', '.join(KINDS)}. CEF-over-syslog and Azure "
                     "Monitor are named as not built rather than half-built.")
-    if not body.acknowledge_platform_scope:
+    tenant = await _tenant_of_caller(session, user)
+    if tenant is None and not body.acknowledge_platform_scope:
         raise coded(400, "VEL-AUDIT-STREAM-SCOPE-400",
-                    "This stream carries EVERY tenant's security events, "
-                    "because security_events holds no tenant. Confirm with "
-                    "acknowledge_platform_scope. Splitting the stream per "
-                    "tenant is deliberately not built — it would mean "
-                    "filtering on a column that does not exist.")
+                    "This stream carries EVERY tenant's security events. Confirm "
+                    "with acknowledge_platform_scope. (A tenant's admin creates a "
+                    "target carrying its own tenant's events only.)")
     name = (body.name or "").strip()
     if not name:
         raise coded(400, "VEL-AUDIT-STREAM-URL-400", "A target needs a name.")
 
     endpoint = _validate_endpoint(body.endpoint_url)
-    tenant_key = "platform"
+    if tenant is not None:
+        await _public_endpoint(endpoint)
+    tenant_key = "platform" if tenant is None else tenant
     existing = (await session.execute(
         select(AuditStreamTargetModel).where(
             AuditStreamTargetModel.tenant_key == tenant_key,
@@ -188,7 +217,7 @@ async def create_target(
     now = datetime.now(timezone.utc)
     row = AuditStreamTargetModel(
         id=uuid.uuid4(),
-        tenant_id=None,
+        tenant_id=tenant,
         tenant_key=tenant_key,
         name=name,
         kind=body.kind,
@@ -224,6 +253,8 @@ async def update_target(
         row.name = body.name.strip() or row.name
     if body.endpoint_url is not None:
         row.endpoint_url = _validate_endpoint(body.endpoint_url)
+        if row.tenant_id is not None:
+            await _public_endpoint(row.endpoint_url)
     if body.token is not None:
         # An empty string clears the token; a value replaces it. There is no
         # way to read the old one back, here or anywhere.

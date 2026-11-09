@@ -26,12 +26,73 @@ from sqlalchemy.ext.asyncio import (
 import velaris_shared.db.session as _db_session
 from velaris_shared.db.models import Base
 from velaris_shared.db.session import get_session
-from case_service.main import app
+import case_service.main as _case_main
+from portal_service.main import app as _portal_app
+from user_service.main import app as _user_app
 
 # Disable rate limiting in tests
 from velaris_shared.middleware.rate_limit import RateLimitMiddleware
-app.middleware_stack = None  # force rebuild
-app.user_middleware = [m for m in app.user_middleware if m.cls is not RateLimitMiddleware]
+for _a in (_case_main.app, _portal_app, _user_app):
+    _a.middleware_stack = None  # force rebuild
+    _a.user_middleware = [m for m in _a.user_middleware if m.cls is not RateLimitMiddleware]
+
+
+# ── R5e step 8: the portal lives in portal-service ────────────────────────────
+# The gateway's routing, in process: `/api/v1/portal/…` and `/api/v1/portal-admin/…`
+# go to portal-service, everything else (including `/api/v1/portals`, a
+# case-service router) to case-service. Installed AS `case_service.main.app`, so
+# a test that imports the app directly reaches the portal the way production
+# does. One dependency-override dict for both apps.
+PORTAL_PREFIXES = ("/api/v1/portal/", "/api/v1/portal-admin/")
+_portal_app.dependency_overrides = _case_main.app.dependency_overrides
+
+# ── R5e step 10: sign-in and identity live in user-service ────────────────────
+# Same routing as the gateway: these prefixes go to user-service, except the one
+# case-service path under /auth (access_groups.py's switch-context).
+USER_PREFIXES = ("/api/v1/auth/", "/api/v1/scim/", "/api/v1/identity/provisioning/",
+                 "/api/v1/user-directory/")
+USER_EXACT = ("/api/v1/user-directory",)
+CASE_EXACT = ("/api/v1/auth/switch-context",)
+_user_app.dependency_overrides = _case_main.app.dependency_overrides
+
+
+def _route(path: str) -> str:
+    if path in CASE_EXACT:
+        return "case"
+    if path.startswith(PORTAL_PREFIXES):
+        return "portal"
+    if path.startswith(USER_PREFIXES) or path in USER_EXACT:
+        return "user"
+    return "case"
+
+
+class _Gateway:
+    def __init__(self, case, portal, user):
+        object.__setattr__(self, "_case", case)
+        object.__setattr__(self, "_portal", portal)
+        object.__setattr__(self, "_user", user)
+
+    def __setattr__(self, name, value):
+        # A test that sets `app.middleware_stack = None` to force a rebuild, or
+        # replaces an attribute, means case-service's app — reads already go there.
+        setattr(self._case, name, value)
+
+    @property
+    def dependency_overrides(self):
+        return self._case.dependency_overrides
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] in ("http", "websocket") else ""
+        target = {"portal": self._portal, "user": self._user}.get(_route(path), self._case)
+        await target(scope, receive, send)
+
+    def __getattr__(self, name):
+        return getattr(self._case, name)
+
+
+if not isinstance(_case_main.app, _Gateway):
+    _case_main.app = _Gateway(_case_main.app, _portal_app, _user_app)
+app = _case_main.app
 
 # ── Single shared engine ──────────────────────────────────────────
 # Default: in-memory SQLite. StaticPool keeps every connection bound to the SAME
@@ -179,6 +240,19 @@ def _mint_admin_token() -> str:
 
 
 ADMIN_TOKEN = _mint_admin_token()
+
+
+def _headers(user_id: str, roles: list[str]) -> dict[str, str]:
+    """A Bearer header for `user_id` with `roles` — the shared test helper (it
+    lived in test_payments_authz.py until that moved to commerce-service)."""
+    from velaris_shared.auth.jwt_handler import create_dev_token
+    from velaris_shared.config import get_settings
+
+    s = get_settings()
+    token = create_dev_token(user_id=user_id, username=user_id, roles=roles,
+                             secret=s.auth_secret,
+                             private_key=s.auth_rsa_private_key or "")
+    return {"Authorization": f"Bearer {token}"}
 ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
 
@@ -355,6 +429,34 @@ async def create_case(
     return resp.json()
 
 
+async def grant_case_create(*operator_ids: str) -> None:
+    """Put test operators in an access group whose role grants Cases > Create.
+
+    Since 2026-10-18 creating a case is decided by the caller's access group
+    (velaris_shared/hxguard/case_create.py); a token with no group is refused,
+    platform `admin` included. Tests that create cases as a non-superadmin, and
+    are not about that rule, call this for the identities they use (the
+    operator id is matched against the token's user id, username or email).
+    """
+    from velaris_shared.db.models import (
+        AccessGroupModel, AccessRoleModel, OperatorAccessGroupModel, PortalModel,
+    )
+    async with TestSessionFactory() as db:
+        portal = PortalModel(name="Test staff portal", portal_type="staff")
+        role = AccessRoleModel(name="test-case-creator", privileges=[
+            {"resource": "case", "actions": ["create", "read", "update"], "case_type_id": "*"}])
+        db.add_all([portal, role])
+        await db.flush()
+        group = AccessGroupModel(name="Test case creators", tenant_id="default",
+                                 portal_id=portal.id, role_ids=[str(role.id)])
+        db.add(group)
+        await db.flush()
+        for op in operator_ids:
+            db.add(OperatorAccessGroupModel(operator_id=op, access_group_id=group.id,
+                                            is_primary=True))
+        await db.commit()
+
+
 # ── Cross-test state isolation ────────────────────────────────────────
 # Two module-level singletons leak state between tests when a test mutates
 # them without cleanup: FastAPI dependency_overrides (a test overriding
@@ -381,3 +483,71 @@ def _isolate_settings():
     yield
     s.__dict__.clear()
     s.__dict__.update(saved)
+
+
+# ── R5e step 8: run a suite with every internal call over HTTP ───────────────
+# VELARIS_TEST_INTERNAL_HTTP=1 makes `velaris_shared.internal.client.call` go
+# through case-service's ASGI app (secret + guard + request model + its own
+# session), as portal-service / commerce-service do, instead of local mode.
+# Unset (the default) = local mode, exactly as before.
+# The internal-API test files choose their own path per test, so they are left alone.
+@_pytest.fixture(autouse=True)
+def _internal_over_http(request):
+    if (os.environ.get("VELARIS_TEST_INTERNAL_HTTP") != "1"
+            or request.node.path.name in ("test_internal_api.py", "test_internal_portal_api.py")):
+        yield
+        return
+    from velaris_shared.config import get_settings as _gs
+    from velaris_shared.internal import client as _internal
+
+    s = _gs()
+    old = s.internal_service_secret
+    s.internal_service_secret = s.internal_service_secret or "h" * 40
+    _internal.set_transport(ASGITransport(app=app))
+    _internal.force_http = True
+    yield
+    _internal.set_transport(None)
+    _internal.force_http = False
+    s.internal_service_secret = old
+
+
+# ── The account check (velaris_shared.auth.dependencies._account_gate) ────────
+# Since 2026-10-23 a token is refused when its account row is missing, renamed
+# or inactive. The harness mints tokens for ids and names that have no row
+# (`_headers("alice", …)`), so the check is off here unless a test is marked
+# `account_gate` — those run it for real, against real rows.
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "account_gate: run the real account check (rows must exist)")
+
+
+@_pytest.fixture(autouse=True)
+def _account_gate_off(request):
+    # Set and restored by hand, NOT through `monkeypatch`: an autouse fixture
+    # that requests it moves its teardown after the database fixture's, so a
+    # test that patches `time.monotonic` left it patched while the async DB
+    # teardown ran — a leaked connection per test, every later setup slower.
+    from velaris_shared.auth import dependencies as _deps
+    real = _deps._account_gate
+    if request.node.get_closest_marker("account_gate") is None:
+        async def _off(user, session):
+            return None
+        _deps._account_gate = _off
+    yield
+    _deps._account_gate = real
+
+
+# The deletion ledger writes files (velaris_shared.identity.ledger): never into
+# this checkout's .deletions/ from a test.
+@_pytest.fixture(autouse=True)
+def _deletion_ledger_in_tmp(tmp_path):
+    # By hand, not `monkeypatch` — see _account_gate_off.
+    from velaris_shared.config import get_settings
+    from velaris_shared.identity import ledger as _ledger
+    s = get_settings()
+    real = s.deletion_ledger_dir
+    s.deletion_ledger_dir = str(tmp_path / "deletions")
+    _ledger.reset_cache_for_tests()
+    yield
+    s.deletion_ledger_dir = real
+    _ledger.reset_cache_for_tests()

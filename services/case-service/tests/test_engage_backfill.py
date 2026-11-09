@@ -43,7 +43,7 @@ from case_service.engage import backfill, entitlement, identity
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 
@@ -330,8 +330,9 @@ async def test_portal_erasure_forgets_the_profile_and_the_proposals(api, world, 
                        headers=_headers("mo", MANAGER), json={})
     cid = uuid.UUID(r.json()["result"]["customer_id"])
     await _scan(api)       # leaves a pending proposal or two that may quote her
-    from case_service.api.routers import releases
-    monkeypatch.setattr(releases, "is_feature_enabled", lambda key: True)
+    # The portal reads the shared flag cache (R5e step 8 — it leaves case-service).
+    from velaris_shared.core import feature_flags
+    monkeypatch.setattr(feature_flags, "is_feature_enabled", lambda key: True)
     async with TestSessionFactory() as db:
         pc = (await db.execute(select(PortalCustomerModel).where(
             PortalCustomerModel.tenant_id == world["t"].id))).scalars().one()

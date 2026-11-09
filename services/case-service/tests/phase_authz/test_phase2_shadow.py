@@ -54,6 +54,18 @@ def _headers(*roles: str) -> dict:
 # migration re-uses, and deleting it would mean rebuilding it from the design
 # doc the next time a gate changes hands.
 
+
+def _router_module(file: str):
+    """The router module for an indexed gate, in whichever service now holds it.
+
+    R5e step 7 moved checkout and storefront into commerce-service; importing
+    them from `case_service` failed for every gate after the move.
+    """
+    import importlib
+    from case_service.hxguard_ledger.legacy_sites import find_router
+    path = find_router(file)
+    return importlib.import_module(f"{path.parents[2].name}.api.routers.{path.stem}")
+
 class _User:
     def __init__(self, roles, privileges=None):
         self.roles = list(roles)
@@ -88,7 +100,7 @@ def _request_for(handler, path="/x"):
 class TestItRuns:
     @pytest.mark.asyncio
     async def test_it_compares_and_agrees_on_an_allow(self):
-        from case_service.api.routers import auth_real
+        from user_service.api.routers import auth_real
         await shadow.compare(_request_for(auth_real.list_users),
                              _User(["admin"]), ("admin",), True)
         snap = shadow.snapshot()
@@ -97,7 +109,7 @@ class TestItRuns:
 
     @pytest.mark.asyncio
     async def test_it_compares_and_agrees_on_a_deny(self):
-        from case_service.api.routers import auth_real
+        from user_service.api.routers import auth_real
         await shadow.compare(_request_for(auth_real.list_users),
                              _User(["viewer"]), ("admin",), False)
         snap = shadow.snapshot()
@@ -123,7 +135,7 @@ class TestItRuns:
 
         for gate, action in ACTION_BY_GATE.items():
             file, fn = gate.split("::")
-            mod = importlib.import_module(f"case_service.api.routers.{file[:-3]}")
+            mod = _router_module(file)
             handler = getattr(mod, fn)
             legacy = ACTIONS[action].legacy_roles
             for roles in (("admin",), ("viewer",), ("designer",), ("security",),
@@ -144,7 +156,7 @@ class TestItRuns:
 class TestItIsHarmless:
     @pytest.mark.asyncio
     async def test_a_broken_backend_is_swallowed(self, monkeypatch):
-        from case_service.api.routers import auth_real
+        from user_service.api.routers import auth_real
 
         def explode(*a, **k):
             raise RuntimeError("backend is down")
@@ -158,7 +170,7 @@ class TestItIsHarmless:
     async def test_a_failing_recorder_is_swallowed(self, monkeypatch):
         """The SecurityEvent write opens its own session. A dead database must
         not turn an observability feature into an outage."""
-        from case_service.api.routers import auth_real
+        from user_service.api.routers import auth_real
 
         async def explode(*a, **k):
             raise RuntimeError("no database")
@@ -174,7 +186,7 @@ class TestItIsHarmless:
     async def test_a_mismatch_is_counted_by_direction(self, monkeypatch):
         """Which way a mismatch points decides how urgent it is: more permissive
         is a security regression, less permissive breaks users at cutover."""
-        from case_service.api.routers import auth_real
+        from user_service.api.routers import auth_real
         recorded = []
 
         async def capture(*a, **k):
@@ -238,8 +250,7 @@ class TestResolution:
         missing = []
         for gate in ACTION_BY_GATE:
             file, fn = gate.split("::")
-            mod = importlib.import_module(
-                f"case_service.api.routers.{file[:-3]}")
+            mod = _router_module(file)
             if not hasattr(mod, fn):
                 missing.append(gate)
         assert not missing, f"gates no longer in the router: {missing}"

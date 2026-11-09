@@ -47,7 +47,7 @@ class SlackConnector(ConnectorProtocol):
     async def test(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(self._webhook_url, json={"text": "Helix connector test"})
+                resp = await client.post(self._webhook_url, json={"text": "Velaris connector test"})
             return resp.status_code == 200 and resp.text == "ok"
         except Exception:
             return False

@@ -1,1 +1,1 @@
-"""HELIX rules-service."""
+"""Velaris rules-service."""

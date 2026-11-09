@@ -32,6 +32,9 @@ __pycache__/
 *.log
 .vite/
 services/case-service/data/
+# The same runtime folder in the services split out of case-service (found in the
+# 2026-11-08 dry run: portal-service test uploads about to be copied).
+services/*/data/
 # Uploaded documents written by a running install (found in the 2026-09-17 dry
 # run: a user upload about to be copied into the twin).
 data/documents/
@@ -42,9 +45,27 @@ git_push.sh
 .gitignore
 fonts/
 deploy/tls/certs/
+deploy/map-tiles/*.pmtiles
 deploy/helm/velaris/charts/
 deploy/openbao/agent/role_id
 deploy/openbao/agent/secret_id
 deploy/openbao/agent/out/
 deploy/openbao/.bao-init.json
 deploy/openbao/enabled
+# Backups and the install report (may hold the backup PRIVATE key) — per host.
+.backups/
+velaris-install-report.md
+*.before-restore-*
+.backups/before-restore-*/
+# Standby link state — the tunnel's private key (standby-velaris.sh).
+.standby/
+logs/
+
+# PgBouncer's UNIX socket and its lock (run-time, never a release file)
+.s.PGSQL.*
+velaris-support-*.tar.gz
+
+# Release packages built by scripts/package-release.sh, and the file list an
+# install keeps from its package — per build / per host.
+dist-release/
+.release-files

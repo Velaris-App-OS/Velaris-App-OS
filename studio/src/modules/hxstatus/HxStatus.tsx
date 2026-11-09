@@ -44,6 +44,83 @@ function uptime(v: number | null | undefined): string {
   return v === null || v === undefined ? "—" : `${v.toFixed(2)}%`;
 }
 
+interface Readiness {
+  checked_at: string;
+  summary: { working: number; degraded: number; off: number };
+  items: { key: string; label: string; state: "working" | "degraded" | "off"; reason: string }[];
+}
+
+const STATE: Record<string, { label: string; colour: string }> = {
+  working: { label: "Working", colour: "var(--accent)" },
+  degraded: { label: "Degraded", colour: "var(--status-warning, #d98c00)" },
+  off: { label: "Off", colour: "var(--text-muted)" },
+};
+
+// R4: every optional dependency — working, degraded or off — with the reason in
+// plain words. Off is a choice, never shown as an error. Admin only (the
+// endpoint answers 403 otherwise, and this section then says nothing).
+function Dependencies() {
+  const [data, setData] = useState<Readiness | null>(null);
+  const [state, setState] = useState<"loading" | "forbidden" | "error" | "ok">("loading");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiFetch("/status/readiness");
+      if (r.status === 401 || r.status === 403) { setState("forbidden"); return; }
+      if (!r.ok) throw new Error(String(r.status));
+      setData(await r.json());
+      setState("ok");
+    } catch {
+      setState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const t = setInterval(load, 60_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  if (state === "forbidden") return null;
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+        <h3 style={{ margin: 0, fontSize: 14 }}>Dependencies</h3>
+        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>admin only — not part of the public view</span>
+        {data && (
+          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            {data.summary.working} working · {data.summary.degraded} degraded · {data.summary.off} off
+            {" — checked "}{new Date(data.checked_at).toLocaleTimeString()}
+          </span>
+        )}
+        <button onClick={() => void load()} style={{ fontSize: 11, marginLeft: "auto" }}>Check again</button>
+      </div>
+      {state === "error" && (
+        <div style={{ fontSize: 12, color: "var(--status-failed)" }}>Could not check the dependencies.</div>
+      )}
+      {data && (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <tbody>
+            {data.items.map(i => (
+              <tr key={i.key} data-testid={`dep-${i.key}`} style={{ borderTop: "1px solid var(--border-subtle)" }}>
+                <td style={{ padding: "7px 4px", whiteSpace: "nowrap", verticalAlign: "top" }}>{i.label}</td>
+                <td style={{ padding: "7px 4px", whiteSpace: "nowrap", verticalAlign: "top",
+                             color: (STATE[i.state] ?? STATE.off).colour }}>
+                  <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                                 background: (STATE[i.state] ?? STATE.off).colour, marginRight: 6 }} />
+                  {(STATE[i.state] ?? STATE.off).label}
+                </td>
+                <td style={{ padding: "7px 4px", color: i.state === "degraded" ? "var(--text-primary)"
+                             : "var(--text-muted)", lineHeight: 1.5 }}>{i.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 export default function HxStatus() {
   const [data, setData] = useState<PublicStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +165,8 @@ export default function HxStatus() {
         This is the public view — exactly what an external status page shows. Staff
         seeing a healthier picture than customers is how outages get missed.
       </div>
+
+      <Dependencies />
 
       {error && (
         <div style={{ padding: 10, fontSize: 12, borderRadius: 4, marginBottom: 16,

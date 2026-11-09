@@ -35,6 +35,7 @@ from velaris_shared.hxgraph.query import (
     query_graph, path_between, explain_node, similar_nodes, impact_nodes, _node_dict,
 )
 from velaris_shared.hxgraph.report import graph_report, graph_export, graph_html
+from velaris_shared.db.read_routing import get_cutoff_session, get_read_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["hxgraph"])
@@ -96,7 +97,7 @@ async def list_nodes(
     node_type: str | None = Query(None),
     q: str | None = Query(None, description="Label search"),
     limit: int = Query(100, le=500),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     from velaris_shared.hxgraph.query import _vis_clause
@@ -113,7 +114,7 @@ async def list_nodes(
 @router.get("/nodes/{node_id}")
 async def get_node(
     node_id: str,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     from velaris_shared.hxgraph.query import _find_node, _visible
@@ -151,7 +152,7 @@ async def get_node(
 @router.get("/nodes/{node_id}/impact")
 async def get_impact(
     node_id: str,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     result = await impact_nodes(session, node_id, tenant_id=_tenant(user))
@@ -166,7 +167,7 @@ async def get_impact(
 async def get_path(
     from_: str = Query(..., alias="from"),
     to: str = Query(...),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     path = await path_between(session, from_, to, tenant_id=_tenant(user))
@@ -178,7 +179,7 @@ async def get_path(
 @router.get("/explain")
 async def get_explain(
     concept: str = Query(...),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     return await explain_node(session, concept, tenant_id=_tenant(user))
@@ -188,7 +189,7 @@ async def get_explain(
 async def get_similar(
     concept: str = Query(...),
     top_k: int = Query(8, le=20),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     results = await similar_nodes(session, concept, top_k=top_k, tenant_id=_tenant(user))
@@ -211,7 +212,7 @@ async def nl_query(
 
 @router.get("/report", response_class=PlainTextResponse)
 async def get_report(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Graphify-equivalent GRAPH_REPORT.md in markdown."""
@@ -221,7 +222,7 @@ async def get_report(
 
 @router.get("/export")
 async def get_export(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_cutoff_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """graph.json equivalent — all nodes and edges as JSON."""
@@ -230,7 +231,7 @@ async def get_export(
 
 @router.get("/visualize", response_class=HTMLResponse)
 async def get_visualize(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """graph.html equivalent — interactive D3.js force-directed visualizer."""

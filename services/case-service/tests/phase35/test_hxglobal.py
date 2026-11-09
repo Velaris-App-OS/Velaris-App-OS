@@ -1,4 +1,4 @@
-"""HELIX P35 — HxGlobal tests (30 tests).
+"""Velaris P35 — HxGlobal tests (30 tests).
 
 Covers: protocol registry, local/aws/gcp/azure adapters,
         sovereignty resolver (specific rule > tenant rule > assignment > primary),

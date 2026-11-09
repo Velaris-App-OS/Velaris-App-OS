@@ -764,7 +764,7 @@ async def test_authorization_is_resolved_before_the_rate_limiter():
     A limiter declared before the guard runs first, so a caller holding none of
     these actions got a **429 rather than a 403** — which leaks that the route
     exists, and lets an unprivileged caller exhaust the bucket for a privileged
-    one sharing an egress IP (the limiter keys on `X-Forwarded-For`, and an
+    one sharing an egress IP (the limiter keys on the client address, and an
     office or a VPN is one address).
 
     Checked on the built signatures rather than over HTTP, because the limiter

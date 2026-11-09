@@ -1,5 +1,5 @@
 /**
- * Real-time WebSocket client for HELIX Studio (Phase 22).
+ * Real-time WebSocket client for Velaris Studio (Phase 22).
  *
  * Usage:
  *   const client = getRealtimeClient();
@@ -8,6 +8,8 @@
  *   });
  *   unsubscribe();
  */
+
+import { getAccessToken } from "@/auth/tokenManager";
 
 type EventHandler = (event: any) => void;
 
@@ -28,7 +30,10 @@ class RealtimeClient {
     if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return;
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}/api/v1/realtime/ws?user_id=${encodeURIComponent(this.userId)}`;
+    // The server signs the socket in with this token (and re-checks it every
+    // minute). Read at each connect, so a reconnect carries a refreshed one.
+    const token = getAccessToken() ?? "";
+    const url = `${proto}//${window.location.host}/api/v1/realtime/ws?token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(this.userId)}`;
 
     try {
       this.ws = new WebSocket(url);

@@ -1,4 +1,4 @@
-"""HELIX IR: Application model.
+"""Velaris IR: Application model.
 
 An Application bundles case types, processes, forms, rules, data
 models, and security profiles into a single deployable unit.

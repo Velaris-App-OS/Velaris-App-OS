@@ -1,0 +1,33 @@
+[project]
+name = "velaris-portal-service"
+version = "0.1.0"
+description = "Velaris portal-service — the customer portal, customer accounts, portal admin"
+requires-python = ">=3.12"
+license = "LicenseRef-BSL-1.1"
+dependencies = [
+    "velaris-shared",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28.0",            # the internal client + the LLM backends (portal chat)
+    "minio>=7.2",               # S3 document storage, when one is configured
+    "python-multipart>=0.0.9",  # document + logo uploads
+]
+
+[project.optional-dependencies]
+# case-service is a TEST-ONLY dependency: these tests seed fixtures through the
+# case API and the internal API, so the test client mounts both apps behind an
+# in-process copy of the gateway (see tests/conftest.py). The service package
+# itself must never import it — that is test-enforced.
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.28", "aiosqlite>=0.20", "velaris-case-service"]
+mysql = ["aiomysql>=0.2.0", "pymysql>=1.1.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["portal_service"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

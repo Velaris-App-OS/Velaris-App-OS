@@ -99,7 +99,9 @@ def test_the_scan_is_not_vacuous():
             name = getattr(fn, "attr", None) or getattr(fn, "id", None)
             if isinstance(node, ast.Call) and name == "decode_jwt_token":
                 found += 1
-    assert found >= 5, (
+    # 4 since 2026-10-19: the two WebSocket sites (realtime, hxstream) now
+    # verify through get_current_user instead of decoding themselves.
+    assert found >= 4, (
         f"expected every decode_jwt_token call site, saw {found}. If this "
         "dropped, code moved to another package and the scan above stopped "
         "covering it — widen SRC_ROOTS rather than lowering this number.")

@@ -1,4 +1,4 @@
-"""Tests for HELIX IR case management models.
+"""Tests for Velaris IR case management models.
 
 Validates that all dataclasses instantiate, serialize to dict,
 and enforce enum values correctly.

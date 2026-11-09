@@ -20,6 +20,9 @@ spec:
       securityContext:
         {{- include "helix.podSecurityContext" . | nindent 8 }}
       terminationGracePeriodSeconds: {{ add (.Values.terminationDrainSeconds | default 5) 25 }}
+      {{- if include "helix.temporalTlsOn" . }}
+      {{- include "helix.temporalTlsVolume" . | nindent 6 }}
+      {{- end }}
       containers:
         - name: engine
           image: "{{ .Values.image.engine.repository }}:{{ .Values.image.engine.tag }}"
@@ -44,11 +47,13 @@ spec:
             # VELARIS_ENGINE_DATABASE_URL; it is kept because an install may
             # already carry it, and removing a variable an install holds is not
             # something an update gets to do.
+            # With the pooler on (R5d 6a) DATABASE_URL is the pooled URL: the
+            # engine prefers DATABASE_URL over VELARIS_CASE_DATABASE_POOLER_URL.
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "helix.dbSecretName" . }}
-                  key: {{ include "helix.dbSecretKey" . }}
+                  key: {{ if include "helix.poolerOn" . }}{{ include "helix.poolerSecretKey" . }}{{ else }}{{ include "helix.dbSecretKey" . }}{{ end }}
             - name: VELARIS_ENGINE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -64,6 +69,12 @@ spec:
             # while a perfectly healthy Temporal runs next door.
             - name: TEMPORAL_HOST
               value: {{ .Values.worker.temporalHost | quote }}
+            {{- if include "helix.temporalTlsOn" . }}
+            {{- include "helix.temporalTlsEnv" . | nindent 12 }}
+            {{- end }}
+          {{- if include "helix.temporalTlsOn" . }}
+          {{- include "helix.temporalTlsMount" . | nindent 10 }}
+          {{- end }}
           securityContext:
             {{- include "helix.containerSecurityContext" . | nindent 12 }}
           resources:

@@ -160,6 +160,9 @@ def hec_event(event: dict[str, Any], *, host: str, source: str) -> dict[str, Any
             "user_agent": event.get("user_agent"),
             "tenant": event.get("tenant_id"),
             "details": redact_details(event.get("details")),
+            # How many identical events this one stands for (migration 231):
+            # >1 = a summary of refused repeats within a minute.
+            "count": event.get("repeat_count") or 1,
         },
     }
 

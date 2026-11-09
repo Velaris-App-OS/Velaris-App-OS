@@ -1,4 +1,4 @@
-// HELIX P34b — reusable component for Case Designer SLA tree link
+// Velaris P34b — reusable component for Case Designer SLA tree link
 // Use this inside PropertyPanel when editing an SLA policy.
 //
 // Usage:

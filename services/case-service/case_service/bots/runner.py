@@ -261,7 +261,7 @@ class BotRunner:
         if not domains:
             return {}, None
 
-        from case_service.marketplace import egress
+        from velaris_shared.apps import egress
 
         if not egress.egress_enabled():
             # Let `provision_app_container` raise the explicit refusal rather
@@ -286,7 +286,7 @@ class BotRunner:
         if not user:
             return
         try:
-            from case_service.marketplace import egress
+            from velaris_shared.apps import egress
 
             egress.remove_app(user)
         except Exception:
@@ -295,7 +295,7 @@ class BotRunner:
     def _provision(self, bot: BotDefinitionModel, job: BotJobModel, env: dict,
                    egress_env: dict | None = None) -> str:
         """Start the container. Runs in a thread — the docker SDK is blocking."""
-        from case_service.marketplace.runtime import provision_app_container
+        from velaris_shared.apps.runtime import provision_app_container
 
         profile = service.RESOURCE_PROFILES.get(
             bot.resource_profile, service.RESOURCE_PROFILES["light"])
@@ -317,7 +317,7 @@ class BotRunner:
         )
 
     def _teardown(self, container_id: str) -> None:
-        from case_service.marketplace.runtime import stop_app_container
+        from velaris_shared.apps.runtime import stop_app_container
 
         stop_app_container(container_id)
 

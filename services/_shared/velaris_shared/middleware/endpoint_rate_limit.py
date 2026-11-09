@@ -8,10 +8,9 @@ sensitive endpoint can use:
     @router.post("/login", dependencies=[Depends(_login_rl)])
     async def login(...): ...
 
-Per-IP, per-process, in-memory. Memory is bounded: stale IPs are purged when
-the table grows past _PURGE_THRESHOLD. Multi-worker deployments multiply the
-effective limit by worker count — acceptable for brute-force protection where
-the goal is reducing attempts by orders of magnitude, not exact counting.
+Per-IP. With the cache on, one count shared by every copy of the service
+(velaris_shared/shared_state.py); cache off or unreachable, per-process and
+in-memory, as before — memory bounded, stale IPs purged past _PURGE_THRESHOLD.
 
 Skipped under pytest so test suites can hammer endpoints freely.
 
@@ -60,6 +59,15 @@ class SlidingWindowLimiter:
         window.append(now)
         return True, 0
 
+    async def allow_async(self, key: str) -> tuple[bool, int]:
+        """`allow`, counted once for every copy of the service when the cache is
+        on (R5e step 5); cache off or not answering: exactly `allow`."""
+        from velaris_shared import shared_state
+        shared = await shared_state.allow_shared(f"rl-{self.name}", key, self.max_calls, self.window)
+        if shared is None:
+            return self.allow(key)
+        return shared, (0 if shared else max(1, int(self.window)))
+
     def _purge(self, now: float) -> None:
         stale = [
             key for key, window in self._hits.items()
@@ -71,9 +79,13 @@ class SlidingWindowLimiter:
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """The caller's address for rate limiting: uvicorn's resolved client.
+
+    Behind the gateway, `--proxy-headers` already turns the gateway's
+    X-Forwarded-For into the real peer (right-most untrusted hop). Reading the
+    header's LEFT-most entry instead — which the client writes — let a caller
+    pick a new "address" per request and never be limited (fixed 2026-10-16).
+    """
     return request.client.host if request.client else "unknown"
 
 
@@ -85,7 +97,10 @@ def rate_limit(max_calls: int, window_seconds: float, name: str):
         if "PYTEST_CURRENT_TEST" in os.environ:
             return
         ip = _client_ip(request)
-        allowed, retry_after = limiter.allow(ip)
+        # One count for every copy of the service when the cache is on (R5e
+        # step 5) — N copies were N times every limit, login included. Cache
+        # off or not answering: this process's limiter, exactly as before.
+        allowed, retry_after = await limiter.allow_async(ip)
         if not allowed:
             logger.warning("rate_limit[%s]: blocked %s", name, ip)
             raise HTTPException(

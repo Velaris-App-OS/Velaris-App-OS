@@ -143,3 +143,102 @@ async def generate_form_draft(description: str) -> dict[str, Any]:
 
     draft = normalize_form_draft(raw, prompt=description)
     return {"draft": draft, "errors": validate_form_draft(draft), "source": source}
+
+
+# ── Draft vocabulary ↔ Form Builder sections (2026-10-28) ─────────────────────
+#
+# Drafts speak a small flat vocabulary ({id, label, field_type, required,
+# options[str]}). Until 2026-10-28 an applied draft was stored in that shape,
+# `definition_json.fields`, which the Form Builder, the renderer and the
+# server's form check never read: the form opened empty and accepted anything,
+# and a "modify" draft saw no fields at all. These two translate.
+
+_TO_BUILDER = {
+    "text": "text", "textarea": "textarea", "number": "number", "date": "date",
+    "datetime": "datetime", "email": "email", "phone": "phone", "select": "dropdown",
+    "multiselect": "multi_select", "boolean": "checkbox", "checkbox": "checkbox",
+    "file": "file_upload", "currency": "currency",
+}
+_TO_DRAFT = {
+    "text": "text", "textarea": "textarea", "number": "number", "date": "date",
+    "datetime": "datetime", "email": "email", "phone": "phone", "dropdown": "select",
+    "radio": "select", "multi_select": "multiselect", "checkbox": "boolean",
+    "file_upload": "file", "currency": "currency", "slider": "number", "rating": "number",
+}
+
+
+def _option(o: Any) -> dict[str, str]:
+    if isinstance(o, dict):
+        return {"label": str(o.get("label") or o.get("value") or ""), "value": str(o.get("value") or o.get("label") or "")}
+    return {"label": str(o), "value": _ident(str(o))}
+
+
+def draft_field_to_builder(f: dict[str, Any]) -> dict[str, Any]:
+    key = _ident(str(f.get("id") or f.get("label") or "field"))
+    out: dict[str, Any] = {
+        "id": key, "field_key": key, "label": str(f.get("label") or key),
+        "type": _TO_BUILDER.get(str(f.get("field_type") or "text"), "text"),
+        "required": bool(f.get("required", False)),
+    }
+    if f.get("options"):
+        out["options"] = [_option(o) for o in f["options"]]
+    return out
+
+
+def draft_to_sections(fields: list[dict[str, Any]], title: str = "Details") -> list[dict[str, Any]]:
+    return [{"id": "section-1", "title": title, "order": 0,
+             "fields": [draft_field_to_builder(f) for f in fields if isinstance(f, dict)]}]
+
+
+def builder_to_draft_fields(definition: dict[str, Any]) -> list[dict[str, Any]]:
+    """What a modify draft is shown: every input field, in the draft vocabulary."""
+    out = []
+    for sec in (definition or {}).get("sections", []) or []:
+        for f in sec.get("fields", []) or []:
+            ft = _TO_DRAFT.get(f.get("type"))
+            if not ft:
+                continue                      # display / lookup fields are kept as they are
+            d: dict[str, Any] = {"id": f.get("field_key") or f.get("key") or f.get("id"),
+                                 "label": f.get("label"), "field_type": ft,
+                                 "required": bool(f.get("required"))}
+            if f.get("options"):
+                d["options"] = [o.get("label") if isinstance(o, dict) else o for o in f["options"]]
+            out.append(d)
+    return out + list((definition or {}).get("fields", []) or [])
+
+
+def merge_draft_into_sections(definition: dict[str, Any], draft_fields: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply a modify draft to a sectioned form. A field the draft keeps (same
+    id) keeps every Form Builder setting and its place, and takes the draft's
+    label / type / required / options; a new field joins the last section; an
+    input field the draft leaves out is removed. Display and lookup fields, and
+    everything else in the definition, are untouched."""
+    wanted = {draft_field_to_builder(f)["field_key"]: draft_field_to_builder(f) for f in draft_fields if isinstance(f, dict)}
+    seen: set[str] = set()
+    sections = []
+    for sec in (definition or {}).get("sections", []) or []:
+        fields = []
+        for f in sec.get("fields", []) or []:
+            key = f.get("field_key") or f.get("key") or f.get("id")
+            if f.get("type") not in _TO_DRAFT:
+                fields.append(f)
+            elif key in wanted:
+                w = wanted[key]
+                merged = {**f, "label": w["label"], "required": w["required"]}
+                if _TO_BUILDER.get(_TO_DRAFT[f["type"]]) != w["type"]:
+                    merged["type"] = w["type"]     # the draft changed the kind of field
+                if "options" in w:
+                    merged["options"] = w["options"]
+                fields.append(merged)
+                seen.add(key)
+        sections.append({**sec, "fields": fields})
+    new = [w for k, w in wanted.items() if k not in seen]
+    if new:
+        if sections:
+            sections[-1] = {**sections[-1], "fields": [*sections[-1]["fields"], *new]}
+        else:
+            sections = [{"id": "section-1", "title": "Details", "order": 0, "fields": new}]
+    out = {k: v for k, v in (definition or {}).items() if k != "fields"}
+    out["sections"] = sections
+    return out
+

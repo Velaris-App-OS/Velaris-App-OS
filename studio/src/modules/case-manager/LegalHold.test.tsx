@@ -22,6 +22,10 @@ vi.mock("@shared/api/client", async () => {
     placeLegalHold: vi.fn(),
     releaseLegalHold: vi.fn(async () => ({})),
     releaseLegalMatter: vi.fn(async () => ({})),
+    approveLegalRelease: vi.fn(async () => ({})),
+    rejectLegalRelease: vi.fn(async () => ({})),
+    getLegalHoldSettings: vi.fn(async () => { throw new Error("older server"); }),
+    setLegalHoldApprover: vi.fn(),
   };
 });
 
@@ -151,5 +155,92 @@ describe("Compliance → Legal Holds", () => {
     render(<LegalHoldsPanel />);
     expect(await screen.findByText("Not permitted")).toBeTruthy();
     expect(screen.queryByText("No case is under a legal hold")).toBeNull();
+  });
+});
+
+// ── Release approval (mig 218) ───────────────────────────────────────────────
+
+const req = { id: "r1", status: "pending", reason: "Matter settled today.",
+              requested_by: "alice", requested_at: "2026-10-14T10:00:00Z" };
+
+describe("Release approval", () => {
+  it("asks rather than releases when the tenant names an approving group", async () => {
+    const user = userEvent.setup();
+    render(<LegalHoldTab caseId="c1" onChanged={() => {}} status={status({
+      held: true, can_read: true, can_release: true,
+      holds: [{ ...hold, approval_required: true }] }) as never} />);
+    await user.click(screen.getByRole("button", { name: "Ask to release…" }));
+    await user.type(screen.getByLabelText("Reason for release"), "Matter settled today.");
+    await user.click(screen.getByRole("button", { name: "Ask for release" }));
+    await waitFor(() => expect(client.releaseLegalHold).toHaveBeenCalledWith("h1", "Matter settled today."));
+  });
+
+  it("offers an approver Approve and Refuse, and no second Release", async () => {
+    const user = userEvent.setup();
+    const changed = vi.fn();
+    render(<LegalHoldTab caseId="c1" onChanged={changed} status={status({
+      held: true, can_read: true, can_release: true,
+      holds: [{ ...hold, approval_required: true, pending_release: req, can_approve: true }] }) as never} />);
+    expect(screen.getByText("release awaiting approval")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Ask to release/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Approve release" }));
+    await waitFor(() => expect(client.approveLegalRelease).toHaveBeenCalledWith("h1"));
+    expect(changed).toHaveBeenCalled();
+  });
+
+  it("lets the asker withdraw, with a reason, but not approve", async () => {
+    const user = userEvent.setup();
+    render(<LegalHoldTab caseId="c1" onChanged={() => {}} status={status({
+      held: true, can_read: true, can_release: true,
+      holds: [{ ...hold, approval_required: true, pending_release: req, can_withdraw: true }] }) as never} />);
+    expect(screen.queryByRole("button", { name: "Approve release" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Withdraw request…" }));
+    const go = screen.getByRole("button", { name: "Withdraw" });
+    expect((go as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText("Reason for withdrawing"), "Asked by mistake.");
+    await user.click(go);
+    await waitFor(() => expect(client.rejectLegalRelease).toHaveBeenCalledWith("h1", "Asked by mistake."));
+  });
+
+  it("tells anyone else who must approve, and offers them nothing", () => {
+    render(<LegalHoldTab caseId="c1" onChanged={() => {}} status={status({
+      held: true, can_read: true, can_release: true,
+      holds: [{ ...hold, approval_required: true, pending_release: req }] }) as never} />);
+    expect(screen.getByText(/must approve it/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Approve|Refuse|Withdraw|Release/ })).toBeNull();
+  });
+
+  it("names the group, and lets only whoever may change it", async () => {
+    vi.mocked(client.listLegalHolds).mockResolvedValue({ count: 0, frozen: [], holds: [] } as never);
+    const settings = {
+      available: true, approver_group_id: "g1",
+      approver_group: { id: "g1", name: "Compliance", is_active: true, members: 2 },
+      approver_group_unusable: false, can_configure: true, can_change: false,
+      groups: [{ id: "g1", name: "Compliance", is_active: true, members: 2 }],
+    };
+    vi.mocked(client.getLegalHoldSettings).mockResolvedValueOnce(settings as never);
+    const { unmount } = render(<LegalHoldsPanel />);
+    expect(await screen.findByText("Compliance")).toBeTruthy();
+    expect(screen.queryByLabelText("Approving group")).toBeNull();
+    expect(screen.getByText(/cannot switch it off/)).toBeTruthy();
+    unmount();
+
+    vi.mocked(client.getLegalHoldSettings).mockResolvedValueOnce(
+      { ...settings, approver_group_id: null, approver_group: null, can_change: true } as never);
+    vi.mocked(client.setLegalHoldApprover).mockResolvedValueOnce(settings as never);
+    const user = userEvent.setup();
+    render(<LegalHoldsPanel />);
+    await user.selectOptions(await screen.findByLabelText("Approving group"), "g1");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(client.setLegalHoldApprover).toHaveBeenCalledWith("g1"));
+  });
+
+  it("warns when the named group can no longer approve", async () => {
+    vi.mocked(client.listLegalHolds).mockResolvedValue({ count: 0, frozen: [], holds: [] } as never);
+    vi.mocked(client.getLegalHoldSettings).mockResolvedValueOnce({
+      available: true, approver_group_id: "g1", approver_group: null, approver_group_unusable: true,
+      can_configure: false, can_change: false, groups: [] } as never);
+    render(<LegalHoldsPanel />);
+    expect(await screen.findByText("The approving group cannot approve")).toBeTruthy();
   });
 });

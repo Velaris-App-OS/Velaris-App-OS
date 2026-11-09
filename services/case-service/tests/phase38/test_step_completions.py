@@ -1,4 +1,4 @@
-"""HELIX P38 — Step Completion tests (25 tests).
+"""Velaris P38 — Step Completion tests (25 tests).
 
 Covers: complete step (user_task, approval, document_request),
         list completions, auto-advance logic, upsert idempotency,
@@ -48,6 +48,14 @@ CASE_TYPE_DEF = {
         },
     ]
 }
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _in_an_access_group():
+    """Since 2026-10-28 completing a step needs the caller in an access group
+    covering the case type (velaris_shared/hxguard/step_submit.py)."""
+    from tests.conftest import grant_case_create
+    await grant_case_create("worker-1")
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -139,12 +147,15 @@ async def test_complete_step_404_case(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_actor_id_override(client: AsyncClient, case_):
-    """actor_id in body overrides authenticated user_id."""
+    """actor_id names another completer: only superadmin may (2026-10-28 — it forged the record)."""
     app.dependency_overrides[get_current_user] = lambda: _user("worker-1")
-    resp = await client.post(f"/api/v1/cases/{case_.id}/steps/{STEP_A_ID}/complete", json={
-        "stage_id": STAGE_ID, "step_type": "user_task", "status": "completed",
-        "data": {}, "actor_id": "supervisor-99",
-    })
+    body = {"stage_id": STAGE_ID, "step_type": "user_task", "status": "completed",
+            "data": {}, "actor_id": "supervisor-99"}
+    resp = await client.post(f"/api/v1/cases/{case_.id}/steps/{STEP_A_ID}/complete", json=body)
+    assert resp.status_code == 403
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        user_id="root", roles=["superadmin"])
+    resp = await client.post(f"/api/v1/cases/{case_.id}/steps/{STEP_A_ID}/complete", json=body)
     assert resp.status_code == 200
     assert resp.json()["completed_by"] == "supervisor-99"
 

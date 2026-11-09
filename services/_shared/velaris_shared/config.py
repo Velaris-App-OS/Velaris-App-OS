@@ -5,10 +5,13 @@ SPDX-License-Identifier: BSL-1.1
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, TypeAdapter, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+_log = logging.getLogger("velaris.config")
 
 
 class Settings(BaseSettings):
@@ -47,12 +50,86 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     db_auth_pool_size: int = 3       # dedicated auth pool — never starved by analytics
     db_analytics_pool_size: int = 3  # analytics / compliance / sync pool
+    # R6 soak S9 (2026-11-03): longest an analytics READ statement may run, in
+    # ms (PostgreSQL `SET LOCAL statement_timeout`, per read-only transaction, so
+    # safe behind PgBouncer). A runaway report then ends with its caller instead
+    # of holding locks and CPU for minutes. 0 / unset = no limit, as before.
+    db_analytics_read_timeout_ms: int = 0
+    # Seconds an analytics answer (dashboard, overview, SLA compliance, cases
+    # over time) is reused for the same tenant scope and parameters. Under
+    # load every viewer of a tenant then shares one calculation (R6 soak,
+    # 2026-11-05: dashboard p95 3.6 s at 400 users). Numbers may be that many
+    # seconds old. 0 / unset = off: every request computes, as before. Max 300.
+    analytics_cache_seconds: int = 0
     # Optional READ-ONLY replica (hot standby) for heavy analytics queries.
     # Empty = those queries share the analytics pool on the primary. Served
     # via get_replica_session only — the analytics pool itself stays on the
     # primary because compliance seals, hxsync, PUO, and saved-report CRUD
     # write through it and would fail on a standby.
     db_analytics_url: str = ""
+    # R5d 11b — the read/write split (agreed 2026-10-22). A read-only replica for
+    # the paths that opted in (get_read_session). db_analytics_url wins when both
+    # are set, exactly as before. Both empty = every read on the main database.
+    database_read_url: str = ""
+    # After a user writes, their reads go to the main this long, whatever the path:
+    # nobody sees their own change missing.
+    read_own_writes_seconds: float = 5.0
+    # Replica DOWN (not merely behind): reads go to the main through a pool this
+    # small, so they can never crowd out the main's own work…
+    read_fallback_pool_size: int = 3
+    # …and come back to the replica only after it has been healthy this long.
+    read_recovery_seconds: float = 60.0
+    # How often each process looks at the replica.
+    read_health_seconds: float = 10.0
+    # Point-in-time outputs (scheduled reports, exports, snapshots) wait at most
+    # this long for the replica to pass their cutoff, then read the main.
+    read_barrier_max_seconds: float = 30.0
+    # R5d 6a — the connection pooler (PgBouncer, PostgreSQL only). Set → every
+    # application pool connects through it. Empty = direct to database_url,
+    # exactly as before. database_url stays the DIRECT address: migrations,
+    # backups and admin scripts never go through the pooler.
+    database_pooler_url: str = ""
+    # R5e step 7 — commerce-service's own pool on the same pooler (PgBouncer's
+    # `velaris_commerce` database: same database and role, separate server
+    # connections), so a commerce transaction waiting on case-service's internal
+    # API never holds a connection case-service needs. Read by commerce-service
+    # only, and only while database_pooler_url is set. Empty = commerce shares
+    # database_pooler_url, exactly as before.
+    commerce_database_pooler_url: str = ""
+    # R5e step 8 — the same for portal-service (`velaris_portal`): a portal
+    # request waits on case-service's internal API inside its transaction too.
+    portal_database_pooler_url: str = ""
+    # R5e step 10 — the same for user-service (`velaris_user`): a password reset
+    # waits on case-service's internal API (the mail) inside its transaction.
+    user_database_pooler_url: str = ""
+    # The platform reaches the pooler over its UNIX socket (the folder
+    # deploy/docker-compose/pooler-socket, 0700, the install owner's) instead of
+    # 127.0.0.1:6432. A loopback port is free while the pooler restarts; a local
+    # user who bound it then could pose as PostgreSQL and be sent the database
+    # password in clear (asyncpg cannot refuse that). The pooler URLs above are
+    # not rewritten — only where they connect. False = TCP, exactly as before.
+    # No TCP fallback: a missing socket means the pooler is down.
+    database_pooler_socket: bool = False
+
+    # Deleting a user (Nov_TODO "User deletion v2"): refused and signed out at
+    # once, purged — with everything that grants access — after this many days;
+    # an admin can undo in between. 0 = purge at once.
+    user_delete_grace_days: int = 30
+    # One admin deleting many accounts in an hour: a high alert past the first
+    # number, refused past the second (superadmin excepted).
+    user_delete_bulk_alert: int = 5
+    user_delete_bulk_limit: int = 20
+    # Where purged accounts' signed records are kept, outside the database (a
+    # restore replays them). Empty = <install>/.deletions. On Kubernetes point it
+    # at a persistent volume.
+    deletion_ledger_dir: str = ""
+
+    # R5e step 9 — whether this case-service process starts the background jobs
+    # (case_service/jobs.py). Unset = yes, exactly as before. Every singleton job
+    # runs under a lease, so leaving it on beside the worker service is safe —
+    # one of them runs each job. setup writes false for a new install, whose
+    # worker service runs them.
+    run_jobs: bool = True
 
     # D2: request body size limits (three tiers)
     max_body_bytes: int = 10 * 1024 * 1024             # JSON payloads
@@ -63,6 +140,15 @@ class Settings(BaseSettings):
     temporal_host: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_task_queue: str = "velaris-case-queue"
+    # Mutual TLS to a Temporal on another server (VELARIS_EXTERNAL_SERVICES=temporal
+    # refuses to start without all three). PEM file paths. All empty = plaintext,
+    # as before — right for the bundled Temporal on this box's loopback.
+    temporal_tls_ca: str = ""
+    temporal_tls_cert: str = ""
+    temporal_tls_key: str = ""
+    # The name on the server's certificate, when it differs from the host in
+    # temporal_host (e.g. connecting by IP). Empty = the host.
+    temporal_tls_server_name: str = ""
 
     # F-04 second slice — the simulation TWIN.
     #
@@ -132,6 +218,41 @@ class Settings(BaseSettings):
     # metrics scrape reach those directly and legitimately.
     gateway_identity_secret: str = Field(
         default="", validation_alias="VELARIS_GATEWAY_IDENTITY_SECRET")
+
+    # Internal service API (R5e step 7 — the commerce split). commerce-service
+    # asks case-service to do what only case-service may do (create an order's
+    # case, advance a case, apply a pack bundle, …) on `/internal/v1/*`, which
+    # the gateway never forwards. Each call carries this secret; case-service
+    # refuses any call without it. EMPTY = every internal route refuses (503),
+    # nothing else changes. setup AND update generate one (pre-customer
+    # exception recorded in CLAUDE.md, 2026-10-19).
+    internal_service_secret: str = Field(
+        default="", validation_alias="VELARIS_INTERNAL_SERVICE_SECRET")
+    # Where commerce-service reaches case-service directly — loopback on a
+    # single box, the service's cluster address on Kubernetes. Empty = loopback
+    # on VELARIS_CASE_PORT.
+    case_service_internal_url: str = Field(
+        default="", validation_alias="VELARIS_CASE_SERVICE_INTERNAL_URL")
+
+    # Demo tenants (2026-11-04, Nov_TODO §0 "SECURITY"): every website sign-up
+    # gets a tenant of its own, made by user-service's
+    # `/internal/v1/demo/tenants`. Only tenants that route made (marked
+    # `settings.demo`) are ever expired or deleted; nothing else reads these.
+    # The ONE credential the website's registration service holds (user's
+    # decision 2026-11-04: not the internal service secret, not the gateway
+    # identity secret). Accepted only on /internal/v1/demo/*, header
+    # X-Velaris-Demo. EMPTY = those routes refuse (503) and nothing else changes;
+    # setup-website.sh generates it, on the operator's run.
+    demo_provision_secret: str = Field(
+        default="", validation_alias="VELARIS_DEMO_PROVISION_SECRET")
+    demo_max_tenants: int = Field(default=200, ge=0, validation_alias="VELARIS_DEMO_MAX_TENANTS")
+    demo_tenant_days: int = Field(default=7, ge=1, le=365, validation_alias="VELARIS_DEMO_TENANT_DAYS")
+    demo_max_users: int = Field(default=5, ge=1, validation_alias="VELARIS_DEMO_MAX_USERS")
+    demo_max_cases: int = Field(default=200, ge=1, validation_alias="VELARIS_DEMO_MAX_CASES")
+    # Days an expired (archived) demo tenant is kept — time for a sales
+    # extension — before the worker deletes it and its accounts.
+    demo_delete_after_days: int = Field(default=3, ge=0, le=90,
+                                        validation_alias="VELARIS_DEMO_DELETE_AFTER_DAYS")
 
     # Internal TLS (#18, second half) — OFF by default and deliberately so.
     # Everything currently talks over host loopback behind a loopback-only
@@ -390,6 +511,9 @@ class Settings(BaseSettings):
     # >>> P32 scaling
     redis_enabled: bool = False
     redis_url: str = "redis://localhost:6379/0"
+    # The cache's AUTH password (VELARIS_CASE_REDIS_PASSWORD). Kept out of the URL
+    # so it is never logged. Empty = no AUTH, as before.
+    redis_password: str = Field(default="", repr=False)
     redis_channel_prefix: str = "velaris:rt:"
     rate_limit_backend: str = "memory"  # "memory" | "redis"
     # <<< P32 scaling
@@ -431,18 +555,6 @@ class Settings(BaseSettings):
     hxnexus_rerank_candidates: int = 20         # retrieved before the rerank
     hxnexus_rerank_lexical_weight: float = 0.3  # keyword share of the blend, 0..1
 
-    @field_validator("hxnexus_rerank_candidates", "hxnexus_rerank_lexical_weight",
-                     mode="before")
-    @classmethod
-    def _hxnexus_number_or_default(cls, value, info):
-        # `KEY=` or `KEY=abc` in .env must not stop the service booting over a
-        # ranking knob: an unreadable number is the default, like an unset one.
-        default = cls.model_fields[info.field_name].default
-        try:
-            return type(default)(str(value).strip())
-        except (TypeError, ValueError):
-            return default
-
     # §5.3 LLM hardening: model-DoS guard — max chars (prompt + system) per LLM
     # call, enforced at the universal choke point. ~50k tokens. Configurable.
     ai_max_prompt_chars: int = 200_000
@@ -458,6 +570,12 @@ class Settings(BaseSettings):
     ai_ollama_url: str = "http://localhost:11434"
     ai_ollama_model: str = "llama3.2"
     ai_ollama_embed_model: str = "nomic-embed-text"
+    # Bearer key for an Ollama on another server. Ollama has no authentication of
+    # its own; a proxy in front of it checks this key. Empty = no header, as before.
+    ai_ollama_api_key: str = Field(default="", repr=False)
+    # CA file for that proxy's certificate when it is not publicly trusted.
+    # Empty = the usual public CAs, as before.
+    ai_ollama_tls_ca: str = ""
     ai_openai_api_key: str = ""
     ai_openai_model: str = "gpt-4o-mini"
     ai_openai_embed_model: str = "text-embedding-3-small"
@@ -563,16 +681,6 @@ class Settings(BaseSettings):
         default=False, validation_alias="VELARIS_CASE_RETENTION_ANONYMIZE_CASE_TEXT"
     )
 
-    @field_validator("pii_redact_table_exports", "pii_mask_ai_egress",
-                     "retention_anonymize_case_text", mode="before")
-    @classmethod
-    def _switch_or_off(cls, value):
-        # `KEY=` or `KEY=maybe` must not stop the service booting, and must
-        # never read as on: anything that is not plainly yes is off.
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in ("1", "true", "yes", "on")
-
     # HxLedger (§8.4) — post captured payments and refunds into the books.
     # ON by default, for the same reason the health sampler is: a ledger with
     # no postings is worthless, and `/ledger/reconcile` reports every captured
@@ -582,7 +690,7 @@ class Settings(BaseSettings):
         default=True, validation_alias="VELARIS_CASE_LEDGER_POSTING_ENABLED"
     )
     # Durable event log (§2.1) — fan-out of the transactional outbox onto
-    # Redpanda/Kafka so consumers other than webhooks can read the stream.
+    # Kafka so consumers other than webhooks can read the stream.
     # OFF by default: the outbox is already safe on disk, so this adds
     # distribution, not durability, and it should be a deliberate act.
     event_bus_enabled: bool = Field(
@@ -596,6 +704,33 @@ class Settings(BaseSettings):
     )
     event_bus_topic_prefix: str = Field(
         default="velaris", validation_alias="VELARIS_CASE_EVENT_BUS_TOPIC_PREFIX"
+    )
+    # Broker authentication (SASL/PLAIN). The bundled Kafka refuses to start
+    # without a password; setup generates one, and start/update generate one
+    # when the bus is turned on without it. Empty = connect without SASL, which
+    # is only right for a broker the operator runs without authentication.
+    # Operator alerts by email (backup and update watchers). A SYSTEM mailbox,
+    # separate from tenants' own mail accounts. Unset host or recipients = no
+    # email, exactly as before (push and Studio still show the alert).
+    alert_email: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_EMAIL")  # comma-separated
+    alert_smtp_host: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_SMTP_HOST")
+    alert_smtp_port: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_SMTP_PORT")
+    alert_smtp_username: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_SMTP_USERNAME")
+    alert_smtp_password: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_SMTP_PASSWORD", repr=False)
+    alert_smtp_from: str = Field(default="", validation_alias="VELARIS_CASE_ALERT_SMTP_FROM")
+    # starttls (default) | ssl | none — "none" only for a relay on this host.
+    alert_smtp_tls: str = Field(default="starttls", validation_alias="VELARIS_CASE_ALERT_SMTP_TLS")
+    event_bus_username: str = Field(
+        default="velaris", validation_alias="VELARIS_CASE_EVENT_BUS_USERNAME"
+    )
+    event_bus_password: str = Field(
+        default="", validation_alias="VELARIS_CASE_EVENT_BUS_PASSWORD", repr=False
+    )
+    # CA file for a broker on another server. Set = SASL_SSL (the password is
+    # then sent only over TLS); empty = SASL_PLAINTEXT, as before — right for the
+    # bundled broker on this box's loopback.
+    event_bus_tls_ca: str = Field(
+        default="", validation_alias="VELARIS_CASE_EVENT_BUS_TLS_CA"
     )
     # HxSandbox (#17) — execution of customer-authored WASM modules.
     # OFF by default and deliberately so: turning this on lets a marketplace
@@ -854,6 +989,85 @@ class Settings(BaseSettings):
         default=False, validation_alias="VELARIS_CASE_STOREFRONT_CUSTOM_DOMAINS_ENABLED")
     # <<< HxStorefront
 
+    # ── R1: no single line in .env stops a service from starting (2026-10-30) ──
+    #
+    # `KEY=` (or a typo) on any number or on/off setting failed validation and
+    # the service did not start: 106 of them, found by trying every setting with
+    # empty, blank, malformed, huge and negative values. The 2026-08-24 outage
+    # was the same fault in nginx. One rule here, for every field by type:
+    #
+    #   number, on/off   empty or blank = the default, exactly as if unset;
+    #                    unreadable, negative or absurd = the default, and one
+    #                    line saying which variable and what was used.
+    #   a mode or place  (_DEFAULT_WHEN_EMPTY) empty = the default — for these
+    #                    an empty value is never a meaningful choice.
+    #   case enforcement anything but enforce / shadow / off = enforce. Empty
+    #                    read as "shadow": every case gate advisory, the open
+    #                    state its default exists to prevent.
+    #   refused          (_REFUSE_WHEN_EMPTY) the service stops and names the
+    #                    variable: an empty signing secret is a key anyone can
+    #                    sign with, and the vault key is derived from it.
+    #
+    # Text settings are otherwise taken as written: for many, empty is how a
+    # feature is turned off, and a secret is never trimmed.
+    @field_validator("*", mode="before")
+    @classmethod
+    def _never_stop_a_boot(cls, value, info):
+        field = cls.model_fields[info.field_name]
+        kind = _KIND.get(field.annotation)
+        name = info.field_name
+        if kind is None:
+            if not isinstance(value, str) or value.strip():
+                return value
+            if name in _REFUSE_WHEN_EMPTY:
+                raise ValueError(
+                    f"{_env_name(name, field)} is empty — refusing to start: {_REFUSE_WHEN_EMPTY[name]}")
+            if name in _EMPTY_DECIDED_LATER:
+                return ""
+            if name in _DEFAULT_WHEN_EMPTY:
+                return field.default
+            return value
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return field.default
+        try:
+            parsed = _ADAPTERS[kind].validate_python(text)
+            if kind is not bool and parsed is not None and not (0 <= parsed <= _ABSURD):
+                raise ValueError("out of range")
+            return parsed
+        except ValueError:
+            _log.warning("%s=%r is not a valid %s — using the default (%r)",
+                         _env_name(name, field), text[:40], _KIND_WORD[kind], field.default)
+            return field.default
+
+    @field_validator("hxguard_case_enforcement")
+    @classmethod
+    def _enforce_unless_said_otherwise(cls, value):
+        mode = (value or "").strip().lower()
+        if mode in ("enforce", "shadow", "off"):
+            return mode
+        if mode:
+            _log.warning("VELARIS_CASE_HXGUARD_CASE_ENFORCEMENT=%r is not enforce, shadow "
+                         "or off — enforcing", value[:40])
+        return "enforce"
+
+    @model_validator(mode="after")
+    def _empty_database_url(self) -> "Settings":
+        # Empty URL = the backend builds it from the typed components. That needs
+        # at least a host — or a MySQL-family install, whose setup always writes
+        # the components and whose builder has always defaulted the rest. An
+        # empty URL on PostgreSQL with no host is the half-edited .env R1 exists
+        # to stop: refused, and named.
+        if self.database_url == "" and not self.db_host \
+                and (self.database_backend or "postgresql") == "postgresql":
+            raise ValueError(
+                "VELARIS_CASE_DATABASE_URL is empty and VELARIS_CASE_DB_HOST is not set — refusing to "
+                "start: set the URL, or the DB_HOST/_PORT/_NAME/_USER components, or remove the line "
+                "to use the default")
+        return self
+
     @model_validator(mode="after")
     def _fix_rsa_newlines(self) -> "Settings":
         # .env files store \n as literal two-char sequence; convert to real newlines
@@ -864,6 +1078,61 @@ class Settings(BaseSettings):
         return self
 
     model_config = {"env_prefix": "VELARIS_CASE_", "env_file": ".env", "extra": "ignore"}
+
+
+_KIND = {int: int, float: float, bool: bool, int | None: int}
+_KIND_WORD = {int: "whole number", float: "number", bool: "on/off value"}
+_ADAPTERS = {k: TypeAdapter(k) for k in (int, float, bool)}
+#: Beyond any real limit, timeout or size: a typo with extra digits.
+_ABSURD = 2 ** 53
+
+_DEFAULT_WHEN_EMPTY = frozenset({
+    "service_name", "service_host", "database_backend", "temporal_host",
+    "temporal_namespace", "temporal_task_queue", "engine_api_url", "auth_mode",
+    "auth_issuer", "auth_audience", "internal_tls_dir", "storage_backend",
+    "storage_local_path", "redis_url", "redis_channel_prefix", "rate_limit_backend",
+    "ai_egress_policy", "event_bus_topic_prefix", "alert_smtp_tls", "ocr_language",
+    "webauthn_rp_name", "checkout_default_currency", "storefront_default_currency",
+    "marketplace_conformance_gate", "meet_driver", "meet_asr_backend",
+})
+_REFUSE_WHEN_EMPTY = {
+    "auth_secret": "tokens would be signed with an empty key, and the vault key is "
+                   "derived from it; set it back to this install's secret",
+}
+#: Empty is a documented setting for these, decided with the whole model in view
+#: (Settings._empty_database_url): an empty VELARIS_CASE_DATABASE_URL means
+#: "build it from VELARIS_CASE_DB_HOST/_PORT/_NAME/_USER" — what every MySQL and
+#: MariaDB install's setup writes. Refusing it outright (R1, 2026-10-30) stopped
+#: every such install from starting on upgrade (R3 re-run, 2026-11-01).
+_EMPTY_DECIDED_LATER = frozenset({"database_url"})
+
+
+def env_int(name: str, default: int) -> int:
+    """A whole number read straight from the environment, outside `Settings`, by
+    the same R1 rule: unset, empty or unreadable is the default (the last with a
+    line saying so) — never a crash at import, which stops the whole service."""
+    import os
+
+    text = (os.environ.get(name) or "").strip()
+    if not text:
+        return default
+    try:
+        n = int(text)
+        if 0 <= n <= _ABSURD:
+            return n
+    except ValueError:
+        pass
+    _log.warning("%s=%r is not a valid whole number — using the default (%r)", name, text[:40], default)
+    return default
+
+
+def _env_name(name: str, field) -> str:
+    alias = field.validation_alias
+    if isinstance(alias, str):
+        return alias
+    if isinstance(alias, AliasChoices):
+        return next((c for c in alias.choices if isinstance(c, str)), name)
+    return "VELARIS_CASE_" + name.upper()
 
 
 @lru_cache

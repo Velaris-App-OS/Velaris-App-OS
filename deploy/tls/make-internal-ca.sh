@@ -32,9 +32,23 @@ LEAF_DAYS=90      # leaves are short by design — see rotate-internal-certs.sh
 # Every service that terminates TLS, and the CN it presents. `localhost` is in
 # every SAN list because that is genuinely how the gateway reaches them today;
 # the service name is there for the day they move to separate hosts.
-SERVICES=(case-service analytics-service hxgraph-service hxmigrate-service)
+SERVICES=(case-service analytics-service hxgraph-service hxmigrate-service worker-service)
+# Services that ALSO call another service directly (R5e steps 7, 8, 10: commerce-,
+# portal- and user-service call case-service's /internal API). Their certificate carries
+# both server and client use; every other service stays server-only, so no other
+# service can present itself as a caller.
+CALLERS=(commerce-service portal-service user-service)
 
 mkdir -p "$OUT_DIR"
+# Docker creates this directory as root when the gateway starts before it exists
+# (older installs). Say so and how to fix it, rather than "chmod: Operation not
+# permitted" halfway through.
+if [ ! -w "$OUT_DIR" ]; then
+  echo "✗ $OUT_DIR is not writable by $(id -un) (owner: $(stat -c %U "$OUT_DIR" 2>/dev/null || echo '?'))." >&2
+  echo "  Docker created it when the gateway first started. Give it back, then re-run:" >&2
+  echo "    sudo chown $(id -un): \"$OUT_DIR\"" >&2
+  exit 1
+fi
 chmod 700 "$OUT_DIR"
 cd "$OUT_DIR"
 
@@ -61,6 +75,7 @@ _issue() {
 
   local ext_usage="serverAuth"
   [ "$is_client" = "client" ] && ext_usage="clientAuth"
+  [ "$is_client" = "both" ] && ext_usage="serverAuth, clientAuth"
 
   cat > "${name}.ext" <<EXT
 basicConstraints = CA:FALSE
@@ -77,10 +92,16 @@ EXT
 for svc in "${SERVICES[@]}"; do
   _issue "$svc" "" server
 done
+for svc in "${CALLERS[@]}"; do
+  _issue "$svc" "" both
+done
 
 # The gateway is the CLIENT in every internal hop: it is what the services must
 # authenticate. It presents this certificate; they verify it against ca.crt.
 _issue "gateway" "" client
+# The website's registration service calls user-service's /internal/v1/demo
+# routes directly (2026-11-04). Client-only: it serves nothing to the platform.
+_issue "website" "" client
 
 chmod 644 ca.crt ./*.crt
 

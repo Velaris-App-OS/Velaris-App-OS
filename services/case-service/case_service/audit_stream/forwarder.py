@@ -100,6 +100,15 @@ async def _read_batch(session, target, *, limit: int = BATCH_SIZE) -> list[dict[
     wanted_types = _event_types(target)
     if wanted_types:
         stmt = stmt.where(SE.event_type.in_(wanted_types))
+    # A tenant's target carries its own tenant's events only (2026-11-04,
+    # migration 230); the platform operator's target (no tenant) every event.
+    if getattr(target, "tenant_id", None):
+        from case_service.tenancy.identity import resolve_tenant
+        spellings = {str(target.tenant_id)}
+        hit = await resolve_tenant(session, str(target.tenant_id))
+        if hit is not None:
+            spellings |= {str(hit[0]), str(hit[1])}
+        stmt = stmt.where(SE.tenant_id.in_(sorted(spellings)))
 
     rows = (await session.execute(stmt)).scalars().all()
 
@@ -127,6 +136,8 @@ async def _read_batch(session, target, *, limit: int = BATCH_SIZE) -> list[dict[
             "outcome": row.outcome,
             "details": row.details or {},
             "timestamp": row.timestamp,
+            # >1 = a summary of that many refused repeats (migration 231).
+            "repeat_count": getattr(row, "repeat_count", 1) or 1,
         })
     return events
 

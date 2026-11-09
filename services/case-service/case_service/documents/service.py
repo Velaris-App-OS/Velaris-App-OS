@@ -169,6 +169,13 @@ class DocumentService:
             raise ValueError(f"version {v} not found")
         be = self._be()
         data = await be.get(ver.storage_key)
+        if data[:4] == b"HXE1":
+            # Still ciphertext: stored encrypted, read back with no storage
+            # master key configured. Handing these bytes out as the document
+            # (what v3.1.2 did, with a 200) is never right.
+            from velaris_shared.storage.backend import StorageError
+            raise StorageError("Document is stored encrypted but this install has no storage master key "
+                               "(VELARIS_CASE_STORAGE_MASTER_KEY).")
         return data, doc.filename, doc.content_type
 
     # -- delete (soft) -------------------------------------------------------

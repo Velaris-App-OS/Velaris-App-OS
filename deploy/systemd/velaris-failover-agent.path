@@ -1,0 +1,9 @@
+[Unit]
+Description=Velaris automatic failover — start the agent when failover is enabled
+
+[Path]
+PathExists=__VELARIS_DIR__/.standby/failover/failover.json
+Unit=velaris-failover-agent.service
+
+[Install]
+WantedBy=multi-user.target

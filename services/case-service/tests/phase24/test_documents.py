@@ -1,4 +1,4 @@
-"""HELIX P24 — Document Management tests."""
+"""Velaris P24 — Document Management tests."""
 from __future__ import annotations
 
 import asyncio

@@ -1,4 +1,4 @@
-"""HELIX Email — package named `mail` to avoid shadowing stdlib email."""
+"""Velaris Email — package named `mail` to avoid shadowing stdlib email."""
 from .templates import render_template, TemplateError
 from .threader import (
     extract_subject_tag, build_subject_tag, resolve_case_id_from_message,

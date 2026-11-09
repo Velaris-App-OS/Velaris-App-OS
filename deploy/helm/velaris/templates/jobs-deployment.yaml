@@ -1,0 +1,101 @@
+{{- if .Values.jobs.enabled }}
+{{/*
+worker-service (R5e step 9) — case-service's image started in worker mode: the
+background jobs (case_service/jobs.py), each under a job lease, and no API. With
+this on, case-service pods stop starting them (VELARIS_CASE_RUN_JOBS=false). Off
+(the default), case-service pods run them as before — the leases now keep two
+replicas from running a job twice. No Service: nothing calls it.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helix.jobsName" . }}
+  labels: { app: jobs }
+spec:
+  replicas: {{ .Values.jobs.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector: { matchLabels: { app: jobs } }
+  template:
+    metadata: { labels: { app: jobs } }
+    spec:
+      # Nothing here talks to the Kubernetes API, so the default token has no
+      # reader — and a mounted token is a credential an escaped process finds.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "helix.podSecurityContext" . | nindent 8 }}
+      {{- if or .Values.caseService.documents.persistence.enabled .Values.caseService.documents.existingClaim }}
+      volumes:
+        - name: documents
+          persistentVolumeClaim:
+            claimName: {{ .Values.caseService.documents.existingClaim | default (printf "%s-documents" (include "helix.caseServiceName" .)) }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ add (.Values.terminationDrainSeconds | default 5) 25 }}
+      containers:
+        - name: jobs
+          image: "{{ .Values.image.caseService.repository }}:{{ .Values.image.caseService.tag }}"
+          imagePullPolicy: {{ .Values.image.caseService.pullPolicy }}
+          # Stop accepting new work, then linger while the endpoint is
+          # withdrawn from every node's kube-proxy. Without this a deleted pod
+          # closes connections that are still in flight: measured at 29 of
+          # 26,561 requests (0.11%) on a three-node cluster, and invisible on
+          # one node because the replacement is local.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.terminationDrainSeconds | default 5 }}"]
+          command: ["uvicorn", "case_service.worker.main:app", "--host", "0.0.0.0",
+                    "--port", "{{ .Values.jobs.port }}", "--app-dir", "/app/services/case-service"]
+          ports:
+            - containerPort: {{ .Values.jobs.port }}
+          env:
+            {{- include "helix.authSecretEnv" . | nindent 12 }}
+            - name: VELARIS_CASE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helix.dbSecretName" . }}
+                  key: {{ include "helix.dbSecretKey" . }}
+            - name: VELARIS_CASE_DATABASE_BACKEND
+              value: {{ include "helix.databaseBackend" . | quote }}
+            {{- include "helix.poolerEnv" . | nindent 12 }}
+            - name: VELARIS_CASE_REDIS_URL
+              value: {{ include "helix.redisUrl" . | quote }}
+            # No VELARIS_INTERNAL_SERVICE_SECRET, deliberately: the jobs neither
+            # serve /internal/v1 nor call it, and a credential a pod never uses
+            # is one an escaped process could still present.
+            - name: VELARIS_SERVICE_NAME
+              value: worker-service
+            {{- range $k, $v := merge (deepCopy (.Values.jobs.env | default dict)) .Values.caseService.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          securityContext:
+            {{- include "helix.containerSecurityContext" . | nindent 12 }}
+          {{- if or .Values.caseService.documents.persistence.enabled .Values.caseService.documents.existingClaim }}
+          volumeMounts:
+            - name: documents
+              mountPath: {{ .Values.caseService.documents.mountPath }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
+          # Startup probe: the boot budget lives HERE, not in a liveness
+          # `initialDelaySeconds` that has to guess. Liveness and readiness are
+          # held off until this passes, so a slow first boot (migrations, a cold
+          # model, a busy node) is waited out instead of being restarted in a
+          # loop — and once it passes, liveness reacts at its own quick period.
+          # 30 x 5s = up to 150s to come up; after that the pod is restarted.
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.jobs.port }} }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            # /ready checks the database; /health only says the process is up.
+            httpGet: { path: /ready, port: {{ .Values.jobs.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.jobs.port }} }
+            periodSeconds: 20
+{{- end }}

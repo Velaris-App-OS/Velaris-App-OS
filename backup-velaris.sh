@@ -1,122 +1,84 @@
 #!/usr/bin/env bash
-# Velaris — take a database backup AND record it in HxDR, in one command.
+# Velaris — take a backup set AND record it in HxDR, in one command.
 #
-# Why this exists
-# ---------------
-# `update-velaris.sh` already dumps the database and records the result, but it
-# only runs during an update. Every other backup — a cron job, a systemd timer,
-# an operator taking a dump before a risky change — had to be recorded by hand
-# through the API, which in practice means it was not recorded at all. The
-# consequence is specific and bad: `GET /dr/posture` reports `no_backup` while
-# backups are in fact being taken, so the one screen that exists to say whether
-# you can recover is wrong in the direction that invites people to ignore it.
+# What a backup is (since November 2026)
+# --------------------------------------
+# ONE encrypted file per run, `velaris-<host>-<UTC>-v<version>.tar.age`, holding
+# the database (consistent dump + exact row counts), the documents, the .env
+# (with the keys that make restored documents readable), the OpenBao vault
+# snapshot and a manifest of checksums. Encrypted to this install's age public
+# key (VELARIS_BACKUP_AGE_RECIPIENT); the private key is not kept on the server
+# once you have run --forget-private-key. Copied to VELARIS_BACKUP_PATH (a
+# mounted NAS/disk) and/or VELARIS_BACKUP_S3_* when set, and pruned to
+# 7 daily / 4 weekly / 6 monthly. Every run is recorded in HxDR, so
+# `GET /dr/posture` reports what really happened.
 #
-# The fix is not another reminder. It is making the recording part of taking the
-# backup, so forgetting is not an option that exists.
+# Without a key it does what it always did: a database-only dump, local, plain
+# SQL — and says so. Settings and the vault are never written unencrypted.
+#
+# Design: docs/Future/Done/backup-restore-design.md. Engine:
+# scripts/backup/velaris_backup.py.
 #
 # Usage
 # -----
-#   ./backup-velaris.sh                       # dump + record
-#   ./backup-velaris.sh --dir /mnt/backups    # somewhere other than .backups/
-#   ./backup-velaris.sh --keep 14             # prune dumps older than N days
-#   ./backup-velaris.sh --quiet               # cron-friendly: errors only
-#
-# Cron / systemd timer:
-#   0 2 * * *  /opt/velaris/backup-velaris.sh --quiet --keep 30
+#   ./backup-velaris.sh                       # take a set + record it
+#   ./backup-velaris.sh --dir /mnt/backups    # local copy somewhere other than .backups/
+#   ./backup-velaris.sh --quiet               # timer/cron friendly: errors only
+#   ./backup-velaris.sh --keep 14             # keyless dumps only: delete those older than N days
+#   ./backup-velaris.sh --test-restore        # prove THIS set restores (otherwise weekly,
+#                                             # VELARIS_BACKUP_TEST_EVERY_DAYS) — the dump is
+#                                             # loaded into a throwaway database and checked
+#   ./backup-velaris.sh --ensure-key          # give this install a key pair if it has none
+#   ./backup-velaris.sh --forget-private-key  # after copying it off: remove the private
+#   ./backup-velaris.sh --push-deletions     # copy purged accounts' signed records off the box
+#                                            # (also every backup run, and at once by a path unit)
+#                                             # key from velaris-install-report.md
 #
 # Exit status
 # -----------
-# Non-zero ONLY when the backup itself failed. A failure to record is reported
-# and does not change the exit code — a successful backup must never be
-# reported as a failed one because a bookkeeping row did not land. That is the
-# same trade `update-velaris.sh` makes, for the same reason.
+#   0 complete set (and every configured off-box copy made)
+#   1 failed — nothing usable was produced
+#   3 PARTIAL set — taken, but a part is missing (named in the output)
+#   4 set taken, but no off-box copy succeeded
+#   5 set taken, but it FAILED its restore test
+# A failure to RECORD in HxDR never changes the exit code.
 #
 # Copyright (c) 2024-2026 Velaris Contributors
 # SPDX-License-Identifier: BSL-1.1
 set -euo pipefail
 
 VELARIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="$VELARIS_DIR/.backups"
-# Scratch files and error logs go to a directory only this user can write. A
-# fixed name under /tmp can be pre-created, or pointed somewhere else, by any
-# other local user before this script writes to it.
-VELARIS_SCRATCH="${VELARIS_SCRATCH:-${XDG_STATE_HOME:-${HOME:-}/.local/state}/velaris}"
-if ! { mkdir -p "$VELARIS_SCRATCH" && chmod 700 "$VELARIS_SCRATCH" && [ -w "$VELARIS_SCRATCH" ]; } 2>/dev/null; then
-  VELARIS_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/velaris.XXXXXX")"
-fi
-KEEP_DAYS=""
-QUIET=false
+PY="$VELARIS_DIR/.venv/bin/python"
+ENGINE="$VELARIS_DIR/scripts/backup/velaris_backup.py"
 
+if [[ ! -x "$PY" ]]; then
+  echo "✗ $PY not found — run ./setup-velaris.sh first" >&2
+  exit 1
+fi
+
+CMD=(backup)
+EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dir)   BACKUP_DIR="$2"; shift 2 ;;
-    --keep)  KEEP_DAYS="$2";  shift 2 ;;
-    --quiet) QUIET=true;      shift ;;
-    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --dir)                EXTRA+=(--dir "$2"); shift 2 ;;
+    --keep)               EXTRA+=(--keep "$2"); shift 2 ;;
+    --quiet)              EXTRA+=(--quiet); shift ;;
+    --test-restore)       EXTRA+=(--test-restore); shift ;;
+    --no-test-restore)    EXTRA+=(--no-test-restore); shift ;;
+    --ensure-key)         CMD=(ensure-key); shift ;;
+    --forget-private-key) CMD=(forget-private-key); shift ;;
+    --push-deletions)     CMD=(push-deletions); shift ;;
+    -h|--help)            sed -n '2,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
-say()  { [[ "$QUIET" == true ]] || echo "$@"; }
-warn() { echo "$@" >&2; }
-
-# Config comes from the same .env the service reads, so a backup can never be
-# taken against a different database than the one running.
-if [[ -f "$VELARIS_DIR/.env" ]]; then
-  set -a; . "$VELARIS_DIR/.env"; set +a
+# --dir / --keep belong to `backup` only.
+if [[ "${CMD[0]}" != backup ]]; then
+  _keep=()
+  for a in "${EXTRA[@]+"${EXTRA[@]}"}"; do if [[ "$a" == --quiet ]]; then _keep+=(--quiet); fi; done
+  EXTRA=("${_keep[@]+"${_keep[@]}"}")
 fi
 
-DB_CONTAINER="${DB_CONTAINER:-docker-compose-velaris-db-1}"
-DB_USER="${POSTGRES_USER:-velaris}"
-DB_NAME="${POSTGRES_DB:-velaris}"
-
-mkdir -p "$BACKUP_DIR"
-STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP_FILE="$BACKUP_DIR/velaris-${STAMP}.sql"
-
-# ── Take the dump ─────────────────────────────────────────────────
-say "▶ Backing up $DB_NAME ..."
-if ! docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" > "$BACKUP_FILE" 2>"$VELARIS_SCRATCH/velaris-backup-err.log"; then
-  warn "✗ Backup FAILED — see $VELARIS_SCRATCH/velaris-backup-err.log"
-  # A truncated dump is more dangerous than none: it looks like a backup.
-  rm -f "$BACKUP_FILE"
-  # Recorded as failed, so the posture shows the gap rather than an old
-  # success. Best-effort; a failed backup is already the headline.
-  if [[ -x "$VELARIS_DIR/.venv/bin/python" ]]; then
-    (cd "$VELARIS_DIR" && PYTHONPATH="$VELARIS_DIR/services/case-service" \
-      "$VELARIS_DIR/.venv/bin/python" -m case_service.compliance.dr_cli \
-        --location "$BACKUP_FILE" --scope database --status failed \
-        --recorded-by "backup-velaris.sh") >/dev/null 2>&1 || true
-  fi
-  exit 1
-fi
-say "  ✓ $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
-
-# ── Record it ─────────────────────────────────────────────────────
-# `set -e` is suspended: bookkeeping must not turn a good backup into a failure.
-if [[ -x "$VELARIS_DIR/.venv/bin/python" ]]; then
-  set +e
-  (cd "$VELARIS_DIR" && PYTHONPATH="$VELARIS_DIR/services/case-service" \
-   "$VELARIS_DIR/.venv/bin/python" -m case_service.compliance.dr_cli \
-     --location "$BACKUP_FILE" \
-     --scope database \
-     --status succeeded \
-     --recorded-by "backup-velaris.sh")
-  RC=$?
-  set -e
-  [[ $RC -eq 0 ]] || warn "! backup recorded to disk but NOT to HxDR — /dr/posture will under-report"
-else
-  warn "! .venv not found — backup taken but not recorded in /dr/posture"
-fi
-
-# ── Prune ─────────────────────────────────────────────────────────
-# Only ever prunes files this script's own naming produces, and only when asked.
-# A retention sweep that guesses which files are backups is how unrelated data
-# gets deleted from a directory somebody repurposed.
-if [[ -n "$KEEP_DAYS" ]]; then
-  PRUNED=$(find "$BACKUP_DIR" -maxdepth 1 -name 'velaris-*.sql' -type f \
-             -mtime +"$KEEP_DAYS" -print -delete | wc -l)
-  [[ "$PRUNED" -gt 0 ]] && say "  pruned $PRUNED backup(s) older than ${KEEP_DAYS}d"
-fi
-
-say "✓ Done."
+cd "$VELARIS_DIR"
+exec "$PY" "$ENGINE" "${CMD[@]}" "${EXTRA[@]+"${EXTRA[@]}"}"

@@ -152,25 +152,25 @@ class TestCRDT:
 
 class TestManifestV2:
     async def test_v1_still_installs(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         assert mv.check_manifest_version({}) == 1          # grandfathered
         assert mv.check_manifest_version({"manifest_version": 1}) == 1
 
     async def test_v2_is_now_supported(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         assert mv.check_manifest_version({"manifest_version": 2}) == 2
 
     async def test_unsupported_version_still_fails_loudly(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         with pytest.raises(mv.ManifestVersionError, match="supports manifest_version"):
             mv.check_manifest_version({"manifest_version": 99})
 
     async def test_v2_rejects_a_relation_the_pdp_cannot_evaluate(self):
         """A permission that is silently never satisfied is worse than a refusal."""
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         with pytest.raises(mv.ManifestVersionError, match="relation"):
             mv.validate_v2_permissions({
@@ -178,7 +178,7 @@ class TestManifestV2:
             })
 
     async def test_v2_rejects_unknown_object_type(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         with pytest.raises(mv.ManifestVersionError, match="object_type"):
             mv.validate_v2_permissions({
@@ -186,20 +186,20 @@ class TestManifestV2:
             })
 
     async def test_v1_roles_translate_without_rewriting_the_package(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         out = mv.effective_permissions({"required_roles": ["case_worker", "viewer"]})
         assert {p["relation"] for p in out} == {"assignee", "viewer"}
 
     async def test_unknown_v1_role_degrades_to_least_privilege(self):
         """Guessing upward on an unrecognised role would widen reach silently."""
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         out = mv.effective_permissions({"required_roles": ["wizard"]})
         assert out == [{"relation": "viewer", "object_type": "case", "subject_type": "user"}]
 
     async def test_platform_still_writes_v1(self):
-        from case_service.marketplace import manifest_version as mv
+        from velaris_shared.apps import manifest_version as mv
 
         assert mv.MANIFEST_VERSION == 1
 
@@ -273,7 +273,9 @@ class TestSecurityRegressions:
         route = next(r for r in app.routes
                      if getattr(r, "path", "") == "/api/v1/hxnexus/llmops/metrics")
         names = [getattr(d.call, "__name__", "") for d in route.dependant.dependencies]
-        assert "get_session" in names and len(names) > 1, names
+        # A session plus at least one more (the role check). The session is the
+        # routed read session since R5d 11b.
+        assert ({"get_session", "get_read_session"} & set(names)) and len(names) > 1, names
 
     async def test_case_routes_declare_authentication(self):
         """Every route added in this batch must at least authenticate."""

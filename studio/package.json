@@ -12,9 +12,13 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@protomaps/basemaps": "5.7.2",
     "@types/qrcode": "^1.5.6",
     "bpmn-js": "^18.16.1",
+    "libphonenumber-js": "1.13.15",
     "livekit-client": "^2.20.1",
+    "maplibre-gl": "6.14.0",
+    "pmtiles": "4.5.0",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

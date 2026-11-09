@@ -1,0 +1,11 @@
+[Unit]
+Description=Velaris main — start the reads tunnel once `serve-reads on` has run
+
+[Path]
+# `serve-reads on` writes this file as the install's owner, who needs no sudo
+# for it. Watching for it is how the tunnel starts without a password.
+PathExists=__VELARIS_DIR__/.standby/reads-tunnel.env
+Unit=velaris-standby-reads.service
+
+[Install]
+WantedBy=multi-user.target

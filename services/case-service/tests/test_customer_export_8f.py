@@ -45,7 +45,7 @@ from case_service.engage import identity
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 
@@ -234,7 +234,7 @@ async def test_a_summary_answers_whether_and_records_nothing(api, world):
 
 
 async def test_the_customer_downloads_their_own_and_only_their_own(api, world):
-    from case_service.api.routers.portal_customers import _mint_customer_token
+    from portal_service.api.routers.portal_customers import _mint_customer_token
     token = _mint_customer_token(str(world["pc"].id), str(world["t"].id), "default")
     r = await api.get("/api/v1/portal/default/account/export",
                       headers={"Authorization": f"Bearer {token}"})

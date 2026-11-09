@@ -408,3 +408,18 @@ ON CONFLICT (feature_key) DO UPDATE SET
 -- on local disk and the bundled MinIO is kept only where it already runs.
 -- See releases/notes/v3.1.2.md.
 -- ══════════════════════════════════════════════════════════════════════════════
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- v3.2.0, prepared 2026-11-08 — the service split, the tenant boundary, and
+-- backup / restore / recovery.
+--
+-- **No rows.** Nothing in this release has a feature key:
+--   * the new services, pooler, cache, Kafka and OpenBao raft are deployment,
+--     not features; the event bus stays off unless turned on;
+--   * Marketplace + Customer Accounts on a NEW PostgreSQL install are released
+--     by setup-velaris.sh (Step 8c), never by this manifest;
+--   * Form Builder, connector operations and the database query connector sit
+--     behind their existing privileges.
+--
+-- Migrations 218–231 are additive (see releases/notes/v3.2.0.md §Upgrade notes).
+-- ══════════════════════════════════════════════════════════════════════════════

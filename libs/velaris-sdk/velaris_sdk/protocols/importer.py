@@ -6,7 +6,7 @@ Implement this Protocol and register via entry_points:
     my_impl = "my_package:MyImplementation"
 
 Then install: pip install my-package
-It appears in HELIX settings automatically.
+It appears in Velaris settings automatically.
 """
 
 from __future__ import annotations

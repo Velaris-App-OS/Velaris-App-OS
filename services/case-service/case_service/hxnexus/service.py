@@ -138,8 +138,14 @@ async def index_document(
     tenant_id: str | None,
     vector_store=None,
     backend=None,
+    report: dict | None = None,
 ) -> int:
-    """Extract text, chunk, embed, and store. Returns number of chunks indexed."""
+    """Extract text, chunk, embed, and store. Returns number of chunks indexed.
+
+    `report`, when given, receives {"embedded": n, "not_embedded": m}. With no
+    embedding model every chunk is stored with an empty vector — findable by
+    nothing that searches by meaning — and the answer said only
+    `chunks_indexed: 10` (R4). Callers now say so; see `not_embedded_note`."""
     from velaris_shared.db.models import DocumentChunkModel
 
     llm = backend or get_llm_backend()
@@ -160,6 +166,7 @@ async def index_document(
     chunks = chunk_text(
         text, strategy=getattr(get_settings(), "hxnexus_chunk_strategy", ""))
     indexed = 0
+    embedded = 0
     # `hxnexus_document_chunks.tenant_id` is a VARCHAR while `cases.tenant_id`
     # is a GUID, so the case-wide index route handed this a UUID object and
     # every driver refused to bind it — a 500 on any TENANTED case, and green
@@ -186,9 +193,22 @@ async def index_document(
                  "chunk_index": i, "tenant_id": tenant_id},
             )
         indexed += 1
+        embedded += 1 if embedding else 0
 
     await session.commit()
+    if report is not None:
+        report.update(embedded=embedded, not_embedded=indexed - embedded)
     return indexed
+
+
+def not_embedded_note(report: dict) -> str | None:
+    """The plain sentence for an index with chunks no embedding model reached."""
+    n = int(report.get("not_embedded") or 0)
+    if not n:
+        return None
+    return (f"{n} of {n + int(report.get('embedded') or 0)} chunks were stored without an "
+            "embedding: no embedding model answered. They cannot be found by meaning and "
+            "document Q&A will not use them — see Status, then index the document again.")
 
 
 # ── Document Q&A ──────────────────────────────────────────────────────

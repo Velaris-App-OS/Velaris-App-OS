@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from typing import Any
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,8 @@ from case_service.hxbridge.protocol import get_connector
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+#: Where a dead-letter item keeps the operation it was called with (2026-11-08).
+DLQ_OPERATION_KEY = "_velaris_operation"
 _RETRY_DELAYS = [60, 300, 1800]  # seconds: 1m, 5m, 30m
 
 
@@ -70,8 +73,13 @@ async def execute_connector(
     *,
     case_id: uuid.UUID | None = None,
     step_id: str | None = None,
+    operation: str | None = None,
 ) -> dict:
     """Execute a connector, record the call, emit HxStream event.
+
+    `operation` (2026-11-04): one of the connector's named operations — chosen
+    by a saved form field or step, never by whoever fills the form. None = the
+    connector's own request, as before.
 
     Returns the connector response dict on success.
     Raises RuntimeError on unrecoverable failure (already pushed to DLQ).
@@ -89,7 +97,15 @@ async def execute_connector(
     start = time.monotonic()
     try:
         creds = decrypt_credentials(connector.credentials or {})
-        impl = get_connector(connector.connector_type, connector.config or {}, creds)
+        from velaris_shared.hxbridge.security import check_connector_targets
+        await check_connector_targets(session, connector.tenant_id, connector.config)
+        from velaris_shared.hxbridge.security import platform_owned, runtime_config
+        from velaris_shared.hxbridge.operations import OperationError, apply_operation
+        try:
+            op_config = apply_operation(connector.connector_type, connector.config, operation)
+        except OperationError as exc:
+            raise RuntimeError(str(exc)) from exc
+        impl = get_connector(connector.connector_type, runtime_config(op_config, await platform_owned(session, connector.tenant_id)), creds)
         raw_response = await impl.execute(input_data)
         latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -142,7 +158,13 @@ async def execute_connector(
         call.completed_at = datetime.now(timezone.utc)
         await session.commit()
 
-        await _push_dlq(session, connector, input_data, case_id, step_id, str(exc))
+        # The operation travels with the item, so a retry runs the same request
+        # (until 2026-11-08 a retry dropped it and ran the connector's default).
+        # A caller's own key of that name is dropped: only the call's operation counts.
+        dlq_payload = {k: v for k, v in (input_data or {}).items() if k != DLQ_OPERATION_KEY}
+        if operation:
+            dlq_payload[DLQ_OPERATION_KEY] = operation
+        await _push_dlq(session, connector, dlq_payload, case_id, step_id, str(exc))
         await _emit_hxstream(connector.name, "failed", latency_ms, case_id, error=str(exc))
         raise RuntimeError(f"Connector '{connector.name}' failed: {exc}") from exc
 
@@ -154,11 +176,14 @@ async def retry_dlq_item(
 ) -> bool:
     """Attempt one retry of a dead-letter item. Returns True on success."""
     dlq_item.retry_count += 1
+    payload = dict(dlq_item.payload or {})
+    op = payload.pop(DLQ_OPERATION_KEY, None)
     try:
         result = await execute_connector(
-            session, connector, dlq_item.payload,
+            session, connector, payload,
             case_id=dlq_item.case_id,
             step_id=dlq_item.step_id,
+            operation=op if isinstance(op, str) else None,
         )
         dlq_item.resolution  = "retried"
         dlq_item.resolved_at = datetime.now(timezone.utc)
@@ -226,10 +251,12 @@ async def form_lookup_connector(
     field_key: str | None = None,
     user_id: str | None = None,
     case_id: uuid.UUID | None = None,
+    operation: str | None = None,
 ) -> dict:
     """Execute a connector for a form lookup and log the field population audit trail."""
     response = await execute_connector(
-        session, connector, input_data, case_id=case_id, step_id="form_lookup"
+        session, connector, input_data, case_id=case_id, step_id="form_lookup",
+        operation=operation,
     )
     if field_key:
         response_hash = hashlib.sha256(
@@ -274,3 +301,39 @@ async def _emit_hxstream(
         )
     except Exception:
         pass  # HxStream emission is best-effort
+
+
+
+async def run_connector_by_id(
+    session: AsyncSession,
+    connector_id: Any,
+    payload: dict,
+    *,
+    owner_tenant: Any,
+    case_id: uuid.UUID | None = None,
+    step_id: str | None = None,
+    operation: str | None = None,
+) -> dict:
+    """Run a connector named by id from a saved workflow step or process node
+    (2026-11-04). Both callers had called `get_connector(connector_id,
+    session)` — the TYPE factory, which takes (type, config, credentials) — so
+    every service task that named a connector failed; and they bypassed this
+    module's recording, target checks and operations.
+
+    The connector must be enabled and be the owning tenant's own (the platform
+    operator's only for the default tenant); anything else is answered as not
+    found.
+    """
+    from velaris_shared.hxbridge.security import usable_by
+    try:
+        cid = connector_id if isinstance(connector_id, uuid.UUID) else uuid.UUID(str(connector_id))
+    except ValueError:
+        raise RuntimeError(f"Connector '{connector_id}' not found")
+    connector = await session.get(ConnectorRegistryModel, cid)
+    # Its own tenant's, or — for the default tenant alone — the operator's.
+    if connector is None or not await usable_by(session, connector, owner_tenant):
+        raise RuntimeError(f"Connector '{connector_id}' not found")
+    if not connector.enabled:
+        raise RuntimeError(f"Connector '{connector.name}' is disabled")
+    return await execute_connector(session, connector, payload, case_id=case_id,
+                                   step_id=step_id, operation=operation)

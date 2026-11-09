@@ -6,6 +6,8 @@ interface Props {
   allowedRoles: string[];   // OR logic — user needs at least one
   children: React.ReactNode;
   pageName?: string;        // human-readable label shown on the denied page
+  /** Deny regardless of roles — e.g. a platform-operator screen for a tenant's admin. */
+  deny?: boolean;
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -16,14 +18,15 @@ const ROLE_LABELS: Record<string, string> = {
   devops:      "DevOps",
   integration: "Integration",
   security:    "Security",
+  platform_operator: "Platform operator",
   viewer:      "Viewer",
 };
 
-export default function RequireRole({ allowedRoles, children, pageName }: Props) {
+export default function RequireRole({ allowedRoles, children, pageName, deny }: Props) {
   const { user, hasRole } = useAuth();
   const navigate = useNavigate();
 
-  const permitted = allowedRoles.length === 0 || allowedRoles.some(r => hasRole(r));
+  const permitted = !deny && (allowedRoles.length === 0 || allowedRoles.some(r => hasRole(r)));
   if (permitted) return <>{children}</>;
 
   const roleList = allowedRoles.map(r => ROLE_LABELS[r] ?? r).join(", ");

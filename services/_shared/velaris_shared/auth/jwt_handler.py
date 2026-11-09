@@ -121,7 +121,8 @@ def create_dev_token(
     import os
     from uuid import uuid4
     email_domain = os.getenv("VELARIS_AUTH_EMAIL_DOMAIN", "local")
-    now = int(time.time())
+    issued = time.time()
+    now = int(issued)
 
     # SECURITY FIX: roles default is [] (fail closed), never ["admin"].
     effective_roles: list[str] = roles if roles is not None else []
@@ -135,6 +136,10 @@ def create_dev_token(
         "email": f"{username}@{email_domain}",
         "realm_access": {"roles": effective_roles},
         "iat": now,
+        # The same moment to the millisecond: a deleted account's sessions end
+        # at `tokens_valid_after`, and whole seconds cannot tell a token from
+        # that second's sign-in after an undo apart from one before the delete.
+        "iat_ms": int(issued * 1000),
         "exp": exp,
         "iss": "velaris",
         "aud": "velaris-api",

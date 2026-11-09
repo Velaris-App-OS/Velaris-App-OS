@@ -1,0 +1,45 @@
+[Unit]
+Description=Velaris standby — SSH tunnel to the main server's replication gateway
+Documentation=file://__VELARIS_DIR__/docs/recovery-runbook.md
+# Written by `standby-velaris.sh link` (run on the main) and removed by `unlink`.
+# Without it this unit does nothing — on a main server, or a standby not yet
+# linked, it never runs. velaris-standby-tunnel.path starts it when it appears.
+ConditionPathExists=__VELARIS_DIR__/.standby/tunnel.env
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+# Optional here, checked by ExecCondition on EVERY start: an automatic restart
+# does not re-test ConditionPathExists, so after `unlink` the unit kept
+# restarting every 5 s for ever (seen 2026-10-22). ExecCondition is run each
+# time; a missing file now leaves the unit inactive, not failed.
+EnvironmentFile=-__VELARIS_DIR__/.standby/tunnel.env
+ExecCondition=/usr/bin/test -f __VELARIS_DIR__/.standby/tunnel.env
+# Local forwards on THIS server's loopback to the main's replication gateway,
+# which itself listens on the main's loopback only. The key may forward to those
+# two ports and do nothing else (the main's authorized_keys: restrict,
+# port-forwarding, permitopen). The main's host key was copied by `link` over
+# the operator's own SSH session — never trusted on first sight.
+ExecStart=/usr/bin/ssh -N -T \
+  -i __VELARIS_DIR__/.standby/tunnel_key \
+  -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=__VELARIS_DIR__/.standby/known_hosts \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+  -p ${MAIN_SSH_PORT} \
+  -L 127.0.0.1:${LOCAL_DB_PORT}:127.0.0.1:${MAIN_DB_PORT} \
+  -L 127.0.0.1:${LOCAL_TEMPORAL_PORT}:127.0.0.1:${MAIN_TEMPORAL_PORT} \
+  ${MAIN_USER}@${MAIN_HOST}
+# A dropped link (ssh exits 255) comes back by itself; the databases reconnect
+# through it. `unlink` stops it with SIGTERM, a clean exit: no restart.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-standby-tunnel
+
+[Install]
+WantedBy=multi-user.target

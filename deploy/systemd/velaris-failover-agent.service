@@ -1,0 +1,29 @@
+[Unit]
+Description=Velaris automatic failover — renew the lease at the witness (step 12)
+Documentation=file://__VELARIS_DIR__/docs/recovery-runbook.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+# Enabled or nothing: without .standby/failover/failover.json the start is
+# skipped, not failed. The agent exits by itself when failover is disabled.
+ExecCondition=/bin/sh -c 'test -f __VELARIS_DIR__/.standby/failover/failover.json'
+ExecStart=__VELARIS_DIR__/standby-velaris.sh failover agent
+# Back within 2 s if it dies. If it stays dead, velaris-failover-fence.timer
+# still applies the rule: a main that cannot confirm its lease stops itself.
+Restart=always
+RestartSec=2
+# Stop or restart the agent ALONE. An automatic promote starts the platform
+# from here (start-velaris.sh), so its services are this unit's children; the
+# default (control-group) killed the whole platform on any agent restart —
+# install-failover.sh, `failover disable`, an update, a crash.
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-failover
+
+[Install]
+WantedBy=multi-user.target

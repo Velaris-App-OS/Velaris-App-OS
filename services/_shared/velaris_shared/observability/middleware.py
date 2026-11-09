@@ -22,7 +22,10 @@ def _path_template(request: Request) -> str:
 class ObservabilityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-        tenant_id = request.headers.get("x-tenant-id") or "default"
+        # Not the X-Tenant-Id header: the client sets it (2026-11-04). The
+        # trusted tenant is set by sign-in (auth/dependencies.py) on
+        # request.state and on tenant_id_var; until then a line has none.
+        tenant_id = None
         user_id = request.headers.get("x-user-id")
 
         t_rid = request_id_var.set(request_id)
@@ -48,13 +51,17 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         finally:
             duration = time.perf_counter() - start
             path_tpl = _path_template(request)
+            tenant_id = getattr(request.state, "velaris_tenant", None) or "-"
             try:
+                # `tenant_id`: the signed-in caller's tenant (bounded by the
+                # number of tenants), "-" before sign-in. It was the client's
+                # X-Tenant-Id header until 2026-11-04 — unbounded and forgeable.
                 http_requests_total.labels(
                     method=request.method, path=path_tpl,
                     status=str(status_code), tenant_id=tenant_id,
                 ).inc()
                 http_request_duration_seconds.labels(
-                    method=request.method, path=path_tpl,
+                    method=request.method, path=path_tpl, tenant_id=tenant_id,
                 ).observe(duration)
                 record_span(
                     method=request.method, path=str(request.url.path),

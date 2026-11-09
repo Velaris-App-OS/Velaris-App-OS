@@ -20,6 +20,8 @@ async def create_tenant(
     model = TenantModel(**data)
     session.add(model)
     await session.flush()
+    from velaris_shared.tenancy.identity import tenants_changed
+    await tenants_changed(session, reason="tenant created")
     return model
 
 
@@ -59,6 +61,12 @@ async def update_tenant(
 ) -> bool:
     stmt = update(TenantModel).where(TenantModel.id == tenant_id).values(**values)
     result = await session.execute(stmt)
+    if result.rowcount and ("slug" in values or "status" in values):
+        # A status change opens or closes the tenant (archived = offboarded),
+        # read on every request through a cache this clears everywhere.
+        from velaris_shared.tenancy.identity import tenants_changed
+        await tenants_changed(session, reason="tenant renamed" if "slug" in values
+                              else f"tenant status {values['status']}")
     return result.rowcount > 0
 
 
@@ -68,6 +76,9 @@ async def delete_tenant(
     """Soft delete by setting status=archived."""
     stmt = update(TenantModel).where(TenantModel.id == tenant_id).values(status="archived")
     result = await session.execute(stmt)
+    if result.rowcount:
+        from velaris_shared.tenancy.identity import tenants_changed
+        await tenants_changed(session, reason="tenant archived")
     return result.rowcount > 0
 
 

@@ -80,7 +80,7 @@ fi
 
 # ── Step 2: images ─────────────────────────────────────────────────
 step "Step 2/7 — Container images"
-IMAGES=(case-service analytics-service hxgraph-service hxmigrate-service engine)
+IMAGES=(case-service analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service engine)
 if [ "$BUILD" = "1" ]; then
   need_tool docker
   for svc in "${IMAGES[@]}"; do

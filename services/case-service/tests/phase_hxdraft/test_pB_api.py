@@ -85,7 +85,11 @@ async def test_draft_form_and_apply(client, fake_llm, session):
     form = (await session.execute(
         select(FormDefinitionModel).where(FormDefinitionModel.id == uuid.UUID(a.json()["id"]))
     )).scalar_one()
-    assert form.definition_json["fields"][0]["id"] == "visitor_name"
+    # Stored as Form Builder sections (2026-10-28) — a flat `fields` list was
+    # read by neither the builder, the renderer nor the server's form check.
+    f = form.definition_json["sections"][0]["fields"][0]
+    assert (f["field_key"], f["type"], f["required"]) == ("visitor_name", "text", True)
+    assert "fields" not in form.definition_json
 
 
 @pytest.mark.asyncio

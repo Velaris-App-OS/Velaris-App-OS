@@ -23,6 +23,7 @@ from case_service.api.schemas.hxfusion import (
 )
 
 from velaris_shared import hxguard
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/fusion", tags=["HxFusion"], dependencies=[Depends(hxguard.guard("integration.fusion.access"))])
 
@@ -331,7 +332,7 @@ async def director_advise(
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
-async def stats(session: AsyncSession = Depends(get_session)):
+async def stats(session: AsyncSession = Depends(get_read_session)):
     from sqlalchemy import func
     total_defs = await session.execute(select(func.count()).select_from(ProcessDefinitionModel))
     by_status = await session.execute(

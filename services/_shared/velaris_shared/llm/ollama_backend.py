@@ -14,6 +14,43 @@ import httpx
 log = logging.getLogger(__name__)
 
 
+def ollama_headers() -> dict[str, str]:
+    """Bearer header for an Ollama on another server.
+
+    Ollama has no authentication of its own; one on another server sits behind a
+    proxy that checks VELARIS_CASE_AI_OLLAMA_API_KEY. No key = no header, which
+    is what the bundled Ollama on this box has always been sent.
+    """
+    try:
+        from velaris_shared.config import get_settings
+
+        key = get_settings().ai_ollama_api_key
+    except Exception:
+        key = ""
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def ollama_client_kwargs() -> dict:
+    """httpx.AsyncClient arguments for talking to Ollama: the bearer header, and
+    the proxy's CA (VELARIS_CASE_AI_OLLAMA_TLS_CA) when it is not publicly
+    trusted. Neither set = no arguments, exactly the client used before."""
+    kw: dict = {}
+    headers = ollama_headers()
+    if headers:
+        kw["headers"] = headers
+    try:
+        from velaris_shared.config import get_settings
+
+        ca = get_settings().ai_ollama_tls_ca
+    except Exception:
+        ca = ""
+    if ca:
+        import ssl
+
+        kw["verify"] = ssl.create_default_context(cafile=ca)
+    return kw
+
+
 class OllamaBackend:
     backend_name = "ollama"
 
@@ -37,7 +74,7 @@ class OllamaBackend:
     async def check_available(self) -> bool:
         """Async liveness check — call this from status endpoints."""
         try:
-            async with httpx.AsyncClient(timeout=2.0) as c:
+            async with httpx.AsyncClient(timeout=2.0, **ollama_client_kwargs()) as c:
                 r = await c.get(f"{self._url}/api/tags")
                 return r.status_code == 200
         except Exception:
@@ -66,7 +103,7 @@ class OllamaBackend:
             # content and over-refuse.
             if system:
                 body["system"] = system
-            async with httpx.AsyncClient(timeout=180.0) as c:
+            async with httpx.AsyncClient(timeout=180.0, **ollama_client_kwargs()) as c:
                 r = await c.post(f"{self._url}/api/generate", json=body)
                 r.raise_for_status()
                 return r.json().get("response", "").strip()
@@ -76,7 +113,7 @@ class OllamaBackend:
 
     async def embed(self, text: str) -> list[float]:
         try:
-            async with httpx.AsyncClient(timeout=30.0) as c:
+            async with httpx.AsyncClient(timeout=30.0, **ollama_client_kwargs()) as c:
                 r = await c.post(
                     f"{self._url}/api/embeddings",
                     json={"model": self._embed_model, "prompt": text},

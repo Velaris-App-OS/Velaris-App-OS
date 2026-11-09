@@ -1,4 +1,4 @@
-// HELIX P25b — Email Admin (accounts + templates)
+// Velaris P25b — Email Admin (accounts + templates)
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getAccessToken } from "@/auth/tokenManager";

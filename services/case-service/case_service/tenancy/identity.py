@@ -40,6 +40,7 @@ from velaris_shared.tenancy.identity import (  # noqa: F401
     may_reach_tenant,
     resolve_tenant,
     same_tenant,
+    same_tenant_as_default,
     strict_case_reads,
     tenant_slug,
 )

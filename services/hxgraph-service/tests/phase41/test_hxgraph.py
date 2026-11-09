@@ -1,4 +1,4 @@
-"""HELIX P41 — HxGraph tests (22 tests).
+"""Velaris P41 — HxGraph tests (22 tests).
 
 Covers: sync_graph (nodes created for case types, stages, steps, forms, modules),
         edge creation (has_stage, has_step, uses_form, served_by),
@@ -243,7 +243,12 @@ class TestQueryEngine:
         impact_ids = [i["id"] for i in impacts]
         assert str(parent.id) in impact_ids
 
-    async def test_similar_nodes_text_fallback(self, session, case_type):
+    async def test_similar_nodes_text_fallback(self, session, case_type, monkeypatch):
+        # The text fallback is what this tests: with no model passed, the code
+        # looks one up — on a machine running Ollama that found a real one and
+        # this test measured embeddings instead (seen 2026-10-22).
+        import velaris_shared.llm.factory as _f
+        monkeypatch.setattr(_f, "get_llm_backend", lambda: (_ for _ in ()).throw(RuntimeError("no LLM")))
         await sync_graph(session)
         results = await similar_nodes(session, "Insurance", top_k=5, llm=None)
         assert any("Insurance" in r["label"] for r in results)
@@ -425,7 +430,9 @@ class TestTenantScoping:
         gname = f"case_type:{ct_g.id}"
         assert await _find_node(session, gname, tid_b) is not None
 
-    async def test_similar_nodes_scoped(self, session):
+    async def test_similar_nodes_scoped(self, session, monkeypatch):
+        import velaris_shared.llm.factory as _f
+        monkeypatch.setattr(_f, "get_llm_backend", lambda: (_ for _ in ()).throw(RuntimeError("no LLM")))
         tid_a, tid_b, *_ = await self._seed_two_tenants(session)
         # no-LLM text fallback path
         res_b = await similar_nodes(session, "Tenant A Secret", tenant_id=tid_b)

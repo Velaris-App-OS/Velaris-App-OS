@@ -42,6 +42,7 @@ spec:
           ports:
             - containerPort: {{ .Values.analyticsService.port }}
           env:
+            {{- include "helix.authSecretEnv" . | nindent 12 }}
             - name: VELARIS_CASE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -49,6 +50,8 @@ spec:
                   key: {{ include "helix.dbSecretKey" . }}
             - name: VELARIS_CASE_DATABASE_BACKEND
               value: {{ include "helix.databaseBackend" . | quote }}
+            {{- include "helix.poolerEnv" . | nindent 12 }}
+            {{- include "helix.readReplicaEnv" . | nindent 12 }}
             - name: VELARIS_CASE_REDIS_URL
               value: {{ include "helix.redisUrl" . | quote }}
             {{- range $k, $v := .Values.analyticsService.env }}

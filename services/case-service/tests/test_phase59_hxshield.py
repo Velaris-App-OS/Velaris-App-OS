@@ -147,6 +147,7 @@ class TestDetectionIsWiredToRealEvents:
                 outcome="failure", ip_address="10.0.0.9",
                 details={"tenant_id": "default"},
             )
+            await se.drain_detections()
         finally:
             se.clear_detector()
 
@@ -167,6 +168,7 @@ class TestDetectionIsWiredToRealEvents:
         try:
             await se.log_security_event(
                 session, event_type="auth.login_failed", user_id="u2")
+            await se.drain_detections()
         finally:
             se.clear_detector()
         # No exception is the assertion.
@@ -184,6 +186,7 @@ class TestDetectionIsWiredToRealEvents:
         try:
             await se.log_security_event(
                 session, event_type="auth.login_failed", user_id="u3")
+            await se.drain_detections()
         finally:
             se.clear_detector()
 
@@ -191,6 +194,32 @@ class TestDetectionIsWiredToRealEvents:
             select(SecurityEventModel).where(SecurityEventModel.user_id == "u3")
         )).scalars().all()
         assert rows, "detection failure must not cost the audit record"
+
+    async def test_the_caller_does_not_wait_for_detection(self, session):
+        """2026-10-19: awaited, the detector's own session made every caller
+        hold a connection in an open transaction while waiting for a second one,
+        and the audit writes deadlocked the pool under load."""
+        import asyncio
+
+        from velaris_shared.db import security_events as se
+
+        release = asyncio.Event()
+        ran = []
+
+        async def _slow(**kw):
+            await release.wait()
+            ran.append(kw["event_type"])
+
+        se.register_detector(_slow)
+        try:
+            await asyncio.wait_for(se.log_security_event(
+                session, event_type="auth.login_failed", user_id="u4"), timeout=2)
+            assert ran == []                       # returned before detection ran
+            release.set()
+            await se.drain_detections()
+        finally:
+            se.clear_detector()
+        assert ran == ["auth.login_failed"]        # and detection still happened
 
     async def test_detection_is_off_until_switched_on(self, session):
         """Eight rules that have never seen production traffic do not get turned
@@ -310,8 +339,10 @@ class TestDetectionIsWiredToRealEvents:
         import pathlib as _p
 
         routers = _p.Path(__file__).resolve().parents[1] / "case_service" / "api" / "routers"
+        # The portal submission is written by case-service's internal portal API
+        # since the portal split (R5e step 8) — portal-service calls it.
         for router, event in (("cases.py", "case_created"),
-                              ("portal.py", "portal_submit"),
+                              ("../../internal_api/portal.py", "portal_submit"),
                               ("form_submissions.py", "form_submit")):
             src = (routers / router).read_text()
             assert f'event_type="{event}"' in src, (
@@ -450,7 +481,7 @@ class TestProducersDoNotLeakCaseData:
 
         routers = pathlib.Path(__file__).resolve().parents[1] / "case_service" / "api" / "routers"
         for router, event in (("cases.py", "case_created"),
-                              ("portal.py", "portal_submit")):
+                              ("../../internal_api/portal.py", "portal_submit")):
             src = (routers / router).read_text()
             block = src[src.index(f'event_type="{event}"'):]
             block = block[:block.index("except Exception")]

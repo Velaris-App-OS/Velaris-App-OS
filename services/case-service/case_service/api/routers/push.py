@@ -38,6 +38,7 @@ from velaris_shared.db.models import (
 from velaris_shared.db.session import get_session
 from case_service.push.service import get_vapid_public_key, send_to_user
 from case_service.push.protocol import PushPayload
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/push", tags=["push"])
 
@@ -85,8 +86,8 @@ class OverrideIn(BaseModel):
 class TestSendIn(BaseModel):
     user_id: str
     event_type: str = "test"
-    title: str = "HELIX Test"
-    body: str = "Push notification test from HELIX."
+    title: str = "Velaris Test"
+    body: str = "Push notification test from Velaris."
     case_type_id: Optional[uuid.UUID] = None
 
 
@@ -220,7 +221,7 @@ async def admin_delivery_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     _: AuthenticatedUser = Depends(hxguard.guard("platform.push.read")),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
 ):
     q = select(NotificationLogModel)
     if user_id:

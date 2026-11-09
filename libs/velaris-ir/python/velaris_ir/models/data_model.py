@@ -1,4 +1,4 @@
-"""HELIX IR: Data Model definitions.
+"""Velaris IR: Data Model definitions.
 
 Typed schemas for case data, form backing models, rule inputs/outputs,
 and any structured data flowing through the system.

@@ -392,6 +392,12 @@ async def create_case(
                 detail="This case type does not belong to your tenant.",
             )
 
+    # Who may create a case is decided by the access roles defined in Admin
+    # Studio (2026-10-18). Until then any signed-in user could, a viewer
+    # included. MCP's case_create comes through here too.
+    from velaris_shared.hxguard.case_create import require_case_create
+    await require_case_create(session, user, case_type.id)
+
     # Derive the case's tenant (case_instances.tenant_id is a nullable UUID):
     #   1. the acting user's tenant, when they have one;
     #   2. else inherit the case type's tenant — covers user-less creation
@@ -443,6 +449,13 @@ async def create_case(
             "are on, so nobody would be able to read it back. Give the acting "
             "user a tenant in the user directory, or give the case type an "
             "owner, before creating cases here.")
+
+    # A tenant's `max_cases` (NULL = unlimited, every tenant before 2026-11-04).
+    from velaris_shared.tenancy.limits import TenantLimitError, require_case_room
+    try:
+        await require_case_room(session, effective_tenant_id)
+    except TenantLimitError as exc:
+        raise HTTPException(403, str(exc)) from exc
 
     # Oct item 18a: an open rollout chooses the version for a NEW case —
     # sticky per customer, or per requester when there is no customer.
@@ -675,7 +688,7 @@ async def list_cases(
     # Admin, manager, and "*"-scoped access groups see everything.
     accessible_to_user = None
     from velaris_shared.config import get_settings
-    if (get_settings().hxguard_case_enforcement or "shadow").lower() == "enforce" \
+    if (get_settings().hxguard_case_enforcement or "enforce").lower() == "enforce" \
             and not (hxguard.user_allows(user, "casework.sensitive.read")
                      or "superadmin" in (user.roles or [])
                      or "manager" in (user.roles or [])):
@@ -1640,6 +1653,9 @@ async def create_child_case(
     if case_type.tenant_id is not None and user.tenant_id and \
             not await _same_tenant(session, case_type.tenant_id, user.tenant_id):
         raise HTTPException(status_code=404, detail="Case type not found")
+    # A child is a new case: the same access-group rule as POST /cases.
+    from velaris_shared.hxguard.case_create import require_case_create
+    await require_case_create(session, user, case_type.id)
 
     from case_service.rollouts import service as _rollouts
     case_type, _rollout = await _rollouts.resolve_case_type(
@@ -1848,11 +1864,77 @@ async def complete_step(
     from case_service.case_actions import seal as _seal
     _seal.assert_writable(case)
 
+    # Only the assignee, their access group or their N+1 may complete the
+    # step (2026-10-28); an unassigned step, a group covering the case type.
+    from velaris_shared.db.models import CaseAssignmentModel as _Asg
+    from velaris_shared.hxguard.step_submit import require_step_submit
+    _assignment = (await session.execute(
+        select(_Asg).where(_Asg.case_id == case_id, _Asg.step_id == step_id, _Asg.status == "active")
+        .order_by(_Asg.assigned_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    await require_step_submit(session, user, case, _assignment)
+    # `actor_id` names someone else as the completer; only superadmin may
+    # (2026-10-28) — for anyone else it forged the record and the audit.
+    from velaris_shared.hxguard.step_submit import acts_as as _acts_as
+    if not _acts_as(user, body.actor_id):
+        raise HTTPException(status_code=403, detail="You can only complete a step in your own name.")
+    _actor = body.actor_id or user.user_id
+
     # Load case type definition for auto-advance check
     ct = (await session.execute(
         select(CaseTypeModel).where(CaseTypeModel.id == case.case_type_id)
     )).scalar_one_or_none()
     ct_def = ct.definition_json if ct else {}
+
+    # A step with a Form Builder form is checked against it, as a form
+    # submission is (2026-10-28) — until then this path accepted anything.
+    # A rejection carries a reason, not the form; a form that no longer
+    # exists is not checked, as before. Any status but an exact "rejected"
+    # is checked — "completed " or "done" must not slip past.
+    if body.status != "rejected":
+        step_form_id = next((st.get("form_id") for sg in ct_def.get("stages", [])
+                             for st in sg.get("steps", []) if st.get("id") == step_id), None)
+        if step_form_id:
+            from velaris_shared.db import repository as _repo
+            from velaris_shared.forms import validate as _validate_form
+            try:
+                step_form = await _repo.get_form(session, uuid.UUID(str(step_form_id)))
+            except ValueError:
+                step_form = None
+            if step_form is not None:
+                # The version this case uses (§5 step 6).
+                from velaris_shared.forms.versions import form_for_case as _form_for_case
+                _step_def = await _form_for_case(session, step_form, case_id)
+                # Field-level security (§5 step 7), as on a form submission.
+                from velaris_shared.forms.security import caller_roles as _roles, secure_definition as _secure
+                _step_def = _secure(_step_def, await _roles(session, user, case), for_browser=False)
+                from velaris_shared.forms.translate import for_caller as _for_caller
+                _step_def = _for_caller(_step_def, request.headers.get("accept-language"))
+                from case_service.api.routers.form_submissions import case_context as _case_context
+                from case_service.api.routers.form_submissions import form_references as _form_refs
+                from case_service.api.routers.form_submissions import reference_tenant as _ref_tenant
+                from velaris_shared.forms.pickers import picker_lookups as _picker_lookups
+                clean, field_errors = _validate_form(
+                    _step_def, body.data,
+                    context=await _case_context(session, user, case_id),
+                    references=await _form_refs(session, _step_def,
+                                                await _ref_tenant(session, user, case)),
+                    # Pickers (batch M): only ids this caller may choose, for this case.
+                    lookups=await _picker_lookups(session, _step_def, body.data,
+                                                  user=user, case_id=case_id))
+                from velaris_shared.forms import form_keys as _form_keys
+                _keys = _form_keys(_step_def)
+                clean = {k: v for k, v in clean.items() if k in _keys}
+                if field_errors:
+                    raise HTTPException(status_code=422, detail={
+                        "message": "; ".join(e.message for e in field_errors),
+                        "validation_errors": [e.message for e in field_errors],
+                        "field_errors": [e.as_dict() for e in field_errors],
+                    })
+                body.data = clean
+                # The completer's draft of this form is done with (§5 step 7).
+                from case_service.api.routers.form_submissions import drop_draft as _drop_draft
+                await _drop_draft(session, case_id, step_form.id, user)
 
     # Validate lock ownership — if a live lock exists it must belong to this operator
     from velaris_shared.db.models import CaseAssignmentModel
@@ -1889,7 +1971,7 @@ async def complete_step(
         existing.step_type = body.step_type
         existing.status = body.status
         existing.data = body.data
-        existing.completed_by = body.actor_id or user.user_id
+        existing.completed_by = _actor
         existing.completed_at = now
         completion = existing
     else:
@@ -1900,7 +1982,7 @@ async def complete_step(
             step_type=body.step_type,
             status=body.status,
             data=body.data,
-            completed_by=body.actor_id or user.user_id,
+            completed_by=_actor,
             completed_at=now,
         )
         session.add(completion)
@@ -2033,6 +2115,15 @@ async def activate_step(
     # at the call site somebody adds next year.
     from case_service.case_actions import seal as _seal
     _seal.assert_writable(case)
+    # Activating can auto-complete the step, so it takes the same rule as
+    # completing it (2026-10-28).
+    from velaris_shared.db.models import CaseAssignmentModel as _Asg
+    from velaris_shared.hxguard.step_submit import require_step_submit
+    _assignment = (await session.execute(
+        select(_Asg).where(_Asg.case_id == case_id, _Asg.step_id == step_id, _Asg.status == "active")
+        .order_by(_Asg.assigned_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    await require_step_submit(session, user, case, _assignment)
     ct = (await session.execute(
         select(CaseTypeModel).where(CaseTypeModel.id == case.case_type_id)
     )).scalar_one_or_none()
@@ -2079,15 +2170,18 @@ async def activate_step(
             kind="connector", ref=_conn_ref, actor_id="service-task",
         )
         try:
-            from case_service.hxbridge.protocol import get_connector
-            connector = await get_connector(connector_id, session)
-            if connector is None:
-                raise ValueError(f"Connector '{connector_id}' not found")
+            # Through HxBridge's executor (2026-11-04): recorded, target-checked,
+            # and able to run the step's named operation. Before, this called
+            # the connector TYPE factory with an id and failed every time.
+            from case_service.hxbridge.executor import run_connector_by_id
 
             input_mapping: dict = connector_config.get("input_mapping", {})
             case_data = await case_vars.get_all(session, vars_ctx, case_id)
             payload = {k: case_data.get(v, v) for k, v in input_mapping.items()} if input_mapping else dict(case_data)
-            connector_result = await connector.execute(payload) or {}
+            op = connector_config.get("operation") if isinstance(connector_config.get("operation"), str) else None
+            connector_result = await run_connector_by_id(
+                session, connector_id, payload, owner_tenant=case.tenant_id,
+                case_id=case_id, step_id=step_id, operation=op) or {}
         except Exception as e:
             connector_result = {"_error": str(e)}
 
@@ -2960,7 +3054,7 @@ async def unlock_step(
 
 # ── 198: the action dispatcher ───────────────────────────────────────────────
 #
-# Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+# Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 #
 # One endpoint replaces six named routes, and `POST /cases/bulk` is the same
 # function in a loop rather than a second implementation. That is the whole

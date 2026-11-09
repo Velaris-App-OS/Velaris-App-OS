@@ -1,4 +1,4 @@
-# ── HELIX Helm chart values ─────────────────────────────────────────
+# ── Velaris Helm chart values ─────────────────────────────────────────
 
 # ── Pod hardening ────────────────────────────────────────────────────
 # Applied to every Velaris workload (the bundled PostgreSQL and Valkey subcharts
@@ -29,6 +29,18 @@ podSecurity:
 databaseSecret:
   existingSecret: ""
   key: database-url
+  # With pooler.enabled and an existingSecret, that Secret must also hold these
+  # two keys: the URL through the pooler, and the database password the pooler
+  # logs in with.
+  poolerKey: pooler-url
+  poolerPasswordKey: pooler-db-password
+  # Optional: commerce-service's own pool. Missing from an existingSecret =
+  # commerce shares pooler-url.
+  poolerCommerceKey: pooler-commerce-url
+  poolerPortalKey: pooler-portal-url      # likewise, portal-service's own pool
+  poolerUserKey: pooler-user-url          # likewise, user-service's own pool
+  # R5d 11b: with readReplica.fromExistingSecret, the read replica's URL in that Secret.
+  readKey: read-url
 
 image:
   caseService:
@@ -54,6 +66,18 @@ image:
     pullPolicy: IfNotPresent
   hxmigrateService:
     repository: helix/hxmigrate-service
+    tag: latest
+    pullPolicy: IfNotPresent
+  commerceService:                       # R5e step 7
+    repository: helix/commerce-service
+    tag: latest
+    pullPolicy: IfNotPresent
+  portalService:                         # R5e step 8
+    repository: helix/portal-service
+    tag: latest
+    pullPolicy: IfNotPresent
+  userService:                           # R5e step 10
+    repository: helix/user-service
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -91,6 +115,67 @@ hxmigrateService:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: 1000m, memory: 2Gi }
+  env:
+    VELARIS_CASE_REDIS_ENABLED: "true"
+    VELARIS_CASE_RATE_LIMIT_BACKEND: "redis"
+    VELARIS_CASE_DEBUG: "false"
+
+# R5e step 7: checkout, payments, storefront, marketplace, model market.
+commerceService:
+  replicaCount: 1
+  port: 8207
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1000m, memory: 2Gi }
+  # Storefront product media are written to the document store. An S3 store
+  # set in `caseService.env` (`VELARIS_CASE_STORAGE_BACKEND`, `VELARIS_CASE_S3_*`)
+  # must be set here too; without it media land in this pod's own filesystem
+  # and are lost when it restarts.
+  env:
+    VELARIS_CASE_REDIS_ENABLED: "true"
+    VELARIS_CASE_RATE_LIMIT_BACKEND: "redis"
+    VELARIS_CASE_DEBUG: "false"
+
+# R5e step 9: worker-service — case-service's image in worker mode running the
+# background jobs (scheduler, mail poll, sealers, sweeps, watchers). Off by
+# default: case-service pods then run them as before, and the job leases keep
+# two replicas from running one twice. On, case-service pods stop starting them.
+# Safe at replicaCount > 1 (the leases). Gets caseService.env as well, so it
+# sees the same storage, mail and Temporal settings; `env` here wins.
+jobs:
+  enabled: false
+  replicaCount: 1
+  port: 8208
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 1000m, memory: 1Gi }
+  env: {}
+
+# R5e step 8: the customer portal and portal admin.
+portalService:
+  replicaCount: 1
+  port: 8205
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1000m, memory: 2Gi }
+  # Portal uploads (case documents, the portal logo) are written to the document
+  # store. An S3 store set in `caseService.env` (`VELARIS_CASE_STORAGE_BACKEND`,
+  # `VELARIS_CASE_S3_*`) must be set here too; without it uploads land in this
+  # pod's own filesystem and are lost when it restarts.
+  env:
+    VELARIS_CASE_REDIS_ENABLED: "true"
+    VELARIS_CASE_RATE_LIMIT_BACKEND: "redis"
+    VELARIS_CASE_DEBUG: "false"
+
+# R5e step 10: sign-in and identity (login, MFA, SSO, SAML, SCIM, the user
+# directory). Redis on, so the sign-in rate limits are one set across replicas,
+# not one per pod (the account lockout is in the database either way).
+userService:
+  replicaCount: 1
+  port: 8206
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits:   { cpu: 1000m, memory: 1Gi }
   env:
     VELARIS_CASE_REDIS_ENABLED: "true"
     VELARIS_CASE_RATE_LIMIT_BACKEND: "redis"
@@ -151,6 +236,13 @@ worker:
     requests: { cpu: 200m, memory: 256Mi }
     limits:   { cpu: 750m, memory: 768Mi }
   temporalHost: "temporal.default.svc.cluster.local:7233"
+  # Mutual TLS to Temporal, for the worker and the engine. Name a Secret holding
+  # ca.crt, tls.crt and tls.key (a kubernetes.io/tls Secret plus ca.crt fits).
+  # Empty = plaintext, exactly as before. serverName: the name on Temporal's
+  # certificate when it differs from temporalHost's host.
+  temporalTls:
+    secretName: ""
+    serverName: ""
   taskQueue: "helix-case-service"
   keda:
     enabled: false    # Toggle on to use KEDA ScaledObject (needs KEDA CRDs installed)
@@ -227,6 +319,44 @@ mariadb:
     database: helix
     rootPassword: helix_dev_root
 
+# ── Connection pooler (R5d 6a) ───────────────────────────────────────
+# PgBouncer in front of the bundled PostgreSQL. OFF by default: an existing
+# release upgrading to this chart sees no change. On, every workload connects
+# through it, so 2 or 20 replicas share one small set of database connections
+# (without it the PostgreSQL default of 100 is reached at about 3–4 copies).
+# PostgreSQL only, and only with postgresql.enabled — an external database
+# brings its own pooler (point VELARIS_CASE_DATABASE_POOLER_URL at it through
+# each workload's `env`).
+# R5d 11b — dashboards, reports, search and HxGraph read from a read replica
+# (a managed one, CloudNativePG's `-ro` service, …). Empty = every read on the
+# main database, exactly as before. A user's own changes, sign-in, case and task
+# views and every write stay on the main. The URL carries a password, so it
+# goes into the database Secret, never into a Deployment. The replica must be a
+# copy of THIS database (checked at run time; anything else is skipped). An
+# external replica also needs networkPolicy.extraEgressTo when policies are on.
+readReplica:
+  url: ""                    # e.g. postgresql+asyncpg://velaris:PASS@my-db-ro:5432/velaris
+  # true = databaseSecret.existingSecret holds it under databaseSecret.readKey.
+  fromExistingSecret: false
+
+pooler:
+  enabled: false
+  image:
+    repository: ghcr.io/cloudnative-pg/pgbouncer   # Apache-2.0
+    tag: "1.25.2"                                  # >= 1.21 required (asyncpg)
+  replicaCount: 2
+  # The image's own uid/gid for `pgbouncer` (numeric, so runAsNonRoot can verify it).
+  runAsUser: 998
+  runAsGroup: 996
+  poolSize: 20          # server connections per pool, per pooler replica
+  maxClientConn: 1000
+  commercePoolSize: 10  # commerce-service's own server connections, per pooler replica
+  portalPoolSize: 10    # portal-service's own server connections, per pooler replica
+  userPoolSize: 10      # user-service's own server connections, per pooler replica
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 128Mi }
+
 valkey:
   enabled: true
   architecture: standalone
@@ -300,6 +430,71 @@ ingress:
         - path: /api/v1/orchestrator
           pathType: Prefix
           service: hxmigrate-service
+        # R5e step 7: the commerce domain.
+        - path: /api/v1/checkout
+          pathType: Prefix
+          service: commerce-service
+        - path: /api/v1/payments
+          pathType: Prefix
+          service: commerce-service
+        - path: /api/v1/storefront
+          pathType: Prefix
+          service: commerce-service
+        - path: /api/v1/marketplace
+          pathType: Prefix
+          service: commerce-service
+        - path: /api/v1/model-market
+          pathType: Prefix
+          service: commerce-service
+        # R5e step 8: the customer portal. `Prefix` matches whole path
+        # elements, so /api/v1/portals (a case-service router) is not caught.
+        - path: /api/v1/portal
+          pathType: Prefix
+          service: portal-service
+        - path: /api/v1/portal-admin
+          pathType: Prefix
+          service: portal-service
+        # R5e step 10: sign-in and identity. The longest matching path wins,
+        # so /api/v1/auth/switch-context (access groups) stays case-service's;
+        # /api/v1/identity/ also holds case-service's identity verification, so
+        # only /provisioning goes to user-service.
+        - path: /api/v1/auth
+          pathType: Prefix
+          service: user-service
+        - path: /api/v1/auth/switch-context
+          pathType: Exact
+          service: case-service
+        - path: /api/v1/scim
+          pathType: Prefix
+          service: user-service
+        - path: /api/v1/identity/provisioning
+          pathType: Prefix
+          service: user-service
+        - path: /api/v1/user-directory
+          pathType: Prefix
+          service: user-service
         - path: /
           pathType: Prefix
           service: case-service
+        # case-service's /internal/v1 (R5e step 7) is NOT routed on purpose:
+        # ingress paths cannot exclude a prefix from `/`, so the routes refuse
+        # any call that arrives with proxy headers (X-Forwarded-For), whatever
+        # it carries. Sibling services call case-service by its cluster address.
+
+# Internal service API (R5e step 7 — the commerce split): commerce-service (and,
+# since steps 8 and 10, portal-service and user-service) calls
+# case-service's /internal/v1 routes with a shared secret. The chart generates
+# one Secret (kept across upgrades); name your own here to bring it instead
+# (key `internal-service-secret`).
+internalService:
+  existingSecret: ""
+
+# The token signing secret (VELARIS_CASE_AUTH_SECRET), shared by every service.
+# Empty = the chart generates one at install and keeps it across upgrades.
+# `existingSecret` = a Secret you manage, holding it under `key`. Never change
+# it on a running install: everyone is signed out and every encrypted field
+# becomes unreadable (HxVault's key is derived from it).
+authSecret:
+  existingSecret: ""
+  key: auth-secret
+

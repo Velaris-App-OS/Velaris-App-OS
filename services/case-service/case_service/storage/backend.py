@@ -1,21 +1,15 @@
-"""Storage backend protocol."""
-from __future__ import annotations
-from typing import Protocol, BinaryIO
+"""Moved to `velaris_shared.storage.backend` (2026-10-19, step 7 — the commerce split).
 
+Both case-service and commerce-service call this code in-process, so it lives in
+the shared layer. This module IS that module (`sys.modules` alias): every name,
+every cache and every test patch made through this path reaches the one real
+implementation.
 
-class StorageError(Exception):
-    """Base exception for storage operations."""
+Copyright (c) 2024-2026 Velaris Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+import sys as _sys
 
+import velaris_shared.storage.backend as _moved
 
-class ObjectNotFound(StorageError):
-    """Raised when a requested object key is missing."""
-
-
-class StorageBackend(Protocol):
-    """Abstract object storage. All backends must be awaitable."""
-
-    async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None: ...
-    async def get(self, key: str) -> bytes: ...
-    async def delete(self, key: str) -> None: ...
-    async def exists(self, key: str) -> bool: ...
-    async def size(self, key: str) -> int: ...
+_sys.modules[__name__] = _moved

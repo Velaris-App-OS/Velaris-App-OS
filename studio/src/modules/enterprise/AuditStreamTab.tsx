@@ -4,8 +4,9 @@
  * Where this platform's security events LEAVE it. Three things shape the
  * screen, and each of them is a rule from the API rather than a preference:
  *
- *  * **the stream is platform-wide.** `security_events` has no tenant column,
- *    so a target receives every tenant's events. The API refuses a create that
+ *  * **whose events.** The platform operator's target receives every tenant's
+ *    events; a tenant admin's target receives its own tenant's only
+ *    (`security_events.tenant_id`, migration 230, 2026-11-04). The API refuses a create that
  *    has not acknowledged that, and this screen makes the acknowledgement a
  *    sentence somebody reads rather than a checkbox they flick.
  *  * **creating is not enabling.** A target is created, looked at, tested, and
@@ -16,6 +17,7 @@
  *    shows only whether it HAS one.
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { usePermissions } from "@/auth/PermissionsContext";
 import {
   AuditStreamTarget,
   createAuditStreamTarget, deleteAuditStreamTarget, listAuditStreamTargets,
@@ -30,6 +32,7 @@ function fmt(s: string | null) {
 }
 
 export default function AuditStreamTab() {
+  const { isOperator } = usePermissions();
   const [targets, setTargets] = useState<AuditStreamTarget[]>([]);
   const [kinds, setKinds] = useState<string[]>(["splunk_hec"]);
   const [loading, setLoading] = useState(true);
@@ -75,7 +78,8 @@ export default function AuditStreamTab() {
 
   const toggle = async (t: AuditStreamTarget) => {
     if (!t.enabled && !window.confirm(
-      `Switch on "${t.name}"?\n\nEvery tenant's security events on this platform ` +
+      `Switch on "${t.name}"?\n\n` +
+      (isOperator ? "Every tenant's security events on this platform " : "Your tenant's security events ") +
       `will start being forwarded to ${t.endpoint_url} on the next scheduled run.`)) return;
     setBusy(t.id);
     try {
@@ -202,7 +206,10 @@ function CreateTarget({ kinds, onCancel, onCreated }: {
     name: "", endpoint_url: "", token: "", kind: kinds[0] || "splunk_hec",
     verify_tls: true, min_severity: "", event_types: "",
   });
-  const [ack, setAck] = useState(false);
+  const { isOperator } = usePermissions();
+  // Only the operator's (platform-wide) target needs the acknowledgement.
+  const [ackChecked, setAck] = useState(false);
+  const ack = !isOperator || ackChecked;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -295,15 +302,20 @@ function CreateTarget({ kinds, onCancel, onCreated }: {
         marginTop: 16, padding: "12px 14px", borderRadius: 6,
         border: "1px solid var(--border)", background: "var(--bg-main)",
       }}>
-        <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 13 }}>
-          <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />
-          <span>
-            I understand this stream carries <strong>every tenant's</strong>
-            {" "}security events. Velaris records who acted, and the tenant an
-            actor belongs to is not part of a security event, so the stream
-            cannot be narrowed to one tenant.
-          </span>
-        </label>
+        {isOperator ? (
+          <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 13 }}>
+            <input type="checkbox" checked={ackChecked} onChange={e => setAck(e.target.checked)} />
+            <span>
+              I understand this stream carries <strong>every tenant's</strong>
+              {" "}security events — the whole platform's.
+            </span>
+          </label>
+        ) : (
+          <div style={{ fontSize: 13 }}>
+            This stream carries <strong>your tenant's</strong> security events only.
+            The endpoint must be https on the internet.
+          </div>
+        )}
       </div>
 
       {error && (

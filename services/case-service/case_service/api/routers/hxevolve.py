@@ -30,6 +30,7 @@ from velaris_shared.db import repository as repo
 from velaris_shared.db.models import HxEvolveInsightModel, RuleDefinitionModel
 from velaris_shared.db.session import get_session
 from case_service.hxevolve import pipeline, proposer
+from velaris_shared.db.read_routing import get_read_session
 
 log = logging.getLogger(__name__)
 
@@ -223,7 +224,7 @@ async def rebaseline_case_type(
 async def list_insights(
     case_type_id: Optional[str] = None,
     include_discarded: bool = False,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _require_admin(session, user)
@@ -263,7 +264,7 @@ async def _get_insight(session: AsyncSession, user: AuthenticatedUser,
 @router.get("/insights/{insight_id}")
 async def get_insight(
     insight_id: str,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     await _require_admin(session, user)

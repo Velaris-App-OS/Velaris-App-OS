@@ -20,7 +20,7 @@ mkdir -p "$OUT_DIR"
 rm -f "$RENDERED"
 
 # 1. Server must be up AND unsealed (health 200/429 = active/standby unsealed)
-HEALTH=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8350/v1/sys/health" || echo "000")
+HEALTH=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8350/v1/sys/health" || true)
 case "$HEALTH" in
   200|429) ;;
   503) echo "✗ OpenBao is SEALED — unseal first. .env left untouched."; exit 1 ;;
@@ -29,12 +29,24 @@ case "$HEALTH" in
 esac
 
 # 2. One-shot agent render — throwaway container in the server's netns,
-#    running as the invoking user so the bind-mounted output is writable
-docker run --rm \
+#    running as the invoking user so the bind-mounted output is writable.
+#    The agent retries a refused or missing AppRole sign-in forever, which hung
+#    start and `restore --verify` (R5b re-run 2026-10-30): check the files, and
+#    bound the run.
+for f in role_id secret_id; do
+  [ -s "$AGENT_DIR/$f" ] || { echo "✗ OpenBao agent sign-in file missing: deploy/openbao/agent/$f — run ./scripts/secrets-init.sh. .env left untouched."; exit 1; }
+done
+RENDER_NAME="velaris-secrets-render-$$"
+RENDER_TIMEOUT="${VELARIS_SECRETS_RENDER_TIMEOUT:-60}"
+if ! timeout "$RENDER_TIMEOUT" docker run --rm --name "$RENDER_NAME" \
   --network "container:velaris-openbao" \
   --user "$(id -u):$(id -g)" \
   -v "$AGENT_DIR:/openbao/agent" \
-  openbao/openbao:2 bao agent -config=/openbao/agent/agent.hcl >/dev/null
+  openbao/openbao:2.7.1 bao agent -config=/openbao/agent/agent.hcl >/dev/null; then
+  docker rm -f "$RENDER_NAME" >/dev/null 2>&1 || true
+  echo "✗ OpenBao agent did not render within ${RENDER_TIMEOUT}s (sign-in refused? check deploy/openbao/agent/role_id and secret_id) — .env left untouched"
+  exit 1
+fi
 
 # 3. Sanity gates before touching .env
 [ -s "$RENDERED" ] || { echo "✗ render produced no output — .env left untouched"; exit 1; }

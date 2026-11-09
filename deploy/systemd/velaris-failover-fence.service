@@ -1,0 +1,15 @@
+[Unit]
+Description=Velaris automatic failover — stop this main if it can confirm neither its lease nor its standby
+
+[Service]
+Type=oneshot
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+ExecCondition=/bin/sh -c 'test -f __VELARIS_DIR__/.standby/failover/failover.json'
+# Independent of the agent on purpose: a crashed or hung agent must not leave
+# a cut-off main writing. Does nothing on a standby or while the lease is fresh.
+ExecStart=__VELARIS_DIR__/standby-velaris.sh failover fence-check
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-failover-fence

@@ -1,4 +1,4 @@
-"""HELIX P36 — Audit chain, lineage, evidence reports."""
+"""Velaris P36 — Audit chain, lineage, evidence reports."""
 from __future__ import annotations
 
 import uuid

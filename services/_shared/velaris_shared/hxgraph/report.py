@@ -102,7 +102,7 @@ async def graph_report(session: AsyncSession, tenant_id: str | None = None) -> s
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = [
-        f"# HxGraph Report — HELIX  ({now})",
+        f"# HxGraph Report — Velaris  ({now})",
         "",
         "## Summary",
         f"- {len(nodes)} nodes · {len(edges)} edges · {len(communities)} communities detected",
@@ -209,7 +209,7 @@ async def graph_html(session: AsyncSession, tenant_id: str | None = None) -> str
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>HxGraph — HELIX Knowledge Graph</title>
+<title>HxGraph — Velaris Knowledge Graph</title>
 <style>
   body {{ margin: 0; background: #0f1117; font-family: system-ui, sans-serif; color: #e2e8f0; }}
   #toolbar {{ position: fixed; top: 0; left: 0; right: 0; height: 48px; background: #1a1d2e;

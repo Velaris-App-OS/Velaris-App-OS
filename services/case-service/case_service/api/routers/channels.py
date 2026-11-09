@@ -49,6 +49,7 @@ from velaris_shared.db.models import (
 )
 from velaris_shared.db.session import get_session
 from velaris_shared.middleware.endpoint_rate_limit import rate_limit
+from velaris_shared.db.read_routing import get_read_session
 
 log = logging.getLogger(__name__)
 
@@ -283,7 +284,7 @@ async def list_conversations(
 
 @router.get("/conversations/stats")
 async def inbox_stats(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("channels.conversations.read")),
 ):
     """Mirrors `GET /email/inbox/stats` so the two inboxes read alike."""

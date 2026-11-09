@@ -1,5 +1,6 @@
 """RFC 822 parser — uses Python's stdlib email module."""
 from __future__ import annotations
+import re
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -85,3 +86,38 @@ def parse_rfc822(raw: bytes) -> dict[str, Any]:
         "received_at": received_at or datetime.now(timezone.utc),
         "raw_headers": headers,
     }
+
+
+_QUOTED_ID = re.compile(r"^\s*Message-I[Dd]:\s*(<[^>\s]+>)", re.I | re.M)
+
+
+def quoted_message_ids(raw: bytes) -> set[str]:
+    """Message-IDs a message points at or carries inside it: In-Reply-To and
+    References, the original enclosed in a bounce (`message/rfc822`,
+    `text/rfc822-headers`), and header lines quoted in its text parts.
+
+    Used to recognise a reply to, or a bounce of, a message whose body must not
+    be stored (one carrying a one-time code) — both usually quote it.
+    """
+    msg = message_from_bytes(raw)
+    ids: set[str] = set()
+    for h in ("In-Reply-To", "References"):
+        ids.update(x for x in (msg.get(h) or "").split() if x.startswith("<"))
+    own = (msg.get("Message-Id") or "").strip()
+    for part in msg.walk():
+        ctype = part.get_content_type()
+        if ctype == "message/rfc822":
+            for inner in part.get_payload() or []:
+                if hasattr(inner, "get"):
+                    v = (inner.get("Message-Id") or "").strip()
+                    if v:
+                        ids.add(v)
+        elif ctype.startswith("text/") or ctype == "message/delivery-status":
+            try:
+                payload = part.get_payload(decode=True) or b""
+                text = payload.decode(part.get_content_charset() or "utf-8", "replace")
+            except Exception:                                  # noqa: BLE001
+                continue
+            ids.update(_QUOTED_ID.findall(text))
+    ids.discard(own)
+    return ids

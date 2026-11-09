@@ -20,9 +20,15 @@ const STATIC_DEFAULTS: PermMap = Object.fromEntries(
   NAV_DATA.filter(e => e.roles.length > 0).map(e => [e.path, e.roles])
 );
 
+// Routes only the platform operator sees (nav-data `operatorOnly`).
+const OPERATOR_ONLY = new Set(NAV_DATA.filter(e => e.operatorOnly).map(e => e.path));
+
 interface PermissionsState {
   permissions: PermMap;
   loading: boolean;
+  /** Superadmin or the default tenant. An older platform that does not say
+   *  is read as `true` — exactly what Studio showed before. */
+  isOperator: boolean;
   getRouteRoles: (path: string) => string[];
   isRouteAllowed: (path: string, userRoles: string[], isAdmin: boolean) => boolean;
   refresh: () => void;
@@ -31,6 +37,7 @@ interface PermissionsState {
 const PermissionsCtx = createContext<PermissionsState>({
   permissions: STATIC_DEFAULTS,
   loading: true,
+  isOperator: true,
   getRouteRoles: (path) => STATIC_DEFAULTS[path] ?? [],
   isRouteAllowed: () => false,
   refresh: () => {},
@@ -43,6 +50,17 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
   // Start with static defaults so access control is correct from the first render
   const [permissions, setPermissions] = useState<PermMap>(STATIC_DEFAULTS);
   const [loading, setLoading] = useState(true);
+  const [isOperator, setIsOperator] = useState(true);
+
+  useEffect(() => {
+    if (!token) { setIsOperator(true); return; }
+    let live = true;
+    fetch("/api/v1/auth/me", { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (live && d && typeof d.is_platform_operator === "boolean") setIsOperator(d.is_platform_operator); })
+      .catch(() => { /* keep the default */ });
+    return () => { live = false; };
+  }, [token]);
 
   const fetch_ = useCallback(async (tok: string) => {
     try {
@@ -81,6 +99,7 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
 
   const isRouteAllowed = useCallback(
     (path: string, userRoles: string[], isAdmin: boolean): boolean => {
+      if (OPERATOR_ONLY.has(path) && !isOperator) return false;
       if (isAdmin) return true;
       const roles = permissions[path];
       // Distinguish "unmanaged" from "explicitly restricted":
@@ -93,7 +112,7 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
       if (roles.length === 0) return false;
       return roles.some(r => userRoles.includes(r));
     },
-    [permissions],
+    [permissions, isOperator],
   );
 
   const refresh = useCallback(() => {
@@ -101,7 +120,7 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
   }, [token, fetch_]);
 
   return (
-    <PermissionsCtx.Provider value={{ permissions, loading, getRouteRoles, isRouteAllowed, refresh }}>
+    <PermissionsCtx.Provider value={{ permissions, loading, isOperator, getRouteRoles, isRouteAllowed, refresh }}>
       {children}
     </PermissionsCtx.Provider>
   );

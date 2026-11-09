@@ -171,7 +171,7 @@ async def _our_signature(session: AsyncSession, tenant_uuid: uuid.UUID,
     """
     try:
         from case_service.hxvault import keyring
-        from case_service.modelmarket import packaging
+        from velaris_shared.modelmarket import packaging
 
         dek = keyring.cached_dek(tenant_uuid) or await keyring.ensure_dek(
             session, tenant_uuid)

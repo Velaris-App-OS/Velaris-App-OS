@@ -252,7 +252,7 @@ async def disable_bot(
         await service.fail(session, job, error="Bot disabled.", status="cancelled")
         if job.container_id:
             try:
-                from case_service.marketplace.runtime import stop_app_container
+                from velaris_shared.apps.runtime import stop_app_container
 
                 stop_app_container(job.container_id)
             except Exception:
@@ -525,7 +525,7 @@ async def get_job(
     network: list[dict] = []
     try:
         from velaris_shared.db.models import MarketplaceNetworkLogModel
-        from case_service.marketplace import egress as mkt_egress
+        from velaris_shared.apps import egress as mkt_egress
 
         if mkt_egress.egress_enabled():
             # Fold in anything the gateway has written since, so the view is
@@ -589,7 +589,7 @@ async def cancel_job(
                        status="cancelled")
     if job.container_id:
         try:
-            from case_service.marketplace.runtime import stop_app_container
+            from velaris_shared.apps.runtime import stop_app_container
 
             stop_app_container(job.container_id)
         except Exception:

@@ -1,4 +1,4 @@
-"""HELIX integrations plugin: rest."""
+"""Velaris integrations plugin: rest."""
 
 class RestBackend:
     """rest implementation of the integrations Protocol."""

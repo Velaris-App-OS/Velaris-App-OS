@@ -18,7 +18,39 @@ from velaris_shared import hxguard
 from velaris_shared.auth.dependencies import get_current_user
 from velaris_shared.auth.models import AuthenticatedUser
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from velaris_shared.db.session import get_session
+
+# The platform's own service log files — every tenant's requests in them.
+# The platform operator reads every line; a tenant's admin only the lines
+# tagged `[t=<its tenant>]` — written during its own signed-in requests, by the
+# TRUSTED tenant sign-in sets (2026-11-04: before, `platform.logs.read`, which
+# every tenant's admin holds, read the whole install's logs).
 router = APIRouter(prefix="/hxlogs", tags=["hxlogs"])
+
+# Only where the logging filter puts it — right after "<date> <time> <LEVEL> " —
+# so a tenant cannot make a line its own (or another's) by writing "[t=…]"
+# into something that gets logged.
+_TAG = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\S*\s+[A-Z]+\s+\[t=([^\]\s]+)\]")
+
+
+async def _scope(session: AsyncSession, user: AuthenticatedUser) -> set[str] | None:
+    """None = every line (the platform operator); else the caller's tenant spellings."""
+    from case_service.tenancy.identity import caller_tenant_tokens, is_platform_operator
+    if await is_platform_operator(session, user):
+        return None
+    return {str(t) for t in (await caller_tenant_tokens(session, user) or [])}
+
+
+def _mine(entries: list[dict], scope: set[str] | None) -> list[dict]:
+    if scope is None:
+        return entries
+    out = []
+    for e in entries:
+        m = _TAG.match(_strip_ansi(e.get("raw") or ""))
+        if m and m.group(1) in scope:
+            out.append(e)
+    return out
 
 # ── Service log file map ──────────────────────────────────────────
 
@@ -249,17 +281,19 @@ def _read_logs(
 # ── Endpoints ─────────────────────────────────────────────────────
 
 @router.get("/services")
-async def list_services(_: AuthenticatedUser = Depends(hxguard.guard("platform.logs.read"))):
-    """List all known service log files and their availability."""
+async def list_services(_: AuthenticatedUser = Depends(hxguard.guard("platform.logs.read")),
+                        session: AsyncSession = Depends(get_session)):
+    """List all known service log files and their availability. A tenant's
+    admin is not shown the server's file paths or sizes."""
+    operator = await _scope(session, _) is None
     result = []
     for name, path in SERVICE_LOGS.items():
         exists = os.path.exists(path)
-        size   = os.path.getsize(path) if exists else 0
-        result.append({
-            "service": name, "path": path,
-            "available": exists, "size_bytes": size,
-        })
-    return {"services": result}
+        row = {"service": name, "available": exists}
+        if operator:
+            row.update(path=path, size_bytes=os.path.getsize(path) if exists else 0)
+        result.append(row)
+    return {"services": result, "scope": "platform" if operator else "tenant"}
 
 
 @router.get("/entries")
@@ -269,16 +303,21 @@ async def get_log_entries(
     since_minutes: int           = Query(60, description="How many minutes back to look"),
     limit:         int           = Query(200, le=1000),
     _:             AuthenticatedUser = Depends(hxguard.guard("platform.logs.read")),
+    session:       AsyncSession = Depends(get_session),
 ):
-    """Return filtered log entries from one or all services."""
+    """Return filtered log entries from one or all services — a tenant's
+    admin gets only its own tenant's lines."""
+    scope = await _scope(session, _)
     services_to_read = (
         {service: SERVICE_LOGS[service]} if service and service in SERVICE_LOGS
         else SERVICE_LOGS
     )
+    # A tenant's lines are a fraction of the file: read further back for them.
+    read = limit if scope is None else min(limit * 20, 20000)
 
     all_entries: list[dict] = []
     for svc, path in services_to_read.items():
-        all_entries.extend(_read_logs(svc, path, severity, limit, since_minutes))
+        all_entries.extend(_mine(_read_logs(svc, path, severity, read, since_minutes), scope))
 
     # Sort newest first, cap at limit
     all_entries.sort(key=lambda e: e["line_no"], reverse=True)
@@ -343,13 +382,15 @@ async def correlate_with_hxstream(
     event_id:       Optional[str] = None,
     window_minutes: int = 5,
     _: AuthenticatedUser = Depends(hxguard.guard("platform.logs.read")),
+    session: AsyncSession = Depends(get_session),
 ):
-    """Find log entries in the same time window as an HxStream error event."""
-    # Grab recent errors across all services that could relate to the case
+    """Find log entries in the same time window as an HxStream error event —
+    a tenant's admin only among its own tenant's lines."""
+    scope = await _scope(session, _)
     all_entries: list[dict] = []
     for svc, path in SERVICE_LOGS.items():
-        entries = _read_logs(svc, path, "ERROR", 100, window_minutes * 2)
-        all_entries.extend(entries)
+        entries = _read_logs(svc, path, "ERROR", 100 if scope is None else 2000, window_minutes * 2)
+        all_entries.extend(_mine(entries, scope))
 
     filtered = all_entries
     if case_id:

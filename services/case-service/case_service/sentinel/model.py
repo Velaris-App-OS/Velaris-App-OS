@@ -28,7 +28,8 @@ from case_service.sentinel import engine as eng
 from case_service.sentinel import packs
 
 #: Label-INDEPENDENT features the model may learn from (never outcome-derived).
-MODEL_FEATURES = ("amount", "amount_zscore", "phone_velocity", "email_velocity", "address_velocity")
+# Shared with the model market (step 7): one tuple, imported back.
+from velaris_shared.sentinel.schema import MODEL_FEATURES  # noqa: E402,F401
 
 MIN_SAMPLES = 20          # too little history to learn anything trustworthy
 MIN_PER_CLASS = 5         # need enough of BOTH classes (imbalance guard)
@@ -42,8 +43,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _sigmoid(z: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-np.clip(z, -60, 60)))
+# The scoring formulas live in the shared layer (step 7); same functions, same names.
+from velaris_shared.sentinel.maths import _auc, _sigmoid  # noqa: E402,F401
 
 
 def _fit_logreg(X: np.ndarray, y: np.ndarray, *, l2: float = 1.0,
@@ -58,19 +59,6 @@ def _fit_logreg(X: np.ndarray, y: np.ndarray, *, l2: float = 1.0,
         w -= lr * gw
         b -= lr * gb
     return w, b
-
-
-def _auc(y: np.ndarray, scores: np.ndarray) -> float | None:
-    """Mann-Whitney AUC. None when a class is absent (undefined)."""
-    npos = int((y == 1).sum())
-    nneg = int((y == 0).sum())
-    if npos == 0 or nneg == 0:
-        return None
-    order = np.argsort(scores, kind="mergesort")
-    ranks = np.empty(len(scores), dtype=float)
-    ranks[order] = np.arange(1, len(scores) + 1)
-    auc = (ranks[y == 1].sum() - npos * (npos + 1) / 2) / (npos * nneg)
-    return round(float(auc), 3)
 
 
 # ── Training ─────────────────────────────────────────────────────────────────

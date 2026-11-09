@@ -1,4 +1,4 @@
-"""HELIX IR: Security and access control models.
+"""Velaris IR: Security and access control models.
 
 Role-based (RBAC) and attribute-based (ABAC) access control.
 Evaluated at runtime by the auth protocol implementation.

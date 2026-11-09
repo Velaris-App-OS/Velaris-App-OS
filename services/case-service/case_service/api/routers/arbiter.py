@@ -90,7 +90,7 @@ router = APIRouter(prefix="/arbiter", tags=["arbiter"])
 # first runs before authorization. That gave a caller who holds none of these
 # actions a **429 instead of a 403** — which leaks that the route exists, and
 # lets an unprivileged caller exhaust the bucket for a privileged one sharing
-# an egress IP (the limiter is keyed on `X-Forwarded-For`, and an office or VPN
+# an egress IP (the limiter is keyed on the client address, and an office or VPN
 # is one address). Authorization first means an unentitled caller is refused
 # without ever touching the bucket.
 #

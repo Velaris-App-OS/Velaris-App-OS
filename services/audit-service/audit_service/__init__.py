@@ -1,1 +1,1 @@
-"""HELIX audit-service."""
+"""Velaris audit-service."""

@@ -68,7 +68,7 @@ class TestTheProfilesCannotKillThemselves:
             return "container-id"
 
         monkeypatch.setattr(
-            "case_service.marketplace.runtime.provision_app_container", _fake)
+            "velaris_shared.apps.runtime.provision_app_container", _fake)
 
         bot = BotDefinitionModel(
             tenant_id="default", name="b", description="", image="i",

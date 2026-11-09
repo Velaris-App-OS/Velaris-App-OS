@@ -1,6 +1,6 @@
 /**
  * P54 — HxMigrate: Unified Migration Intelligence Pipeline
- * Upload once → 5 automatic stages → deployable Helix app
+ * Upload once → 5 automatic stages → deployable Velaris app
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@shared/components";

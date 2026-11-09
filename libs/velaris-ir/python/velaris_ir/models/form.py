@@ -1,4 +1,4 @@
-"""HELIX IR: Form definitions.
+"""Velaris IR: Form definitions.
 
 Declarative form layouts bound to data models.  The runtime renders
 these via the Studio frontend or any channel adapter (mobile, email,

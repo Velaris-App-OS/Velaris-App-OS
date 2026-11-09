@@ -1,6 +1,6 @@
 """Archived and deleted cases are inert — enforced in ONE place.
 
-Design: `docs/Future/CASE-ACTIONS-STATUS-DESIGN.md` §7, answered 2026-09-08.
+Design: `docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md` §7, answered 2026-09-08.
 
 **Why this module exists, and it is not a tidiness argument.** The seal was
 first written inside the action dispatcher, which was enough to make every test

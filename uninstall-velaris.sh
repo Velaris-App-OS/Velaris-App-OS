@@ -12,7 +12,8 @@
 #    ./uninstall-velaris.sh --delete-dir Also delete the project directory
 #
 #  What this script removes:
-#    ✓ Running Velaris processes (engine, case service, studio)
+#    ✓ Running Velaris processes (engine, every service, studio)
+#    ✓ This install's systemd units (stopped, disabled, removed)
 #    ✓ Docker containers  (all services in docker-compose.yml)
 #    ✓ Docker volumes     (ALL data: database, cache, search, storage)
 #    ✓ Python .venv/      (virtualenv)
@@ -21,7 +22,7 @@
 #    ✓ .env               (generated credentials and secrets)
 #    ✓ .velaris-key       (product licence key)
 #    ✓ .velaris-setup-complete  (setup marker)
-#    ✓ /tmp/velaris-*.log (service log files)
+#    ✓ /tmp/velaris-*.log and logs/ (service log files)
 #
 #  With --purge, also removes:
 #    ✓ Docker images used by Velaris
@@ -118,7 +119,39 @@ step "Step 1 — Stopping running Velaris processes..."
 
 _stopped_any=false
 
-for pattern in "uvicorn helix_engine" "uvicorn case_service" "vite"; do
+# systemd units first: they run with Restart=always, so a process killed below
+# would be started again in 5 s — against a database this script is about to
+# delete — and keep failing at every boot. Only units that point at THIS
+# install's folder are touched.
+_unit_dir="${VELARIS_UNIT_DIR:-/etc/systemd/system}"
+_our_units=()
+for _u in "$_unit_dir"/velaris-*.service; do
+  [ -f "$_u" ] && grep -qF "$VELARIS_DIR" "$_u" && _our_units+=("$(basename "$_u")")
+done
+# A timer or path unit belongs here when it names this folder, or when the
+# service it starts does (velaris-update.timer names neither path nor folder).
+for _u in "$_unit_dir"/velaris-*.timer "$_unit_dir"/velaris-*.path; do
+  [ -f "$_u" ] || continue
+  _svc="$(basename "${_u%.*}").service"
+  if grep -qF "$VELARIS_DIR" "$_u" || [[ " ${_our_units[*]} " == *" $_svc "* ]]; then
+    _our_units+=("$(basename "$_u")")
+  fi
+done
+if [ "${#_our_units[@]}" -gt 0 ]; then
+  if sudo systemctl disable --now "${_our_units[@]}" 2>/dev/null; then
+    for _u in "${_our_units[@]}"; do sudo rm -f "$_unit_dir/$_u"; done
+    sudo systemctl daemon-reload 2>/dev/null || true
+    green "  ✓ Stopped and removed systemd units: ${_our_units[*]}"
+    _stopped_any=true
+  else
+    yellow "  ⚠ Could not stop the systemd units (sudo refused?): ${_our_units[*]}"
+    yellow "    Run: sudo systemctl disable --now ${_our_units[*]}"
+  fi
+fi
+
+for pattern in "uvicorn helix_engine" "uvicorn case_service" "uvicorn analytics_service" \
+               "uvicorn hxgraph_service" "uvicorn hxmigrate_service" "uvicorn commerce_service" \
+               "uvicorn portal_service" "uvicorn user_service" "vite"; do
   if pkill -f "$pattern" 2>/dev/null; then
     green "  ✓ Stopped: $pattern"
     _stopped_any=true
@@ -146,13 +179,42 @@ yellow "  ⚠  This deletes ALL Velaris data:"
 yellow "     • Main database     (velaris-db)"
 yellow "     • Temporal database (temporal-db)"
 yellow "     • Valkey cache      (cache-data)"
-yellow "     • Redpanda events   (events-data)"
+yellow "     • Kafka events      (kafka-data)"
 yellow "     • OpenBao secrets   (openbao-data)"
 yellow "     • Ollama models     (ollama-data)  ← may be several GB"
 yellow "     • MinIO documents   (velaris-minio-data)"
 yellow "     • Prometheus data   (velaris-prometheus-data)"
 yellow "     • Mailpit emails    (velaris-mailpit-data)"
 echo ""
+
+# R5c standby link (standby-velaris.sh). On a MAIN, unlink before anything is
+# deleted: otherwise the standby's tunnel key stays trusted in this user's
+# ~/.ssh/authorized_keys after the install is gone, and the standby keeps
+# replicas of a server that no longer exists. On a STANDBY, the replicas are
+# plain containers compose does not own; their volumes are compose's names and
+# go with the volume removal below.
+if [ -f "$VELARIS_DIR/.standby/main.json" ]; then
+  if "$VELARIS_DIR/standby-velaris.sh" unlink; then
+    green "  ✓ Standby unlinked (its tunnel key revoked)"
+  else
+    yellow "  ⚠ Standby not fully unlinked (above). The tunnel key was revoked; check"
+    yellow "    ~/.ssh/authorized_keys for a 'velaris-standby-tunnel' line if in doubt."
+  fi
+fi
+for _c in velaris-standby-db velaris-standby-temporal-db; do
+  if docker ps -aq --filter "name=^${_c}$" 2>/dev/null | grep -q .; then
+    docker rm -f "$_c" >/dev/null 2>&1 && green "  ✓ Removed standby replica $_c"
+  fi
+done
+# On a standby the main's reads key (serve-reads, R5d 11b) may still be trusted
+# in this user's authorized_keys — it goes with the install.
+if [ -x "$VELARIS_DIR/standby-velaris.sh" ] \
+    && grep -q " velaris-standby-reads " "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+  "$VELARIS_DIR/standby-velaris.sh" remote-reads-revoke </dev/null >/dev/null 2>&1 \
+    && green "  ✓ Revoked the main's reads key" \
+    || yellow "  ⚠ Remove the 'velaris-standby-reads' line from ~/.ssh/authorized_keys by hand"
+fi
+rm -f "$VELARIS_DIR/.standby/tunnel.env" "$VELARIS_DIR/.standby/standby.json" 2>/dev/null || true
 
 if confirm "Delete all Docker containers and volumes?"; then
   if [ -f "$COMPOSE_FILE" ]; then
@@ -168,7 +230,9 @@ if confirm "Delete all Docker containers and volumes?"; then
       set -o allexport; source "$VELARIS_DIR/.env" 2>/dev/null || true; set +o allexport
       ENV_ARGS=(--env-file "$VELARIS_DIR/.env")
     fi
-    docker compose -f "$COMPOSE_FILE" "${ENV_ARGS[@]}" down --volumes --remove-orphans 2>/dev/null \
+    # --profile '*': include services behind a profile (the Kafka broker, the
+    # bundled MinIO, observability) — `down` ignores inactive profiles otherwise.
+    docker compose -f "$COMPOSE_FILE" "${ENV_ARGS[@]}" --profile '*' down --volumes --remove-orphans 2>/dev/null \
       && green "  ✓ Docker containers and volumes removed" \
       || yellow "  ⚠ docker compose down had warnings (containers may already be stopped)"
   else
@@ -180,7 +244,8 @@ if confirm "Delete all Docker containers and volumes?"; then
     temporal-db
     velaris-db
     cache-data
-    events-data
+    kafka-data
+    events-data      # left by Redpanda, the broker before Kafka (pre-November 2026)
     ollama-data
     velaris-minio-data
     velaris-prometheus-data
@@ -211,7 +276,6 @@ if $PURGE; then
     "temporalio/auto-setup:1.25"
     "temporalio/ui:2.31.2"
     "valkey/valkey:8-alpine"
-    "redpandadata/redpanda:latest"
     "ollama/ollama:latest"
     "nginx:1.27-alpine"
     "prom/prometheus:v2.54.1"
@@ -220,6 +284,20 @@ if $PURGE; then
     "minio/mc:RELEASE.2024-10-02T08-27-28Z"
     "axllent/mailpit:latest"
     "openbao/openbao:2"
+    # Pinned exact versions (2026-10-16). The floating tags above stay listed:
+    # an install made before the pin still holds those images.
+    "postgres:16.15-alpine"
+    "temporalio/auto-setup:1.25.2"
+    "valkey/valkey:8.1.10-alpine"
+    "apache/kafka:4.3.1"
+    "ollama/ollama:0.40.5"
+    "livekit/livekit-server:v1.13.10"
+    "livekit/egress:v1.13.0"
+    "nginx:1.27.5-alpine"
+    "axllent/mailpit:v1.31.6"
+    "openbao/openbao:2.7.1"
+    "openbao/openbao:2.5.4"      # used once by openbao-storage-migrate.sh
+    "python:3.12.15-alpine"
   )
 
   echo ""
@@ -401,7 +479,12 @@ LOG_FILES=(
   /tmp/velaris-analytics-service.log
   /tmp/velaris-hxgraph-service.log
   /tmp/velaris-hxmigrate-service.log
+  /tmp/velaris-commerce-service.log
+  /tmp/velaris-portal-service.log
+  /tmp/velaris-user-service.log
+  /tmp/velaris-worker-service.log
   /tmp/velaris-studio.log
+  "$VELARIS_DIR"/logs/velaris-*.log*
 )
 
 _removed_logs=false

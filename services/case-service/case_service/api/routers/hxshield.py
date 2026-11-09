@@ -18,6 +18,7 @@ from case_service.api.schemas.hxshield import (
     SecurityIncidentOut, IncidentResolve,
     ShieldEventOut, ScoreRequest, ScoreResponse,
 )
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/shield", tags=["HxShield"], dependencies=[Depends(hxguard.guard("security.shield.access"))])
 
@@ -201,7 +202,7 @@ async def score_event(
 # ── Stats ──────────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
-async def stats(session: AsyncSession = Depends(get_session)):
+async def stats(session: AsyncSession = Depends(get_read_session)):
     from sqlalchemy import func
     open_q = await session.execute(
         select(func.count()).select_from(SecurityIncidentModel)
@@ -251,13 +252,26 @@ def _visible_to(user) -> set:
     return {getattr(user, "tenant_id", None), None}
 
 
+async def _visible_keys(session, user) -> set:
+    """`_visible_to`, with platform scope (no tenant) for the platform operator
+    ONLY (2026-11-04). Every tenant's admin — a website demo account among
+    them — saw the platform-scope rows, which are most of them, and could
+    APPROVE one: revoke the sessions of, or suspend, the operator or another
+    tenant's user."""
+    from case_service.tenancy.identity import is_platform_operator
+    keys = {getattr(user, "tenant_id", None)}
+    if await is_platform_operator(session, user):
+        keys.add(None)
+    return keys
+
+
 async def _own_response(session, response_id, user):
     from velaris_shared.db.models import ShieldResponseModel
 
     row = await session.get(ShieldResponseModel, response_id)
     if row is None:
         raise HTTPException(404, "Response not found")
-    if row.tenant_id not in _visible_to(user):
+    if row.tenant_id not in await _visible_keys(session, user):
         # 404, not 403: a 403 confirms the row exists, and the row names an
         # actor in another tenant.
         raise HTTPException(404, "Response not found")
@@ -275,10 +289,12 @@ async def list_responses(
     from velaris_shared.db.models import ShieldResponseModel
     from case_service.hxshield.response import catalogue, responses_enabled
 
-    stmt = select(ShieldResponseModel).where(
-        ShieldResponseModel.tenant_id.in_([t for t in _visible_to(user) if t])
-        | ShieldResponseModel.tenant_id.is_(None)
-    ).order_by(ShieldResponseModel.created_at.desc()).limit(limit)
+    keys = await _visible_keys(session, user)
+    cond = ShieldResponseModel.tenant_id.in_([t for t in keys if t])
+    if None in keys:
+        cond = cond | ShieldResponseModel.tenant_id.is_(None)
+    stmt = select(ShieldResponseModel).where(cond).order_by(
+        ShieldResponseModel.created_at.desc()).limit(limit)
     if state:
         stmt = stmt.where(ShieldResponseModel.state == state)
     rows = (await session.execute(stmt)).scalars().all()

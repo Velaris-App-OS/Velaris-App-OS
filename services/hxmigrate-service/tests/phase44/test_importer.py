@@ -1,4 +1,4 @@
-"""HELIX P44 — BPM App Importer tests (24 tests).
+"""Velaris P44 — BPM App Importer tests (24 tests).
 
 Covers: extractor (Camunda raw XML, Pega ZIP, unknown tool), parsers
         (Pega flow/section/SLA/AG, Camunda BPMN, Appian, ServiceNow),

@@ -1,0 +1,684 @@
+{
+ "_doc": "Shared by velaris_shared/forms/expr.py and studio/src/modules/form-builder/expr.ts — both must give these results. `today` is 2026-10-28.",
+ "today": "2026-10-28",
+ "values": {
+  "qty": 3,
+  "price": "2.5",
+  "zero": 0,
+  "neg": -7,
+  "name": "  Ada ",
+  "empty": "",
+  "nul": null,
+  "tags": [
+   "a",
+   "b"
+  ],
+  "dob": "1990-05-01",
+  "leap": "2000-02-29",
+  "start": "2026-10-01",
+  "end": "2026-10-28T10:00:00",
+  "rec": {
+   "city": "Bonn",
+   "amount": 120.5
+  },
+  "yes": true,
+  "no": false,
+  "text5": "5",
+  "bad": "abc",
+  "big": 1e+300,
+  "dotted.key": "exact",
+  "not": "word-key",
+  "items": [
+   {
+    "price": 2,
+    "qty": 3,
+    "name": "a"
+   },
+   {
+    "price": "1.5",
+    "qty": 2
+   },
+   {
+    "qty": 1
+   },
+   "junk"
+  ]
+ },
+ "cases": [
+  {
+   "name": "multiply number by numeric text",
+   "expr": "qty * price",
+   "result": 7.5
+  },
+  {
+   "name": "leading equals is allowed",
+   "expr": "=qty*price",
+   "result": 7.5
+  },
+  {
+   "name": "precedence",
+   "expr": "1 + 2 * 3",
+   "result": 7
+  },
+  {
+   "name": "brackets",
+   "expr": "(1 + 2) * 3",
+   "result": 9
+  },
+  {
+   "name": "float addition as IEEE",
+   "expr": "0.1 + 0.2",
+   "result": 0.30000000000000004
+  },
+  {
+   "name": "division",
+   "expr": "7 / 2",
+   "result": 3.5
+  },
+  {
+   "name": "division by zero is null",
+   "expr": "qty / zero",
+   "result": null
+  },
+  {
+   "name": "modulo is floored",
+   "expr": "neg % 3",
+   "result": 2
+  },
+  {
+   "name": "modulo by zero is null",
+   "expr": "5 % 0",
+   "result": null
+  },
+  {
+   "name": "power",
+   "expr": "2 ^ 10",
+   "result": 1024
+  },
+  {
+   "name": "power is right of unary minus",
+   "expr": "-2 ^ 2",
+   "result": -4
+  },
+  {
+   "name": "negative base, fractional power is null",
+   "expr": "neg ^ 0.5",
+   "result": null
+  },
+  {
+   "name": "zero to a negative power is null",
+   "expr": "0 ^ -1",
+   "result": null
+  },
+  {
+   "name": "overflow is null",
+   "expr": "big * big",
+   "result": null
+  },
+  {
+   "name": "times and divide signs",
+   "expr": "6 × 2 ÷ 4",
+   "result": 3
+  },
+  {
+   "name": "empty field makes arithmetic null",
+   "expr": "qty + empty",
+   "result": null
+  },
+  {
+   "name": "missing field makes arithmetic null",
+   "expr": "qty + nothing_here",
+   "result": null
+  },
+  {
+   "name": "non-numeric text makes arithmetic null",
+   "expr": "qty + bad",
+   "result": null
+  },
+  {
+   "name": "boolean counts as 1",
+   "expr": "yes + 1",
+   "result": 2
+  },
+  {
+   "name": "unary minus of empty is null",
+   "expr": "-empty",
+   "result": null
+  },
+  {
+   "name": "unary plus",
+   "expr": "+qty",
+   "result": 3
+  },
+  {
+   "name": "join text",
+   "expr": "\"Total: \" & qty",
+   "result": "Total: 3"
+  },
+  {
+   "name": "join empty is empty text",
+   "expr": "empty & nul",
+   "result": ""
+  },
+  {
+   "name": "join list",
+   "expr": "tags & \"\"",
+   "result": "a, b"
+  },
+  {
+   "name": "doubled quote inside text",
+   "expr": "\"say \"\"hi\"\"\"",
+   "result": "say \"hi\""
+  },
+  {
+   "name": "single quotes",
+   "expr": "'it''s'",
+   "result": "it's"
+  },
+  {
+   "name": "integral float to text",
+   "expr": "text(2.0 * 3)",
+   "result": "6"
+  },
+  {
+   "name": "small number to text",
+   "expr": "text(0.000001 * 1)",
+   "result": "0.000001"
+  },
+  {
+   "name": "tiny number to text uses exponent",
+   "expr": "text(0.0000001 * 1)",
+   "result": "1e-7"
+  },
+  {
+   "name": "big integer to text",
+   "expr": "text(10000000000000000 * 1)",
+   "result": "10000000000000000"
+  },
+  {
+   "name": "upper lower trim",
+   "expr": "upper(trim(name)) & lower(\"X\")",
+   "result": "ADAx"
+  },
+  {
+   "name": "len counts characters",
+   "expr": "len(\"héllo\")",
+   "result": 5
+  },
+  {
+   "name": "concat",
+   "expr": "concat(\"a\", 1, yes, nul)",
+   "result": "a1true"
+  },
+  {
+   "name": "contains text",
+   "expr": "contains(\"Bonn am Rhein\", rec.city)",
+   "result": true
+  },
+  {
+   "name": "contains list",
+   "expr": "contains(tags, \"b\")",
+   "result": true
+  },
+  {
+   "name": "contains empty needle is false",
+   "expr": "contains(\"abc\", empty)",
+   "result": false
+  },
+  {
+   "name": "number equals numeric text",
+   "expr": "text5 = 5",
+   "result": true
+  },
+  {
+   "name": "double equals",
+   "expr": "qty == 3",
+   "result": true
+  },
+  {
+   "name": "not equals",
+   "expr": "qty != 4",
+   "result": true
+  },
+  {
+   "name": "diamond not equals",
+   "expr": "qty <> 3",
+   "result": false
+  },
+  {
+   "name": "text equality is case-sensitive",
+   "expr": "\"a\" = \"A\"",
+   "result": false
+  },
+  {
+   "name": "empty equals null",
+   "expr": "empty = nul",
+   "result": true
+  },
+  {
+   "name": "empty is not zero",
+   "expr": "empty = 0",
+   "result": false
+  },
+  {
+   "name": "true is not 1",
+   "expr": "yes = 1",
+   "result": false
+  },
+  {
+   "name": "true equals text true",
+   "expr": "yes = \"true\"",
+   "result": true
+  },
+  {
+   "name": "list equals member",
+   "expr": "tags = \"a\"",
+   "result": true
+  },
+  {
+   "name": "greater than",
+   "expr": "qty > 2",
+   "result": true
+  },
+  {
+   "name": "less or equal",
+   "expr": "qty <= 3",
+   "result": true
+  },
+  {
+   "name": "numeric not text order",
+   "expr": "10 > 9",
+   "result": true
+  },
+  {
+   "name": "text compares as text",
+   "expr": "\"b\" > \"a\"",
+   "result": true
+  },
+  {
+   "name": "dates compare as text",
+   "expr": "start < end",
+   "result": true
+  },
+  {
+   "name": "comparison with empty is false",
+   "expr": "empty < 5",
+   "result": false
+  },
+  {
+   "name": "comparison with empty is false either way",
+   "expr": "empty > 5",
+   "result": false
+  },
+  {
+   "name": "comparison with a list is false",
+   "expr": "tags > 1",
+   "result": false
+  },
+  {
+   "name": "and",
+   "expr": "qty > 2 and price < 3",
+   "result": true
+  },
+  {
+   "name": "or",
+   "expr": "qty > 5 or yes",
+   "result": true
+  },
+  {
+   "name": "not",
+   "expr": "not no",
+   "result": true
+  },
+  {
+   "name": "bang not",
+   "expr": "!(qty = 3)",
+   "result": false
+  },
+  {
+   "name": "double ampersand and pipes",
+   "expr": "yes && (no || qty)",
+   "result": true
+  },
+  {
+   "name": "truthiness of empty text",
+   "expr": "not empty",
+   "result": true
+  },
+  {
+   "name": "truthiness of zero",
+   "expr": "not zero",
+   "result": true
+  },
+  {
+   "name": "truthiness of empty list",
+   "expr": "not nul",
+   "result": true
+  },
+  {
+   "name": "words are not case-sensitive",
+   "expr": "TRUE AND Not False",
+   "result": true
+  },
+  {
+   "name": "if true",
+   "expr": "if(qty > 2, \"big\", \"small\")",
+   "result": "big"
+  },
+  {
+   "name": "if false without else is null",
+   "expr": "if(qty > 5, 1)",
+   "result": null
+  },
+  {
+   "name": "if does not evaluate the other branch",
+   "expr": "if(yes, 1, 1/0)",
+   "result": 1
+  },
+  {
+   "name": "coalesce",
+   "expr": "coalesce(empty, nul, \"x\")",
+   "result": "x"
+  },
+  {
+   "name": "is_empty",
+   "expr": "is_empty(empty) and not is_empty(qty)",
+   "result": true
+  },
+  {
+   "name": "round half away from zero",
+   "expr": "round(2.5)",
+   "result": 3
+  },
+  {
+   "name": "round negative half away",
+   "expr": "round(-2.5)",
+   "result": -3
+  },
+  {
+   "name": "round to decimals as a person sees them",
+   "expr": "round(8.925, 2)",
+   "result": 8.93
+  },
+  {
+   "name": "round of 1.005",
+   "expr": "round(1.005, 2)",
+   "result": 1.01
+  },
+  {
+   "name": "round with bad decimals is null",
+   "expr": "round(1.5, 1.5)",
+   "result": null
+  },
+  {
+   "name": "round with too many decimals is null",
+   "expr": "round(1.5, 11)",
+   "result": null
+  },
+  {
+   "name": "floor ceil abs",
+   "expr": "floor(2.7) + ceil(2.1) + abs(neg)",
+   "result": 12
+  },
+  {
+   "name": "sum skips empty and text",
+   "expr": "sum(qty, price, empty, bad)",
+   "result": 5.5
+  },
+  {
+   "name": "sum of a list",
+   "expr": "sum(tags, 1)",
+   "result": 1
+  },
+  {
+   "name": "sum of nothing is 0",
+   "expr": "sum(empty)",
+   "result": 0
+  },
+  {
+   "name": "sum adds left to right",
+   "expr": "sum(0.1, 0.2, 0.3)",
+   "result": 0.6000000000000001
+  },
+  {
+   "name": "avg",
+   "expr": "avg(1, 2, empty, 4)",
+   "result": 2.3333333333333335
+  },
+  {
+   "name": "avg of nothing is null",
+   "expr": "avg(empty)",
+   "result": null
+  },
+  {
+   "name": "min max",
+   "expr": "min(3, 1, 2) * 10 + max(3, 1, 2)",
+   "result": 13
+  },
+  {
+   "name": "count non-empty",
+   "expr": "count(qty, empty, tags, nul)",
+   "result": 3
+  },
+  {
+   "name": "number",
+   "expr": "number(text5) + 1",
+   "result": 6
+  },
+  {
+   "name": "number of bad text is null",
+   "expr": "number(bad)",
+   "result": null
+  },
+  {
+   "name": "function names are not case-sensitive",
+   "expr": "SUM(1, 2) + Round(1.4)",
+   "result": 4
+  },
+  {
+   "name": "today",
+   "expr": "today()",
+   "result": "2026-10-28"
+  },
+  {
+   "name": "days between",
+   "expr": "days_between(start, end)",
+   "result": 27
+  },
+  {
+   "name": "days between reversed is negative",
+   "expr": "days_between(end, start)",
+   "result": -27
+  },
+  {
+   "name": "years between, birthday not reached",
+   "expr": "years_between(dob, \"2026-04-30\")",
+   "result": 35
+  },
+  {
+   "name": "years between, birthday reached",
+   "expr": "years_between(dob, today())",
+   "result": 36
+  },
+  {
+   "name": "years between from 29 February",
+   "expr": "years_between(leap, \"2001-02-28\")",
+   "result": 0
+  },
+  {
+   "name": "add days",
+   "expr": "add_days(start, 31)",
+   "result": "2026-11-01"
+  },
+  {
+   "name": "add days across a leap day",
+   "expr": "add_days(\"2028-02-28\", 1)",
+   "result": "2028-02-29"
+  },
+  {
+   "name": "add days with fraction is null",
+   "expr": "add_days(start, 1.5)",
+   "result": null
+  },
+  {
+   "name": "add days out of range is null",
+   "expr": "add_days(\"9999-12-31\", 1)",
+   "result": null
+  },
+  {
+   "name": "a date that does not exist is null",
+   "expr": "days_between(\"2026-02-30\", start)",
+   "result": null
+  },
+  {
+   "name": "not a date is null",
+   "expr": "days_between(bad, start)",
+   "result": null
+  },
+  {
+   "name": "dotted path into a record",
+   "expr": "rec.amount * 2",
+   "result": 241
+  },
+  {
+   "name": "dotted path, deeper missing is null",
+   "expr": "rec.nope.deeper",
+   "result": null
+  },
+  {
+   "name": "an exact dotted key wins",
+   "expr": "dotted.key",
+   "result": "exact"
+  },
+  {
+   "name": "braces name any key",
+   "expr": "{not} & \"\"",
+   "result": "word-key"
+  },
+  {
+   "name": "braces do not follow a path",
+   "expr": "{rec.city}",
+   "result": null
+  },
+  {
+   "name": "unknown field is null",
+   "expr": "unknown_field",
+   "result": null
+  },
+  {
+   "name": "unknown function",
+   "expr": "foo(1)",
+   "error": true
+  },
+  {
+   "name": "unclosed bracket",
+   "expr": "(1 + 2",
+   "error": true
+  },
+  {
+   "name": "unclosed text",
+   "expr": "\"abc",
+   "error": true
+  },
+  {
+   "name": "empty",
+   "expr": "",
+   "error": true
+  },
+  {
+   "name": "only equals",
+   "expr": "=",
+   "error": true
+  },
+  {
+   "name": "missing operator",
+   "expr": "qty price",
+   "error": true
+  },
+  {
+   "name": "too many arguments",
+   "expr": "round(1, 2, 3)",
+   "error": true
+  },
+  {
+   "name": "too few arguments",
+   "expr": "if(yes)",
+   "error": true
+  },
+  {
+   "name": "stray character",
+   "expr": "qty $ 2",
+   "error": true
+  },
+  {
+   "name": "trailing operator",
+   "expr": "qty +",
+   "error": true
+  },
+  {
+   "name": "empty braces",
+   "expr": "{}",
+   "error": true
+  },
+  {
+   "name": "exponent notation is not a number",
+   "expr": "1e5",
+   "error": true
+  },
+  {
+   "name": "too deep",
+   "expr": "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+   "error": true
+  },
+  {
+   "name": "too long",
+   "expr": "1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1",
+   "error": true
+  },
+  {
+   "name": "too many nodes",
+   "expr": "1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1",
+   "error": true
+  },
+  {
+   "name": "a path through rows collects every row's value",
+   "expr": "items.price",
+   "result": [
+    2,
+    "1.5",
+    null,
+    null
+   ]
+  },
+  {
+   "name": "sum over rows skips empty",
+   "expr": "sum(items.price)",
+   "result": 3.5
+  },
+  {
+   "name": "count of rows",
+   "expr": "count(items)",
+   "result": 4
+  },
+  {
+   "name": "count of filled values across rows",
+   "expr": "count(items.name)",
+   "result": 1
+  },
+  {
+   "name": "max over rows",
+   "expr": "max(items.qty)",
+   "result": 3
+  },
+  {
+   "name": "arithmetic on a list is null",
+   "expr": "items.price * 2",
+   "result": null
+  },
+  {
+   "name": "contains over rows",
+   "expr": "contains(items.name, \"a\")",
+   "result": true
+  }
+ ]
+}

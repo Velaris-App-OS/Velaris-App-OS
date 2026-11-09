@@ -58,6 +58,26 @@ def register_session(request: "Request | None", session: Any) -> None:
         log.debug("could not register session for early commit", exc_info=True)
 
 
+def request_session(request: Any) -> Any:
+    """The session this request already holds, or None.
+
+    For lookups made inside a request (the caller's access group, a token
+    check). Opening a second session from the same pool while the request's
+    own session holds a connection in a transaction deadlocks under load:
+    every connection ends up held by a request waiting for another one (found
+    on a clean box, 2026-10-19 — case creates stalled for up to two minutes
+    behind PgBouncer). Reusing the request's session takes no second connection.
+    """
+    state = getattr(request, "state", None)
+    if state is None:
+        return None
+    session = getattr(state, "db_session", None)
+    if session is not None:
+        return session
+    sessions = getattr(state, _STATE_ATTR, None) or []
+    return sessions[0] if sessions else None
+
+
 async def _commit_registered(request: Request) -> None:
     for session in list(getattr(request.state, _STATE_ATTR, []) or []):
         # in_transaction() is false for a read-only request, so a GET pays

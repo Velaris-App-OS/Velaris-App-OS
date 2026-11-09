@@ -116,6 +116,29 @@ def test_a_twin_pointing_at_production_is_refused():
     assert detail["database"]["same"] is True
 
 
+def test_a_twin_at_the_pooler_address_is_production():
+    """R5d 6a: production is also reachable through PgBouncer on 6432."""
+    ok, detail = twin.isolation(_settings(
+        database_pooler_url="postgresql+asyncpg://velaris:pw@localhost:6432/velaris",
+        twin_database_url="postgresql://other:x@localhost:6432/velaris"))
+    assert ok is False and detail["database"]["same"] is True
+
+
+def test_a_twin_at_the_commerce_pool_address_is_production():
+    """R5e step 7: `velaris_commerce` on the pooler is the same database again."""
+    ok, detail = twin.isolation(_settings(
+        database_pooler_url="postgresql+asyncpg://velaris:pw@localhost:6432/velaris",
+        commerce_database_pooler_url="postgresql+asyncpg://velaris:pw@localhost:6432/velaris_commerce",
+        twin_database_url="postgresql://other:x@localhost:6432/velaris_commerce"))
+    assert ok is False and detail["database"]["same"] is True
+
+
+def test_without_a_pooler_port_6432_is_just_another_database():
+    ok, _ = twin.isolation(_settings(
+        twin_database_url="postgresql://other:x@localhost:6432/velaris"))
+    assert ok is True
+
+
 def test_a_password_is_not_isolation():
     """Two DSNs differing only by credentials name the same database."""
     assert twin.fingerprint("postgresql://a:p1@h:5432/db") == \

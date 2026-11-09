@@ -67,16 +67,24 @@ class HttpConnector:
     async def execute(self, input_data: dict) -> dict:
         base   = self._config.get("base_url", "").rstrip("/")
         await validate_outbound_url(base)
-        path   = self._config.get("path", "").lstrip("/")
+        path   = self._config.get("path", "")
+        if self._config.get("_op_path_placeholders"):     # a named operation's path
+            from velaris_shared.hxbridge.operations import fill_path
+            path = fill_path(path, input_data)
+        path   = path.lstrip("/")
         method = self._config.get("method", "POST").upper()
         timeout = self._config.get("timeout_seconds", 30)
         url    = f"{base}/{path}" if path else base
+        # Checked and pinned to the checked address (DNS rebinding, 2026-11-04).
+        from case_service.hxbridge.security import pinned_request_args
+        url, host_header, extensions = await pinned_request_args(url)
+        headers = {**self._build_headers(), **host_header}
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             if method in ("GET", "DELETE"):
-                r = await client.request(method, url, headers=self._build_headers(), params=input_data)
+                r = await client.request(method, url, headers=headers, params=input_data, extensions=extensions)
             else:
-                r = await client.request(method, url, headers=self._build_headers(), json=input_data)
+                r = await client.request(method, url, headers=headers, json=input_data, extensions=extensions)
 
             r.raise_for_status()
             try:

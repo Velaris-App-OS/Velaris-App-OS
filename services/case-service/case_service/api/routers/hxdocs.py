@@ -13,6 +13,7 @@ from velaris_shared.auth.models import AuthenticatedUser
 from velaris_shared.db.session import get_session
 from case_service.hxdocs import service
 from velaris_shared.hxstream.emitter import emit_trace
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/hxdocs", tags=["hxdocs"])
 
@@ -298,7 +299,7 @@ async def get_versions(
 async def search_articles(
     q: str = Query(..., min_length=1),
     user: AuthenticatedUser = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
 ):
     articles = await service.search_articles(session, _tenant(user), q)
     return [ArticleOut.from_model(a) for a in articles]

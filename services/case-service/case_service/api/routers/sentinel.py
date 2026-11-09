@@ -38,6 +38,7 @@ from case_service.tenancy.identity import same_tenant
 from case_service.sentinel import engine as risk_engine
 from case_service.sentinel import rules as rulecat
 from case_service.sentinel import service as sentinel
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/risk", tags=["hxsentinel"])
 
@@ -414,7 +415,7 @@ async def get_finding_feedback(
 
 @router.get("/scores/dashboard")
 async def scores_dashboard(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Per-reviewer scoring stats for the tenant (supervisor view).

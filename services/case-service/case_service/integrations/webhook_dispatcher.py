@@ -82,14 +82,27 @@ async def get_matching_subscriptions(
     case_type_id: uuid.UUID | None = None,
 ) -> list:
     """Return active webhook subscriptions that match this event."""
+    return match_subscriptions(await load_active_subscriptions(session),
+                               event_type, case_type_id)
+
+
+async def load_active_subscriptions(session: AsyncSession) -> list:
+    """Every active webhook subscription — one query, for a whole relay batch."""
     from velaris_shared.db.models import WebhookSubscriptionModel
 
     stmt = select(WebhookSubscriptionModel).where(
         WebhookSubscriptionModel.is_active == True,  # noqa: E712
     )
     result = await session.execute(stmt)
-    subs = list(result.scalars().all())
+    return list(result.scalars().all())
 
+
+def match_subscriptions(
+    subs: list,
+    event_type: str,
+    case_type_id: uuid.UUID | None = None,
+) -> list:
+    """The subscriptions in `subs` that this event goes to (no database)."""
     matched = []
     for sub in subs:
         events = sub.events or []

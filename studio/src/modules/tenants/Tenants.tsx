@@ -146,7 +146,7 @@ export default function Tenants() {
                 {t.status === "active" ? (
                   <Button size="sm" variant="secondary" onClick={() => setConfirm({
                     title: `Archive "${t.name}"?`,
-                    body: "The tenant will be deactivated. All data is preserved — you can reactivate it at any time.",
+                    body: "Its people are signed out of everything at once and its customer portal closes. All data is preserved — you can reactivate it at any time.",
                     confirmLabel: "Archive",
                     onConfirm: async () => { await deleteTenant(t.id); refetch(); },
                   })}>Archive</Button>

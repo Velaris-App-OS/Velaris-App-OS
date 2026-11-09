@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from velaris_shared.tenancy.identity import caller_tenant_uuid
-from case_service.core.tenant_path_guard import platform_operator_only as _platform_operator_only
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +26,7 @@ from case_service.enterprise import gdpr
 from velaris_shared.db import security_events
 
 import logging
+from velaris_shared.db.read_routing import get_read_session
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,17 @@ router = APIRouter(prefix="/enterprise", tags=["enterprise"], dependencies=[Depe
 
 # ─── Security events ─────────────────────────────────────────────
 
-@router.get("/security-events", dependencies=[Depends(_platform_operator_only)])
+async def _event_scope(session: AsyncSession, user: AuthenticatedUser) -> list[str] | None:
+    """None = every event (the platform operator); else the caller's tenant
+    spellings — events stamped with its tenant (migration 230, 2026-11-04).
+    Events with no tenant are the platform's and stay the operator's."""
+    from case_service.tenancy.identity import caller_tenant_tokens, is_platform_operator
+    if await is_platform_operator(session, user):
+        return None
+    return [str(t) for t in (await caller_tenant_tokens(session, user) or [])]
+
+
+@router.get("/security-events")
 async def list_security_events(
     event_type: str | None = None,
     user_id: str | None = None,
@@ -43,22 +53,26 @@ async def list_security_events(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(100, ge=1, le=1000),
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Query security events."""
+    """Query security events — the operator every one, a tenant's admin its own."""
     return await security_events.query_events(
         session,
         event_type=event_type, user_id=user_id,
         severity=severity, days=days, limit=limit,
+        tenants=await _event_scope(session, user),
     )
 
 
-@router.get("/security-events/stats", dependencies=[Depends(_platform_operator_only)])
+@router.get("/security-events/stats")
 async def security_event_stats(
     days: int = Query(30, ge=1, le=365),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Aggregate security event statistics."""
-    return await security_events.event_stats(session, days)
+    """Aggregate security event statistics — scoped as the list."""
+    return await security_events.event_stats(session, days,
+                                             tenants=await _event_scope(session, user))
 
 
 class SecurityEventCreate(BaseModel):
@@ -77,14 +91,20 @@ async def create_security_event(
     body: SecurityEventCreate,
     request: Request,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Manually log a security event."""
+    """Manually log a security event. A tenant's admin records it as itself,
+    in its own tenant (2026-11-04: any caller could name any user_id and feed
+    the platform's log and Shield's detectors with someone else's events)."""
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
+    actor = body.user_id
+    if await _event_scope(session, user) is not None:
+        actor = str(user.user_id)
     await security_events.log_security_event(
         session,
         event_type=body.event_type, severity=body.severity,
-        user_id=body.user_id, resource_type=body.resource_type,
+        user_id=actor, resource_type=body.resource_type,
         resource_id=body.resource_id, action=body.action, outcome=body.outcome,
         ip_address=ip, user_agent=ua, details=body.details,
     )
@@ -137,14 +157,21 @@ async def create_gdpr_request(
     return {"request_id": str(req_id), "status": "pending"}
 
 
-@router.get("/gdpr/requests", dependencies=[Depends(_platform_operator_only)])
+@router.get("/gdpr/requests")
 async def list_gdpr_requests(
     subject_id: str | None = None,
     status: str | None = None,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
+    """The operator every tenant's requests; a tenant's admin its own (2026-11-04
+    — requests carry a tenant since migration 213; tenant-less ones are the
+    default tenant's)."""
     from velaris_shared.db.models import GDPRRequestModel
+    from velaris_shared.tenancy.identity import scope_to_caller
     stmt = select(GDPRRequestModel).order_by(GDPRRequestModel.created_at.desc()).limit(100)
+    if await _event_scope(session, user) is not None:
+        stmt = await scope_to_caller(stmt, GDPRRequestModel, session, user)
     if subject_id:
         stmt = stmt.where(GDPRRequestModel.subject_id == subject_id)
     if status:
@@ -566,14 +593,30 @@ async def update_retention_policy(
 @router.get("/system-info")
 async def get_system_info(
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """System status and enterprise compliance statistics."""
+    """System status and enterprise compliance statistics. The platform operator
+    sees the install's totals; a tenant's admin its own tenant's (2026-11-04:
+    every tenant's admin saw the whole install's — cases, users, tenants)."""
     from velaris_shared.db.models import (
         CaseInstanceModel, CaseTypeModel, SecurityEventModel,
         RetentionPolicyModel, GDPRRequestModel, UserDirectoryModel,
     )
-    from sqlalchemy import func
+    from sqlalchemy import func, or_
     from datetime import timedelta
+
+    tokens = await _event_scope(session, user)          # None = the operator
+    mine = await caller_tenant_uuid(session, user) if tokens is not None else None
+
+    def _str_scope(col, shared: bool = False):
+        if tokens is None:
+            return ()
+        return (or_(col.in_(tokens), col.is_(None)),) if shared else (col.in_(tokens),)
+
+    def _uuid_scope(col, shared: bool = False):
+        if tokens is None:
+            return ()
+        return (or_(col == mine, col.is_(None)),) if shared else (col == mine,)
 
     async def _count(model, *filters):
         stmt = select(func.count()).select_from(model)
@@ -581,38 +624,51 @@ async def get_system_info(
             stmt = stmt.where(f)
         return (await session.execute(stmt)).scalar_one()
 
-    total_cases      = await _count(CaseInstanceModel)
-    total_case_types = await _count(CaseTypeModel)
-    total_users      = await _count(UserDirectoryModel)
-    active_users     = await _count(UserDirectoryModel, UserDirectoryModel.is_active == True)
+    total_cases      = await _count(CaseInstanceModel, *_uuid_scope(CaseInstanceModel.tenant_id))
+    total_case_types = await _count(CaseTypeModel, *_uuid_scope(CaseTypeModel.tenant_id, shared=True))
+    total_users      = await _count(UserDirectoryModel, *_str_scope(UserDirectoryModel.tenant_id))
+    active_users     = await _count(UserDirectoryModel, UserDirectoryModel.is_active == True,
+                                    *_str_scope(UserDirectoryModel.tenant_id))
 
     # Security events last 24h and last 30d
     now = datetime.now(timezone.utc)
-    events_24h  = await _count(SecurityEventModel,
-        SecurityEventModel.timestamp >= now - timedelta(hours=24))
-    events_30d  = await _count(SecurityEventModel,
-        SecurityEventModel.timestamp >= now - timedelta(days=30))
-    failed_30d  = await _count(SecurityEventModel,
+    ev = _str_scope(SecurityEventModel.tenant_id)
+
+    async def _events(*filters):
+        # One row can stand for many refused repeats (migration 231).
+        stmt = select(func.coalesce(func.sum(SecurityEventModel.repeat_count), 0))
+        for f in filters:
+            stmt = stmt.where(f)
+        return int((await session.execute(stmt)).scalar_one())
+
+    events_24h  = await _events(
+        SecurityEventModel.timestamp >= now - timedelta(hours=24), *ev)
+    events_30d  = await _events(
+        SecurityEventModel.timestamp >= now - timedelta(days=30), *ev)
+    failed_30d  = await _events(
         SecurityEventModel.timestamp >= now - timedelta(days=30),
-        SecurityEventModel.outcome.in_(["denied", "error", "failed"]),
+        SecurityEventModel.outcome.in_(["denied", "error", "failed"]), *ev,
     )
 
-    # Retention policies
-    active_policies = await _count(RetentionPolicyModel, RetentionPolicyModel.enabled == True)
-    total_policies  = await _count(RetentionPolicyModel)
+    # Retention policies (a tenant's own plus the platform defaults it inherits)
+    rp = _str_scope(RetentionPolicyModel.tenant_id, shared=True)
+    active_policies = await _count(RetentionPolicyModel, RetentionPolicyModel.enabled == True, *rp)
+    total_policies  = await _count(RetentionPolicyModel, *rp)
 
     # GDPR requests
-    pending_gdpr    = await _count(GDPRRequestModel, GDPRRequestModel.status == "pending")
-    total_gdpr      = await _count(GDPRRequestModel)
-    completed_gdpr  = await _count(GDPRRequestModel, GDPRRequestModel.status == "completed")
+    gd = _uuid_scope(GDPRRequestModel.tenant_id)
+    pending_gdpr    = await _count(GDPRRequestModel, GDPRRequestModel.status == "pending", *gd)
+    total_gdpr      = await _count(GDPRRequestModel, *gd)
+    completed_gdpr  = await _count(GDPRRequestModel, GDPRRequestModel.status == "completed", *gd)
 
-    # Tenants count
-    tenants_count = 0
-    try:
-        from velaris_shared.db.models import TenantModel
-        tenants_count = await _count(TenantModel, TenantModel.status == "active")
-    except Exception:
-        pass
+    # Tenants count — a tenant's admin is in one.
+    tenants_count = 1 if tokens is not None else 0
+    if tokens is None:
+        try:
+            from velaris_shared.db.models import TenantModel
+            tenants_count = await _count(TenantModel, TenantModel.status == "active")
+        except Exception:
+            pass
 
     return {
         "version": "0.20.0",
@@ -651,7 +707,7 @@ def _require_superadmin(user: AuthenticatedUser = Depends(get_current_user)) -> 
 async def superadmin_audit(
     limit: int = Query(200, le=1000),
     offset: int = Query(0),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     _sa: AuthenticatedUser = Depends(_require_superadmin),
 ):
     """Hidden audit log — shows __system__ actor events (superadmin actions).

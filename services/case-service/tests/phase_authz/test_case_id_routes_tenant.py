@@ -27,7 +27,74 @@ import uuid
 from fastapi.routing import APIRoute
 
 from case_service.main import app
-from tests.test_payments_authz import _headers, api, world  # noqa: F401
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from case_service.tenancy import identity as tenancy
+from velaris_shared.auth.jwt_handler import create_dev_token
+from velaris_shared.config import get_settings
+from velaris_shared.db.models import (
+    CaseInstanceModel, CaseTypeModel, PaymentDisbursementModel, PaymentRequestModel,
+    TenantModel, UserDirectoryModel,
+)
+from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
+
+
+# The fixtures this file used from test_payments_authz.py, which moved to
+# commerce-service with the payments routes (R5e step 7). The world still has a
+# payment and a disbursement: case-service's own case_id routes read them.
+def _headers(user_id: str, roles: list[str]) -> dict[str, str]:
+    s = get_settings()
+    token = create_dev_token(user_id=user_id, username=user_id, roles=roles,
+                             secret=s.auth_secret,
+                             private_key=s.auth_rsa_private_key or "")
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture
+async def api():
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def world():
+    """Tenant acme owns a case, a payment and a disbursement. Ann works for acme
+    as a case worker; vera is an acme viewer; mallory is an admin at evil."""
+    tenancy.clear_cache()
+    async with TestSessionFactory() as db:
+        acme = TenantModel(id=uuid.uuid4(), slug="acme", name="Acme")
+        evil = TenantModel(id=uuid.uuid4(), slug="evil", name="Evil")
+        db.add_all([acme, evil])
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id="ann", tenant_id="acme"))
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id="vera", tenant_id="acme"))
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id="mallory", tenant_id="evil"))
+        ct = CaseTypeModel(
+            id=uuid.uuid4(), name="Pay CT", version="1.0.0",
+            lifecycle_process_id=LIFECYCLE_PROCESS_ID,
+            definition_json={"stages": [{"id": "s1", "name": "Settle", "order": 1,
+                                         "steps": [{"id": "pay", "name": "Pay",
+                                                    "step_type": "payment_disbursement"}]}]})
+        db.add(ct)
+        await db.flush()
+        case = CaseInstanceModel(
+            id=uuid.uuid4(), case_number="ACME-P1", case_type_id=ct.id,
+            case_type_version="1.0.0", status="new", priority="medium",
+            tenant_id=acme.id, created_by="ann", data={})
+        db.add(case)
+        await db.flush()
+        pr = PaymentRequestModel(
+            id=uuid.uuid4(), tenant_id="acme", case_id=case.id, step_id="pay",
+            provider="stripe", amount_cents=1000, currency="gbp", status="succeeded",
+            description="Fee")
+        disb = PaymentDisbursementModel(
+            id=uuid.uuid4(), tenant_id="acme", case_id=case.id, step_id="pay",
+            amount_cents=500, currency="gbp", status="confirmed",
+            description="Refund", confirmed_by="ann")
+        db.add_all([pr, disb])
+        await db.commit()
+        return {"case": case, "payment": pr, "disbursement": disb}
 
 #: Answer 2xx to another tenant, and are right to.
 CROSS_TENANT_2XX_OK = {
@@ -45,7 +112,9 @@ GATE = re.compile(
     r"require_case|_authorized_case|_assert_case_access|_case_gate|_reach_case|"
     r"_stage_move_gate|same_tenant|case_visible_to|_scoped\(|tenant_id\s*==|"
     r"_get_run\(|_manifest_allows_cases|locked_by == user|"
-    r"_get_case_or_404\([^)]*user|_tenant_uuid_for_costing")
+    r"_get_case_or_404\([^)]*user|_tenant_uuid_for_costing|"
+    # Form drafts (2026-10-29): case_visible_to + require_step_submit, in one helper
+    r"_draft_target\(")
 
 #: Portal routes authenticate a CUSTOMER and match the case to them — a
 #: different model, pinned by the portal's own tests. The broker authenticates
@@ -96,8 +165,8 @@ _LISTS = {
     "/api/v1/invoices/records": "InvoiceRecordModel",
     "/api/v1/docintel/extractions": "DocExtractionJobModel",
     "/api/v1/docintel/storage": "DocStorageRouteModel",
-    "/api/v1/payments/requests": None,
-    "/api/v1/payments/disbursements": None,
+    # /api/v1/payments/{requests,disbursements}: commerce-service now —
+    # its copy of this guard covers them (R5e step 7).
 }
 
 

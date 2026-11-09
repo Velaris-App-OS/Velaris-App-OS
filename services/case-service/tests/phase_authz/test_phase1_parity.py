@@ -150,6 +150,8 @@ class TestBypasses:
                            # binds to. Writing a connector is not theirs.
                            "design.branches.read", "design.branches.write",
                            "integration.connectors.read", "devconn.rules.read",
+                           # 2026-10-29: reading reference tables a form binds to.
+                           "design.reference.read",
                            "marketplace.packages.publish", "marketplace.catalogue.read",
                            # 2026-09-04: F-11. Authoring a process fragment is
                            # developer work — it is a building block every
@@ -510,7 +512,7 @@ class TestRegistry:
         with a phase."""
         endpoint = [a for a in ACTIONS.values() if a.kind == "endpoint"]
         module = [a for a in ACTIONS.values() if a.kind == "module"]
-        assert len(endpoint) == 49 + 19 + 16 + 6 + 15 + 4 + 5 + 6 + 1 + 4 + 14 + 6 + 1 + 2 + 7 + 4 + 1 + 5 + 4 + 2 + 2 + 3 + 3 + 3 + 3 + 4 + 4 + 5 + 4 + 7 + 6 + 5 + 2 + 1 + 1 + 1 + 2 + 1 + 7 + 1 + 2 + 1 + 5 + 2 + 1 + 23 + 3, (
+        assert len(endpoint) == 49 + 19 + 16 + 6 + 15 + 4 + 5 + 6 + 1 + 4 + 14 + 6 + 1 + 2 + 7 + 4 + 1 + 5 + 4 + 2 + 2 + 3 + 3 + 3 + 3 + 4 + 4 + 5 + 4 + 7 + 6 + 5 + 2 + 1 + 1 + 1 + 2 + 1 + 7 + 1 + 2 + 1 + 5 + 2 + 1 + 23 + 3 + 1 + 2 + 1, (
             f"{len(endpoint)} endpoint actions — expected 49 (Phase 0) + 19 "
             f"(Phase 3.5) + 16 (Phase 4 step 2) + 6 (ungated sweep) + 15 "
             f"(Phase 5: the case layer's ACTION_ROLES table + the ReBAC bypass) "
@@ -697,7 +699,18 @@ class TestRegistry:
             f"logs. Each list follows the Studio screen that manages the thing) "
             f"+ 3 (legal.holds.* — 2026-10-11, Oct item 13: PLACING a hold protects "
             f"a record and RELEASING one is what lets it be destroyed again, so "
-            f"release is the narrower; READING a hold shows the dispute it names)")
+            f"release is the narrower; READING a hold shows the dispute it names) "
+            f"+ 1 (legal.holds.configure — 2026-10-14, mig 218: naming the access "
+            f"group whose member must approve a release decides who can free a "
+            f"record at all; changing a group already named also needs membership "
+            f"of it, so the person the rule binds cannot switch it off) "
+            f"+ 2 (design.reference.* — 2026-10-29, Form Builder v2 step 3: READING "
+            f"a reference table is design work a developer also needs; WRITING "
+            f"one changes the options and filled values of every form using it) "
+            f"+ 1 (design.embeds.manage — 2026-10-29, the embed field: APPROVING a site "
+            f"decides whose page runs inside every form of the tenant, and whether it "
+            f"reaches anonymous portal visitors; admin only, not the designer who "
+            f"places an embed)")
         assert len(module) == 18, (
             f"{len(module)} module actions — 12 from Phase 0, 6 from Phase 4")
 

@@ -43,7 +43,7 @@ class ScannedArtifact:
     name: str
     identifier: str                          # Native ID in source system
     compatibility: CompatibilityLevel
-    mapped_to: str | None = None              # HELIX equivalent
+    mapped_to: str | None = None              # Velaris equivalent
     effort_hours: float = 0.0
     issues: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

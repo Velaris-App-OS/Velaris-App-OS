@@ -38,7 +38,14 @@ router = APIRouter(tags=["releases"])
 # Populated by release_cron() after each cycle (hourly).
 # Feature checks call is_feature_enabled() — no DB round-trip at check time.
 
-_ENABLED_VERSIONS: dict[str, str | None] = {}  # feature_key -> version string or None
+# The flag cache, its check and its reload moved to the shared layer (step 7 —
+# commerce-service reads the same flags); the same objects, under the same names.
+from velaris_shared.core.feature_flags import (  # noqa: E402,F401
+    _ENABLED_VERSIONS,
+    is_feature_enabled,
+    refresh_version_cache as _refresh_version_cache,
+)
+from velaris_shared import generations as _generations  # noqa: E402  (bump on change)
 
 
 def version_gte(actual: str | None, required: str) -> bool:
@@ -51,27 +58,6 @@ def version_gte(actual: str | None, required: str) -> bool:
         return a >= r
     except (ValueError, AttributeError):
         return (actual or "") >= required
-
-
-def is_feature_enabled(feature_key: str) -> bool:
-    """Check if a feature is enabled.
-
-    Returns True if the DB has any non-null version for this feature key.
-    Version comparison is the DB's concern — the code only needs on/off.
-    Reads from the in-memory cache populated by release_cron() — no DB call.
-    Returns False during the first ~10 seconds after startup (before first cron cycle).
-    """
-    return _ENABLED_VERSIONS.get(feature_key) is not None
-
-
-async def _refresh_version_cache(session: AsyncSession) -> None:
-    """Reload _ENABLED_VERSIONS from DB. Called by the cron after each cycle."""
-    from velaris_shared.db.models import ScheduledReleaseModel
-    rows = (await session.execute(select(ScheduledReleaseModel))).scalars().all()
-    _ENABLED_VERSIONS.clear()
-    for r in rows:
-        _ENABLED_VERSIONS[r.feature_key] = r.enabled
-    log.info("Feature flag cache refreshed: %s", dict(_ENABLED_VERSIONS))
 
 
 # ── Model (inline to avoid circular import) ───────────────────────────────────
@@ -217,8 +203,15 @@ async def delete_release(
 ):
     _require_superadmin(current_user)
     r = await _get_or_404(session, release_id)
+    was_on = r.enabled is not None
     await session.delete(r)
+    if was_on:
+        # Deleting an enabled feature switches it off — here (it stayed on in
+        # this process's cache until the hourly cron before) and everywhere else.
+        await _generations.bump(session, "flags", reason=f"delete {r.feature_key}")
     await session.commit()
+    if was_on:
+        await _refresh_version_cache(session)
     return {"ok": True}
 
 
@@ -235,6 +228,7 @@ async def publish_release(
     r.released_at = _utcnow()
     r.updated_at  = _utcnow()
     session.add(r)
+    await _generations.bump(session, "flags", reason=f"publish {r.feature_key}")
     await session.commit()
     await _refresh_version_cache(session)
     log.info("Release manually published: %s @ %s (%s)", r.feature_key, r.enabled, r.title)
@@ -253,6 +247,7 @@ async def rollback_release(
     r.status     = "rolled_back"
     r.updated_at = _utcnow()
     session.add(r)
+    await _generations.bump(session, "flags", reason=f"rollback {r.feature_key}")
     await session.commit()
     await _refresh_version_cache(session)
     log.info("Release rolled back: %s (%s)", r.feature_key, r.title)
@@ -364,6 +359,7 @@ async def release_cron():
                     log.info("Auto-released feature: %s @ %s on %s", r.feature_key, r.enabled, today)
 
                 if due:
+                    await _generations.bump(session, "flags", reason="scheduled release")
                     await session.commit()
 
                 # Refresh in-memory cache every cycle so is_feature_enabled() stays current

@@ -83,7 +83,7 @@ release_exists() {
 
 # The services that hold a database connection pool. Used for connection-count
 # arithmetic and for stop/start ordering.
-WORKLOADS=(case-service engine worker analytics-service hxgraph-service hxmigrate-service)
+WORKLOADS=(case-service engine worker analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service jobs)
 
 deploy_name() { echo "${RELEASE}-helix-$1"; }
 
@@ -215,6 +215,12 @@ build_image_sets() {  # build_image_sets <registry> <tag>
     --set image.hxgraphService.tag="$tag"
     --set image.hxmigrateService.repository="$reg/hxmigrate-service"
     --set image.hxmigrateService.tag="$tag"
+    --set image.commerceService.repository="$reg/commerce-service"
+    --set image.commerceService.tag="$tag"
+    --set image.portalService.repository="$reg/portal-service"
+    --set image.portalService.tag="$tag"
+    --set image.userService.repository="$reg/user-service"
+    --set image.userService.tag="$tag"
   )
 }
 

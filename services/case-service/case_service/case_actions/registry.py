@@ -1,6 +1,6 @@
 """The closed vocabulary of case actions.
 
-Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 
 **Why this is a closed registry and the status set is not.** A status is a
 label: the customer's process gives it meaning, and there is no reason the

@@ -1,7 +1,7 @@
 /**
  * Authoring the status set and the action configuration (migration 198).
  *
- * Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+ * Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
  *
  * The split this screen makes visible: **statuses are yours, actions are ours.**
  * The status half is a full editor — names, labels, categories, terminality,

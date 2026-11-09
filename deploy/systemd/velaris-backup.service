@@ -1,0 +1,23 @@
+[Unit]
+Description=Velaris backup — one encrypted set, copied off the box, recorded in HxDR
+Documentation=file://__VELARIS_DIR__/docs/Future/Done/backup-restore-design.md
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+Environment=PATH=__VELARIS_HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Exit 3/4/5 (partial set, no off-box copy, failed restore test) mark the run
+# FAILED in systemd on purpose: `systemctl --failed` and any monitor watching
+# units see it. HxDR records the detail either way.
+ExecStart=__VELARIS_DIR__/backup-velaris.sh --quiet
+# A large install can take a while; a stuck run must not block the next day's.
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-backup

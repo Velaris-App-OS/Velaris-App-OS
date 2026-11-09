@@ -15,6 +15,32 @@
 set -euo pipefail
 
 VELARIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# R5c: a server linked as a STANDBY runs only its two replica databases
+# (standby-velaris.sh). Starting the platform here would start a second
+# PostgreSQL on the replicas' own data. standby.json exists only while linked.
+if [ -f "$VELARIS_DIR/.standby/standby.json" ]; then
+  echo "✗ This server is linked as a Velaris standby ($VELARIS_DIR/.standby/standby.json)." >&2
+  echo "  The platform must not run here while it is one. To use it on its own, unlink it" >&2
+  echo "  first: ./standby-velaris.sh unlink   (on the main server)" >&2
+  exit 1
+fi
+# An old main whose standby was promoted: running it again means two servers
+# taking writes. demoted.json stays until it is linked as the new main's standby.
+if [ -f "$VELARIS_DIR/.standby/demoted.json" ]; then
+  echo "✗ This server was replaced by its standby ($VELARIS_DIR/.standby/demoted.json)." >&2
+  echo "  Starting it would make two main servers. To bring it back as a standby:" >&2
+  echo "  ./standby-velaris.sh retire   then link it from the new main." >&2
+  exit 1
+fi
+# Step 12 (automatic failover): this main stopped itself after losing both the
+# witness and its standby — the standby may have taken over. Its agent lifts
+# this by itself once the witness confirms this server still holds the lease.
+if [ -f "$VELARIS_DIR/.standby/fenced.json" ]; then
+  echo "✗ This server stopped itself: it lost both the failover witness and its standby" >&2
+  echo "  ($VELARIS_DIR/.standby/fenced.json). The standby may have taken over." >&2
+  echo "  Check: ./standby-velaris.sh failover status   (it restarts by itself if it still holds the lease)" >&2
+  exit 1
+fi
 
 # Run by the timer, this script gets systemd's bare PATH and no terminal.
 #  - `uv` normally lives in ~/.local/bin, which that PATH lacks: the dependency
@@ -35,6 +61,20 @@ COMPOSE_FILE="$VELARIS_DIR/deploy/docker-compose/docker-compose.yml"
 DB_CONTAINER="docker-compose-velaris-db-1"
 DB_USER="velaris"
 DB_NAME="velaris"
+# Database calls go through deploy/external-services.sh (bundled container, or a
+# database on another server over TLS). A tree without that file — the release
+# this one replaces — gets the bundled calls it always made.
+if ! type velaris_psql >/dev/null 2>&1; then
+  velaris_is_external() { return 1; }
+  velaris_psql()        { docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"; }
+  velaris_pg_dump()     { docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" "$@"; }
+  velaris_pg_isready()  { docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q; }
+fi
+# Parts on other servers must be encrypted and authenticated: refuse before
+# anything is touched (nothing listed = nothing checked).
+if type velaris_external_check >/dev/null 2>&1 && ! velaris_external_check; then
+  exit 1
+fi
 BACKUP_DIR="$VELARIS_DIR/.backups"
 # Scratch files and error logs go to a directory only this user can write. A
 # fixed name under /tmp can be pre-created, or pointed somewhere else, by any
@@ -64,20 +104,34 @@ AUTO_UPDATE=$(_read_yaml "auto_update" "false")
 UPDATE_WINDOW=$(_read_yaml "update_window" "")
 MANIFEST_BRANCH=$(_read_yaml "manifest_branch" "main")
 
-# ── Backend guard ────────────────────────────────────────────────
-# This updater assumes the bundled Postgres topology: it starts the `velaris-db`
-# container and runs migrations via `docker exec … psql` against migrations/postgresql/.
-# MySQL/MariaDB installs are bring-your-own external DBs (different client, consolidated
-# baseline — no incremental upgrade track), so a Postgres-only run here would execute
-# psql against a container that doesn't exist. Fail fast with guidance rather than a
-# confusing mid-upgrade failure. Automated MySQL/MariaDB upgrades are a known limitation.
+# ── Backend ───────────────────────────────────────────────────────
+# PostgreSQL (bundled, or on another server) or the MySQL family (MySQL 8,
+# MariaDB 10.6+/11 — bring-your-own servers, one migrations/mysql track). Until
+# 2026-11-01 this updater refused the MySQL family outright ("apply schema
+# changes manually"): two of the three supported databases had no update path
+# at all (R3). The MySQL calls are deploy/external-services.sh's velaris_mysql
+# and velaris_mysqldump — the same client setup and start use.
 _DB_BACKEND=$(_read_yaml "database" "postgresql")
-if [ "$_DB_BACKEND" != "postgresql" ]; then
-  echo "ERROR: update-velaris.sh supports Postgres installs only." >&2
-  echo "  Detected backend '$_DB_BACKEND' (bring-your-own external DB)." >&2
-  echo "  Automated upgrades for MySQL/MariaDB are not yet supported — apply schema" >&2
-  echo "  changes to your database manually, then restart services. (Known limitation.)" >&2
-  exit 1
+case "$_DB_BACKEND" in
+  postgresql)    DB_FAMILY=postgresql ;;
+  mysql|mariadb) DB_FAMILY=mysql ;;
+  *) echo "ERROR: unsupported database '$_DB_BACKEND' in velaris.yaml (postgresql, mysql, mariadb)." >&2; exit 1 ;;
+esac
+if [ "$DB_FAMILY" = mysql ] && ! type velaris_mysql >/dev/null 2>&1; then
+  # The tree being updated predates deploy/external-services.sh's MySQL calls
+  # (3.1.2: its own updater refused MySQL, so its operator runs THIS file by
+  # hand once). The same calls, minus TLS — that release had none for MySQL.
+  _vx_yaml() { local v; v="$(_read_yaml "$1" "")"; printf '%s' "${v:-$2}"; }
+  _vx_mysql_run() {
+    local tool="$1"; shift; local -a t=(); [ "$tool" = mysql ] && t=(--connect-timeout=10)
+    MYSQL_PWD="$(grep -E '^VELARIS_DB_PASSWORD=' "$VELARIS_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"')" \
+      docker run --rm -i --network host -e MYSQL_PWD \
+      mysql:8.4.11 "$tool" "${t[@]}" -h "$(_vx_yaml db_host 127.0.0.1)" -P "$(_vx_yaml db_port 3306)" \
+      -u "$(_vx_yaml db_user velaris)" "$@"
+  }
+  velaris_mysql()     { _vx_mysql_run mysql "$(_vx_yaml db_name velaris)" "$@"; }
+  velaris_mysqldump() { _vx_mysql_run mysqldump --single-transaction --routines --triggers --no-tablespaces \
+                          --column-statistics=0 "$(_vx_yaml db_name velaris)"; }
 fi
 
 # PUO Phase 1: UI-approved update request written by Studio (platform_updates.py)
@@ -242,11 +296,17 @@ _require_valid_version() {
 
 # Migration files this database has not recorded. 0 when the database cannot
 # be asked — an unreachable database is not evidence of anything pending.
+_applied_migrations() {
+  if [ "$DB_FAMILY" = mysql ]; then
+    velaris_mysql -N -B -e "SELECT filename FROM schema_migrations;" </dev/null 2>/dev/null
+  else
+    velaris_psql -tAq -c "SELECT filename FROM schema_migrations;" </dev/null 2>/dev/null
+  fi
+}
 _pending_migrations() {
   local applied f n=0
-  applied=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-              -c "SELECT filename FROM schema_migrations;" 2>/dev/null) || { echo 0; return 0; }
-  for f in "$VELARIS_DIR"/migrations/postgresql/*.sql; do
+  applied=$(_applied_migrations) || { echo 0; return 0; }
+  for f in "$VELARIS_DIR"/migrations/"$DB_FAMILY"/*.sql; do
     [ -f "$f" ] || continue
     grep -qxF "$(basename "$f")" <<<"$applied" || n=$((n + 1))
   done
@@ -301,13 +361,45 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+      # Act on an approval when it is made, not up to an hour later: the Studio
+      # button writes .update-request, and this starts the same service then.
+      # PathChanged, not PathExists — a request left waiting for its window must
+      # not start the service again and again; the hourly timer picks that up.
+      sudo tee /etc/systemd/system/velaris-update.path > /dev/null <<EOF
+[Unit]
+Description=Velaris update — act on an approval made in Studio
+
+[Path]
+PathChanged=$UPDATE_REQUEST_FILE
+Unit=velaris-update.service
+
+[Install]
+WantedBy=paths.target
+EOF
       sudo systemctl daemon-reload
       sudo systemctl enable --now velaris-update.timer
+      sudo systemctl enable --now velaris-update.path \
+        || yellow "  ⚠ velaris-update.path not started — an approval is applied at the hourly check instead"
       green "✓ velaris-update.timer installed and started (hourly check; window: ${UPDATE_WINDOW:-anytime})"
+      echo "  An update approved in Studio starts within seconds; one waiting for its window starts at the hourly check."
       exit 0
       ;;
   esac
 done
+
+# One updater at a time. With the agent installed, an hourly check or a Studio
+# approval can arrive while somebody runs this by hand; two runs pulling code and
+# applying migrations side by side is not a state anyone can reason about.
+# The lock is on the install directory itself (no lock file to leave behind or
+# to ignore in git) and held on a file descriptor, so it is released when this
+# process ends, however it ends. Anything this script starts that outlives it
+# is started with `9<&-`, or it would keep the lock for as long as it runs.
+if command -v flock >/dev/null 2>&1 && exec 9<"$VELARIS_DIR"; then
+  if ! flock -n 9; then
+    echo "Another update-velaris.sh is already running on this install — nothing to do."
+    exit 0
+  fi
+fi
 
 # --auto honours the operator's settings: opt-in flag + maintenance window.
 # A pending UI-approved request (.update-request) overrides the auto_update
@@ -494,6 +586,29 @@ else
 
   # Never downgrade automatically — a manifest behind the installed version
   # means this env ran ahead (e.g. dev box switched to prod channel).
+  #
+  # But "ahead" is not the same as "finished". An update stopped after its code
+  # pull leaves velaris.yaml on the new version with migrations unapplied; the
+  # check above catches that only when the channel pins exactly that version.
+  # Pinned anything older and this branch said "not downgrading", exit 0, and
+  # left new code on the old schema for the next restart (R3 2026-11-01). Finish
+  # the installed version first — the same rules as the branch above.
+  if [[ "$RESUMING" == false && "$LATEST_VERSION" != "$CURRENT_VERSION" ]] \
+     && [[ "$(printf '%s\n%s\n' "$LATEST_VERSION" "$CURRENT_VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ]]; then
+    _PENDING=$(_pending_migrations)
+    if [[ -f "$UPDATE_MARKER_FILE" || "$_PENDING" -gt 0 ]]; then
+      if [[ "$AUTO_MODE" == true && -z "$REQUEST_MODE" ]]; then
+        yellow "  ⚠ v$CURRENT_VERSION is checked out but its update did not finish ($_PENDING migration(s) pending)."
+        yellow "    Run ./update-velaris.sh by hand, or approve the update in Studio, to finish it."
+        exit 0
+      fi
+      RESUMING=true
+      RESUME_FROM=$(head -1 "$UPDATE_MARKER_FILE" 2>/dev/null | tr -cd '0-9A-Za-z.-' || true)
+      yellow "  ⚠ v$CURRENT_VERSION is checked out but its update did not finish ($_PENDING migration(s) pending) — finishing it"
+      yellow "    (channel '$UPDATE_CHANNEL' pins v$LATEST_VERSION; that is not a reason to leave this one half-done)"
+      LATEST_VERSION="$CURRENT_VERSION"
+    fi
+  fi
   if [[ "$RESUMING" == false ]] && [[ "$(printf '%s\n%s\n' "$LATEST_VERSION" "$CURRENT_VERSION" | sort -V | tail -1)" == "$CURRENT_VERSION" ]]; then
     yellow "  ⚠ Channel pins v$LATEST_VERSION but v$CURRENT_VERSION is installed — not downgrading"
     _write_status "skipped" "channel v$LATEST_VERSION behind installed v$CURRENT_VERSION"
@@ -535,13 +650,20 @@ fi
 _IN_UPDATE=true   # from here a stop is reported by _on_exit
 step "Step 3/7 — Backing up database..."
 mkdir -p "$BACKUP_DIR"
+# Owner-only: this dump is every tenant's data in plain SQL (2026-10-16 — it was
+# written with the default umask, i.e. group/world-readable).
+chmod 700 "$BACKUP_DIR" 2>/dev/null || true
 BACKUP_FILE="$BACKUP_DIR/velaris-v${CURRENT_VERSION}-$(date +%Y%m%d-%H%M%S).sql"
+( umask 077; : > "$BACKUP_FILE" )
 
-if docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" > "$BACKUP_FILE" 2>/dev/null; then
+if [ "$DB_FAMILY" = mysql ]; then _db_dump() { velaris_mysqldump; }; else _db_dump() { velaris_pg_dump; }; fi
+if _db_dump > "$BACKUP_FILE" 2>"$VELARIS_SCRATCH/backup-err.log" && [ -s "$BACKUP_FILE" ]; then
   green "  ✓ Backup saved: $BACKUP_FILE"
 else
   red "  ✗ DB backup failed — aborting to protect your data"
-  red "    Check: docker logs $DB_CONTAINER"
+  tail -3 "$VELARIS_SCRATCH/backup-err.log" 2>/dev/null | sed 's/^/    /'
+  if [ "$DB_FAMILY" = mysql ]; then red "    Check the ${_DB_BACKEND} server named in velaris.yaml (db_host) and VELARIS_DB_PASSWORD"
+  else red "    Check: docker logs $DB_CONTAINER"; fi
   exit 1
 fi
 
@@ -613,8 +735,134 @@ elif [[ "$UPDATE_SOURCE" == "server" ]]; then
   # Own server: download and extract tarball
   TARBALL_URL="${UPDATE_SERVER_URL%/latest}/download/v${LATEST_VERSION}.tar.gz"
   curl -sf --max-time 120 -o "$VELARIS_SCRATCH/velaris-update.tar.gz" "$TARBALL_URL"
-  tar -xzf "$VELARIS_SCRATCH/velaris-update.tar.gz" -C "$VELARIS_DIR" --strip-components=1
+  # velaris.yaml holds the operator's own settings (update source, server, channel,
+  # schedule, database) beside the shipped ones; the tarball's copy would reset
+  # them all to the defaults (R3 2026-11-01: an install on its own update server
+  # was switched back to GitHub). Keep it aside and carry its values over below.
+  _YAML_KEPT="$VELARIS_SCRATCH/velaris.yaml.before-update"
+  cp -p "$VELARIS_DIR/velaris.yaml" "$_YAML_KEPT" 2>/dev/null || _YAML_KEPT=""
+  _NEW_FILES="$VELARIS_SCRATCH/velaris-release-files.new"
+  tar -tzf "$VELARIS_SCRATCH/velaris-update.tar.gz" | cut -d/ -f2- | grep -v '^$' | grep -v '/$' | LC_ALL=C sort -u > "$_NEW_FILES"
+  # The installed release's own list — read BEFORE the extract, which brings
+  # the new release's list in under the same name.
+  _OLD_FILES="$VELARIS_SCRATCH/velaris-release-files.old"
+  cp "$VELARIS_DIR/.release-files" "$_OLD_FILES" 2>/dev/null || : > "$_OLD_FILES"
+  # Run as root, tar gives every file the PACKAGER's user id and rewrites each
+  # existing folder's owner and mode from the archive (R6 2026-11-06: a 3.1.17
+  # update made deploy/docker-compose/pooler-socket another user's 0700 folder,
+  # the services lost the database pooler, and the whole platform stopped).
+  # So: existing folders keep their owner and mode (--no-overwrite-dir), nothing
+  # takes an owner from the archive (--no-same-owner), and what this release
+  # shipped belongs to the install's owner (the owner of the install folder) —
+  # the user a git install's files already belong to.
+  tar -xzf "$VELARIS_SCRATCH/velaris-update.tar.gz" -C "$VELARIS_DIR" --strip-components=1 \
+      --no-same-owner --no-overwrite-dir
   rm -f "$VELARIS_SCRATCH/velaris-update.tar.gz"
+  _VD_OWNER="$(stat -c '%u:%g' "$VELARIS_DIR" 2>/dev/null || echo 0:0)"
+  if [[ "$(id -u)" == 0 && "${_VD_OWNER%%:*}" != 0 ]]; then
+    ( cd "$VELARIS_DIR" || exit 0
+      _VD_REAL="$(pwd -P)"
+      # Root changing owners inside a folder the install owner can write: a
+      # folder on the way swapped for a symlink would carry the chown outside
+      # the install (/etc/...). Only paths whose real parent is inside the
+      # install are touched, and never through a link (chown -h), as the
+      # removal of old files below.
+      _inside() { local _p; _p="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+                  case "$_p" in "$_VD_REAL"|"$_VD_REAL"/*) return 0 ;; *) return 1 ;; esac; }
+      # The shipped files (never a path that leaves the install) ...
+      grep -v -e '^/' -e '\.\.' "$_NEW_FILES" | while IFS= read -r _f; do
+        if [[ -e "$_f" || -L "$_f" ]] && _inside "$(dirname "$_f")"; then printf '%s\0' "$_f"; fi
+      done | xargs -0 -r chown -h "$_VD_OWNER"
+      # ... and the folders this extract created (root's); an existing folder
+      # is left exactly as it was.
+      grep -v -e '^/' -e '\.\.' "$_NEW_FILES" | sed -n 's|/[^/]*$||p' \
+        | awk -F/ '{p=""; for (i=1; i<=NF; i++) { p = (i>1 ? p "/" : "") $i; print p }}' \
+        | LC_ALL=C sort -u | while IFS= read -r _d; do
+            if [[ -d "$_d" && ! -L "$_d" && "$(stat -c %u "$_d")" == 0 ]] && _inside "$_d"; then printf '%s\0' "$_d"; fi
+          done | xargs -0 -r chown -h "$_VD_OWNER"
+    ) || yellow "  ⚠ could not give the new files to the install owner ($_VD_OWNER)"
+  fi
+  # A tarball only adds: files the installed release shipped and this one does
+  # not were left behind — on a rollback they broke `uv sync` (a 3.1.3-only
+  # service in 3.1.2's workspace) and the Studio build. Remove exactly those:
+  # the previous release's own file list minus this one's. Nothing an install
+  # generated or an operator added is in the previous list, so nothing of theirs
+  # can go. No list yet (the first tarball update) = nothing removed, as before.
+  if [[ -s "$_OLD_FILES" ]]; then
+    _gone=0
+    _VD_REAL="$(cd "$VELARIS_DIR" && pwd -P)"
+    while IFS= read -r _f; do
+      case "$_f" in ""|/*|*..*) continue ;; esac
+      # Never what an install generates or holds, whatever a list says — the
+      # same set the release twin and packages exclude (velaris-mirror-exclude).
+      case "$_f" in
+        .env|.env.*|velaris-install-report.md|.release-files|.update-*|\
+        .backups/*|.standby/*|data/*|logs/*|deploy/tls/certs/*|deploy/openbao/.bao-init.json|\
+        deploy/openbao/enabled|deploy/openbao/agent/role_id|deploy/openbao/agent/secret_id|\
+        deploy/openbao/agent/out/*|services/case-service/data/*) continue ;;
+      esac
+      # And never outside the install: a directory on the way that is a
+      # symlink elsewhere would carry the removal with it.
+      _parent="$(cd "$VELARIS_DIR/$(dirname "$_f")" 2>/dev/null && pwd -P)" || continue
+      case "$_parent" in "$_VD_REAL"|"$_VD_REAL"/*) ;; *) continue ;; esac
+      if [[ -f "$VELARIS_DIR/$_f" || -L "$VELARIS_DIR/$_f" ]]; then
+        rm -f "$VELARIS_DIR/$_f" && _gone=$((_gone + 1))
+      fi
+    done < <(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$_OLD_FILES") "$_NEW_FILES")
+    # Directories the removal emptied, and their emptied parents; a directory
+    # with anything left in it stays.
+    LC_ALL=C comm -23 <(LC_ALL=C sort -u "$_OLD_FILES") "$_NEW_FILES" | sed -n 's|/[^/]*$||p' | LC_ALL=C sort -ru \
+      | (cd "$VELARIS_DIR" && xargs -r -d '\n' rmdir -p --ignore-fail-on-non-empty 2>/dev/null) || true
+    if [[ "$_gone" -gt 0 ]]; then
+      green "  ✓ removed $_gone file(s) the previous release shipped and v${LATEST_VERSION} does not"
+    fi
+  fi
+  cp "$_NEW_FILES" "$VELARIS_DIR/.release-files"
+  # Carry the operator's own settings over, and only those — the keys setup and
+  # the operator write (instance name, database + connection components, the
+  # whole updates block). Every other key keeps the release's value: a shipped
+  # default the release changed on purpose (events: redpanda → kafka) must not
+  # be pinned to the old one. Comments stay. Inline, not a script in the tree:
+  # on a rollback the tree is the OLD release, which may not have one.
+  if [[ -n "$_YAML_KEPT" && -f "$_YAML_KEPT" ]]; then
+    python3 - "$_YAML_KEPT" "$VELARIS_DIR/velaris.yaml" <<'PY' \
+      || { yellow "  ⚠ could not carry velaris.yaml settings over — restored the previous file"; cp -p "$_YAML_KEPT" "$VELARIS_DIR/velaris.yaml"; }
+import re, sys
+LINE = re.compile(r'^(\s*)([A-Za-z0-9_.-]+):(\s*)(.*?)(\s+#.*)?$')
+OWN = ("velaris.instance", "velaris.database")
+OWN_PREFIX = ("velaris.updates.",)
+DB_PARTS = ("db_host", "db_port", "db_name", "db_user")      # written by setup under `database:`
+def walk(lines):
+    out, stack = [], []
+    for ln in lines:
+        m = LINE.match(ln.rstrip("\n"))
+        if not m or ln.lstrip().startswith(("#", "- ")):
+            out.append(None); continue
+        ind = len(m.group(1))
+        while stack and stack[-1][0] >= ind:
+            stack.pop()
+        stack.append((ind, m.group(2)))
+        out.append((".".join(k for _, k in stack), m))
+    return out
+own = lambda path: path in OWN or path.startswith(OWN_PREFIX)
+old = open(sys.argv[1]).read().splitlines(True)
+new = open(sys.argv[2]).read().splitlines(True)
+old_w = walk(old)
+keep = {p[0]: p[1].group(4) for p in old_w if p and p[1].group(4) != ""}
+db_lines = [ln if ln.endswith("\n") else ln + "\n" for ln, p in zip(old, old_w)
+            if p and p[0].rsplit(".", 1)[-1] in DB_PARTS]
+new_has_db = any(p and p[0].rsplit(".", 1)[-1] in DB_PARTS for p in walk(new))
+res = []
+for ln, p in zip(new, walk(new)):
+    if p and p[1].group(4) != "" and own(p[0]) and p[0] in keep:
+        m = p[1]
+        ln = f"{m.group(1)}{m.group(2)}:{m.group(3) or ' '}{keep[p[0]]}{m.group(5) or ''}\n"
+    res.append(ln)
+    if p and p[0] == "velaris.database" and db_lines and not new_has_db:
+        res.extend(db_lines)
+open(sys.argv[2], "w").write("".join(res))
+PY
+  fi
 fi
 
 # Restore the host's live secrets (overwrites whatever the update brought),
@@ -640,6 +888,12 @@ green "  ✓ Code updated to v$LATEST_VERSION"
 # New releases can add Python/npm packages (e.g. livekit-client in 2.1.0);
 # stale .venv/node_modules break services and Vite until reinstalled.
 step "Step 4b — Refreshing dependencies..."
+# Re-source the profile rules from the tree Step 4 just pulled: the copy loaded
+# at the top of this script is the PREVIOUS release's, so it neither knows a new
+# profile (e.g. `events`) nor defines velaris_retire_redpanda (Step 5b), nor
+# sets VELARIS_EVENT_BROKER_ACTIVE (below).
+# shellcheck source=/dev/null
+[ -f "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh" ] && . "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh"
 if command -v uv >/dev/null 2>&1; then
   # Optional ML extras are NOT part of the default install (a base box stays lean,
   # no model weights). But `uv sync` is exact by default — it prunes anything not
@@ -648,6 +902,15 @@ if command -v uv >/dev/null 2>&1; then
   _EXTRAS=""
   uv run python -c "import faster_whisper" >/dev/null 2>&1 && _EXTRAS="$_EXTRAS --extra intelligence"
   uv run python -c "import av" >/dev/null 2>&1 && _EXTRAS="$_EXTRAS --extra kyc"
+  # The MySQL/MariaDB driver (aiomysql + pymysql) is an extra: without it a
+  # MySQL/MariaDB install cannot reach its own database, and `uv sync` (exact)
+  # would remove one installed by hand. Fixed 2026-10-16 — it was never installed.
+  case "${_DB_BACKEND:-postgresql}" in mysql|mariadb) _EXTRAS="$_EXTRAS --extra mysql" ;; esac
+  # The event bus client: needed when the bus is on, kept when already present.
+  if [ "${VELARIS_EVENT_BROKER_ACTIVE:-false}" = true ] \
+     || uv run python -c "import aiokafka" >/dev/null 2>&1; then
+    _EXTRAS="$_EXTRAS --extra events"
+  fi
   uv sync --all-packages $_EXTRAS 2>&1 | tail -3
   green "  ✓ Python dependencies synced"
 else
@@ -676,7 +939,17 @@ step "Step 5/7 — Pulling new Docker images..."
 # script here without a word, and the install was left with the new code checked
 # out and none of its migrations applied. An image this host already holds keeps
 # working; one it truly lacks fails loudly at `up`, where it is named.
-if docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" pull; then
+#
+# The bundled MinIO's two services are left out of the pull. Their images are no
+# longer on Docker Hub, and one failed image makes Compose interrupt the whole
+# pull, so on an install that runs them no other image was ever refreshed. The
+# host already holds them (that is what switched the profile on); there is
+# nothing newer to fetch. If the service list cannot be read, pull everything,
+# as before.
+_pull_services=()
+while IFS= read -r _svc; do if [ -n "$_svc" ]; then _pull_services+=("$_svc"); fi; done < <(
+  docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" config --services 2>/dev/null | grep -vxE 'minio|minio-init' || true)
+if docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" pull ${_pull_services[@]+"${_pull_services[@]}"}; then
   green "  ✓ Images updated"
 else
   yellow "  ⚠ Some images could not be pulled — continuing with the ones already on this host"
@@ -704,6 +977,13 @@ else
   green "  ✓ Build cache trimmed"
 fi
 
+# Redpanda was replaced by Apache Kafka (November 2026): remove a leftover
+# broker container and its image; its data volume is kept (compose-profiles.sh,
+# re-sourced at Step 5).
+type velaris_retire_redpanda >/dev/null 2>&1 && velaris_retire_redpanda
+# A pooler turned off since the last start (compose-profiles.sh).
+type velaris_retire_pooler >/dev/null 2>&1 && velaris_retire_pooler
+
 # Dangling IMAGES only — layers no tag and no container references. Volumes are
 # deliberately NOT pruned: an unreferenced volume here can still be real data.
 docker image prune -f >/dev/null 2>&1 || true
@@ -715,15 +995,57 @@ if [[ "$REQUEST_ACTION" == "rollback" ]]; then
 else
 step "Step 6/7 — Running database migrations..."
 
-# Ensure DB is up before migrating (--env-file required — see Step 5)
-docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d velaris-db
+if [ "$DB_FAMILY" = mysql ]; then
+# MySQL / MariaDB: a server the operator runs — never started here, only waited
+# for. Same DDL and loop as setup-velaris.sh's MySQL path, one track for both.
 for i in $(seq 1 20); do
-  docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q 2>/dev/null && break
+  velaris_mysql -e "SELECT 1" </dev/null >/dev/null 2>&1 && break
+  [ "$i" -eq 20 ] && { red "  ✗ ${_DB_BACKEND} not reachable at $(_vx_yaml db_host 127.0.0.1):$(_vx_yaml db_port 3306)"; exit 1; }
+  sleep 1
+done
+velaris_mysql -e "CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename   VARCHAR(255) PRIMARY KEY,
+  applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);" </dev/null
+APPLIED=0; SKIPPED=0
+_APPLIED_MIGRATIONS="$(_applied_migrations || true)"
+for migration_file in $(find "$VELARIS_DIR/migrations/mysql" -maxdepth 1 -name "*.sql" | sort); do
+  filename="$(basename "$migration_file")"
+  if grep -qxF "$filename" <<<"$_APPLIED_MIGRATIONS"; then
+    SKIPPED=$((SKIPPED + 1)); continue
+  fi
+  echo -n "    apply $filename ... "
+  # The mysql client stops at the first failing statement and exits non-zero,
+  # so a failure is never recorded as applied.
+  if velaris_mysql < "$migration_file" 2>"$VELARIS_SCRATCH/migration_err.log"; then
+    velaris_mysql -e "INSERT IGNORE INTO schema_migrations(filename) VALUES('$filename');" </dev/null
+    green "✓"; APPLIED=$((APPLIED + 1))
+  else
+    red "FAILED"
+    grep -v "Using a password" "$VELARIS_SCRATCH/migration_err.log"
+    red "  Migration failed — rolling back to v$CURRENT_VERSION"
+    red "  Restore backup with: mysql -h <db_host> -u <db_user> -p <db_name> < $BACKUP_FILE"
+    _write_status "failed" "migration $filename failed during update to v$LATEST_VERSION"
+    rm -f "$UPDATE_REQUEST_FILE"
+    exit 1
+  fi
+done
+else
+
+# Ensure DB is up before migrating (--env-file required — see Step 5). A
+# database on another server is not ours to start; only waited for.
+velaris_is_external database \
+  || docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d velaris-db
+for i in $(seq 1 20); do
+  velaris_pg_isready 2>/dev/null && break
   [ "$i" -eq 20 ] && { red "  ✗ PostgreSQL not ready"; exit 1; }
   sleep 1
 done
+# Query statistics: an update never turns them on (VELARIS_DB_QUERY_STATS unset =
+# untouched); it applies what the operator set, before the services reconnect.
+"$VELARIS_DIR/scripts/db-query-stats.sh" || yellow "  ⚠ query statistics not applied — ./scripts/db-query-stats.sh"
 
-docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q <<'SQL'
+velaris_psql -q <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename   TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -732,10 +1054,12 @@ SQL
 
 APPLIED=0; SKIPPED=0
 
+# What is already applied, read ONCE: one query, not one per file — against a
+# database on another server each query is a client container (~1 s).
+_APPLIED_MIGRATIONS="$(velaris_psql -tAq -c "SELECT filename FROM schema_migrations;" </dev/null 2>/dev/null || true)"
 for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -name "*.sql" | sort); do
   filename="$(basename "$migration_file")"
-  EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-    -c "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")
+  EXISTS=""; grep -qxF "$filename" <<<"$_APPLIED_MIGRATIONS" && EXISTS=1
   if [[ "$EXISTS" == "1" ]]; then
     SKIPPED=$((SKIPPED + 1)); continue
   fi
@@ -746,10 +1070,10 @@ for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -n
   # in schema_migrations as applied: a half-applied migration that never runs
   # again, on an EXISTING install, unattended. `setup` learned this from
   # migration 080; the update path never had the fix.
-  if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+  if velaris_psql -q \
       -v ON_ERROR_STOP=1 < "$migration_file" 2>"$VELARIS_SCRATCH/migration_err.log"; then
-    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
-      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;"
+    velaris_psql -q \
+      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;" </dev/null
     green "✓"; APPLIED=$((APPLIED + 1))
   else
     red "FAILED"
@@ -761,6 +1085,7 @@ for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -n
     exit 1
   fi
 done
+fi
 green "  ✓ Migrations: $APPLIED applied, $SKIPPED already up-to-date"
 fi
 
@@ -775,6 +1100,7 @@ step "Step 6b — Syncing .env with new variables..."
 ENV_FILE="$VELARIS_DIR/.env"
 EXAMPLE_FILE="$VELARIS_DIR/.env.example"
 ENV_ADDED=0
+ENV_ADDED_KEYS=" "
 
 if [[ -f "$ENV_FILE" && -f "$EXAMPLE_FILE" ]]; then
   while IFS= read -r line; do
@@ -796,11 +1122,17 @@ if [[ -f "$ENV_FILE" && -f "$EXAMPLE_FILE" ]]; then
     echo "$line" >> "$ENV_FILE"
     echo "    + $key"
     ENV_ADDED=$((ENV_ADDED + 1))
+    ENV_ADDED_KEYS="${ENV_ADDED_KEYS}${key} "
   done < "$EXAMPLE_FILE"
 
-  # Newly appended secrets ship empty — generate real values for known ones
+  # Newly appended secrets ship empty — generate real values for them. ONLY for
+  # a key this run appended: an empty value the install already had is the
+  # operator's (or an older setup's) setting, and filling it in is turning
+  # something on. R3 2026-11-01: an install with no storage master key had
+  # encryption at rest switched on by an unattended update, the key only in .env.
   _gen_if_empty() {
     local key="$1" val="$2"
+    [[ "$ENV_ADDED_KEYS" == *" ${key} "* ]] || return 0
     if grep -q "^${key}=$" "$ENV_FILE"; then
       sed -i "s|^${key}=$|${key}=${val}|" "$ENV_FILE"
       echo "    generated ${key}"
@@ -821,6 +1153,24 @@ if [[ -f "$ENV_FILE" && -f "$EXAMPLE_FILE" ]]; then
   # NEW installs, where there is nothing to lock out.
   #
   # This is a decision, not an oversight — do not "fix" it by adding a line here.
+
+  # Backup key: an install from before November 2026 has none. Generated here
+  # (user's decision, 2026-10-16 — every install gets one; pre-customer
+  # exception in CLAUDE.md). The private key goes ONLY into
+  # velaris-install-report.md (0600) — see that file. Never fatal.
+  if [[ -x "$VELARIS_DIR/.venv/bin/python" && -f "$VELARIS_DIR/scripts/backup/velaris_backup.py" ]]; then
+    "$VELARIS_DIR/.venv/bin/python" "$VELARIS_DIR/scripts/backup/velaris_backup.py" ensure-key \
+      || yellow "  ⚠ Backup key not set — run ./backup-velaris.sh --ensure-key"
+  fi
+
+  # The internal service secret (R5e step 7): an install from before the commerce
+  # split has none, and without it case-service's /internal/v1 routes refuse, so
+  # checkout could not open an order's case. Generated here — user's decision,
+  # 2026-10-19, pre-customer exception in CLAUDE.md — into .env and, where OpenBao
+  # holds the secrets, into OpenBao (compose-profiles.sh). Never printed.
+  type velaris_ensure_internal_secret >/dev/null 2>&1 && velaris_ensure_internal_secret
+  # The gateway's optional settings, as include files (never template variables).
+  type velaris_gateway_options >/dev/null 2>&1 && velaris_gateway_options
 
   if [[ "$ENV_ADDED" -gt 0 ]]; then
     green "  ✓ Added $ENV_ADDED new variable(s) to .env — review them after the update"
@@ -852,17 +1202,39 @@ if systemctl is-active --quiet velaris-case-service 2>/dev/null \
   [[ "$AUTO_MODE" == true ]] && _refresh_args+=(--non-interactive)
   _refresh_rc=0
   DB_CONTAINER="$DB_CONTAINER" DB_USER="$DB_USER" DB_NAME="$DB_NAME" \
-    bash "$VELARIS_DIR/deploy/systemd/refresh-after-update.sh" "${_refresh_args[@]}" || _refresh_rc=$?
+    bash "$VELARIS_DIR/deploy/systemd/refresh-after-update.sh" "${_refresh_args[@]}" 9<&- || _refresh_rc=$?
   [[ "$_refresh_rc" -ne 0 ]] && RESTART_PENDING=true
 else
   # Restart via the standard startup script (handles all service health checks)
-  bash "$VELARIS_DIR/start-velaris.sh"
+  bash "$VELARIS_DIR/start-velaris.sh" 9<&-
+fi
+
+# The proxies read their config from files bind-mounted out of the tree. An
+# update replaces those files (a new inode), and `compose up -d` sees no change
+# in the service definition, so the running container keeps the OLD file. Found
+# 2026-11-01 rolling back 3.1.3 → 3.1.2: the gateway kept 3.1.3's routes, sent
+# sign-in to a user-service 3.1.2 does not run, and every login was a 502 while
+# /health stayed green. Recreate them from the release now on disk — forward and
+# back alike. Only the services this release's compose file defines.
+_proxy_svcs=""
+for _p in gateway broker-gw egress-gw; do
+  docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" config --services 2>/dev/null \
+    | grep -qx "$_p" && _proxy_svcs="$_proxy_svcs $_p"
+done
+if [[ -n "$_proxy_svcs" ]]; then
+  # shellcheck disable=SC2086
+  if docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" \
+       up -d --no-deps --force-recreate $_proxy_svcs >/dev/null 2>&1; then
+    green "  ✓ proxies recreated on this release's config:$_proxy_svcs"
+  else
+    yellow "  ⚠ could not recreate:$_proxy_svcs — run: docker compose -f $COMPOSE_FILE --env-file .env up -d --force-recreate$_proxy_svcs"
+  fi
 fi
 
 # ── Health gate: never report success on a broken env ─────────────
 # Every API service, not just the gateway. Since 13c-e the platform is four
 # processes: the gateway answers /health from case-service, so a dead
-# analytics-, hxgraph- or hxmigrate-service would have left this gate green
+# analytics-, hxgraph-, hxmigrate- or commerce-service would have left this gate green
 # while a quarter of the API returned 502.
 # Probe the way the services actually came up. With internal TLS on they demand
 # the gateway's client certificate at the handshake, so a plain http probe would
@@ -872,19 +1244,61 @@ _velaris_probe() { curl -sf --max-time 3 "http://localhost:$1/health" >/dev/null
 # shellcheck source=/dev/null
 [ -f "$VELARIS_DIR/deploy/tls/uvicorn-tls-args.sh" ] && . "$VELARIS_DIR/deploy/tls/uvicorn-tls-args.sh"
 
+# The worker service (R5e step 9) runs where its unit is installed, or where
+# start-velaris.sh runs the platform; on a systemd box without its unit the jobs
+# still run in case-service, so there is no worker to check.
+_WORKER_PROBE=""
+if [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-worker-service.service" ] \
+   || ! systemctl is-active --quiet velaris-case-service 2>/dev/null; then
+  _WORKER_PROBE="${VELARIS_WORKER_PORT:-8208}:worker-service"
+fi
+# Probe the services THIS release runs — the ones its gateway routes to. A
+# rollback to a release without commerce-, portal- or user-service would
+# otherwise fail on ports nothing is meant to answer. Its code being in the tree
+# proves nothing: 3.1.2 shipped user-service code it neither ran nor routed.
+_GW_TEMPLATE="$VELARIS_DIR/deploy/docker-compose/gateway/nginx.conf.template"
+_routed() { grep -qE "^[[:space:]]*upstream[[:space:]]+$1[[:space:]]" "$_GW_TEMPLATE" 2>/dev/null; }
+_SVC_PROBES="${VELARIS_CASE_PORT:-8201}:case-service"
+_routed analytics_service && _SVC_PROBES="$_SVC_PROBES ${VELARIS_ANALYTICS_PORT:-8202}:analytics-service"
+_routed hxgraph_service   && _SVC_PROBES="$_SVC_PROBES ${VELARIS_HXGRAPH_PORT:-8203}:hxgraph-service"
+_routed hxmigrate_service && _SVC_PROBES="$_SVC_PROBES ${VELARIS_HXMIGRATE_PORT:-8204}:hxmigrate-service"
+_routed commerce_service  && _SVC_PROBES="$_SVC_PROBES ${VELARIS_COMMERCE_PORT:-8207}:commerce-service"
+_routed portal_service    && _SVC_PROBES="$_SVC_PROBES ${VELARIS_PORTAL_PORT:-8205}:portal-service"
+_routed user_service      && _SVC_PROBES="$_SVC_PROBES ${VELARIS_USER_PORT:-8206}:user-service"
+
+# The gateway itself is plain http on loopback whatever internal TLS says:
+# _velaris_probe switches to https + client certificate when TLS is on, which
+# the gateway never speaks — every update of a TLS-on install was HALTed as
+# "health check failed: gateway" on a healthy platform (R3, 2026-11-01).
+_gateway_probe() { curl -sf --max-time 3 "http://localhost:${SERVICE_PORT}/health" >/dev/null 2>&1; }
+
+# /health on each port does not prove the ROUTES work: a gateway on the wrong
+# config answers /health and 502s everything else. One anonymous request per
+# API area, through the gateway; any answer from the app (401/403/404/422) is
+# fine, 502/503/504 or no answer is not.
+_routes_probe() {
+  local path code bad=""
+  for path in /api/v1/cases /api/v1/auth/real/me /api/v1/analytics/_probe /api/v1/graph/_probe \
+              /api/v1/hxmigrate/_probe /api/v1/checkout/_probe /api/v1/portal/_probe/_probe; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:${SERVICE_PORT}${path}" 2>/dev/null || true)
+    case "$code" in 000|502|503|504) bad="$bad ${path}=${code}" ;; esac
+  done
+  [[ -z "$bad" ]] || { ROUTES_FAILED="$bad"; return 1; }
+}
+
 step "Post-update health check..."
 HEALTH_OK=false
 HEALTH_FAILED=""
 for i in $(seq 1 30); do
   HEALTH_FAILED=""
-  for _svc in "${SERVICE_PORT}:gateway" "${VELARIS_CASE_PORT:-8201}:case-service" \
-              "${VELARIS_ANALYTICS_PORT:-8202}:analytics-service" \
-              "${VELARIS_HXGRAPH_PORT:-8203}:hxgraph-service" \
-              "${VELARIS_HXMIGRATE_PORT:-8204}:hxmigrate-service"; do
+  ROUTES_FAILED=""
+  _gateway_probe || HEALTH_FAILED=" gateway"
+  for _svc in $_SVC_PROBES $_WORKER_PROBE; do
     _port="${_svc%%:*}"; _name="${_svc##*:}"
     _velaris_probe "${_port}" \
       || HEALTH_FAILED="${HEALTH_FAILED} ${_name}"
   done
+  [[ -z "$HEALTH_FAILED" ]] && { _routes_probe || HEALTH_FAILED=" routes:${ROUTES_FAILED}"; }
   if [[ -z "$HEALTH_FAILED" ]]; then
     HEALTH_OK=true
     break
@@ -906,7 +1320,7 @@ rm -f "$UPDATE_REQUEST_FILE"         # request consumed (success or halt — adm
 if [[ "$HEALTH_OK" == false ]]; then
   red "  ✗ health check failed after the update:${HEALTH_FAILED}"
   red "    This environment is HALTED for human attention — backup at: $BACKUP_FILE"
-  red "    Logs: tail -f /tmp/velaris-<service>.log"
+  red "    Logs: tail -f $VELARIS_DIR/logs/velaris-<service>.log  (systemd: journalctl -u velaris-<service>)"
   _write_status "unhealthy" "updated to v$LATEST_VERSION but health check failed"
   exit 1
 fi
@@ -914,7 +1328,12 @@ green "  ✓ all services healthy"
 if [[ "$RESTART_PENDING" == true ]]; then
   # Healthy, but on the PREVIOUS code: say so rather than report an update.
   red "  ✗ v$LATEST_VERSION is installed but NOT running — the services could not be restarted."
-  red "    Run:  sudo systemctl restart velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio"
+  _units="velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-commerce-service.service" ] && _units="$_units velaris-commerce-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-portal-service.service" ] && _units="$_units velaris-portal-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-user-service.service" ] && _units="$_units velaris-user-service"
+  [ -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/velaris-worker-service.service" ] && _units="$_units velaris-worker-service"
+  red "    Run:  sudo systemctl restart $_units velaris-studio"
   _write_status "restart_required" "v$LATEST_VERSION installed; services still run the previous code — restart them"
   exit 1
 fi
@@ -929,3 +1348,19 @@ echo "╔═══════════════════════�
 green "║   Velaris updated → v$LATEST_VERSION (channel: $UPDATE_CHANNEL)"
 echo "║   Backup kept at: .backups/"
 echo "╚══════════════════════════════════════════════════════╝"
+# R5c: a linked standby follows by itself — it sees the new version in its next
+# copy (≤ 1 min), takes this server's code and installs its dependencies. Until
+# it has, a promote there is refused. Nothing to do here; say where to look.
+if [ -f "$VELARIS_DIR/.standby/main.json" ]; then
+  echo "  Standby: it follows this update by itself within a few minutes —"
+  echo "           ./standby-velaris.sh status  (code: ok, same version on both)"
+fi
+
+# R4: what is working, degraded and off after the update — one line each for
+# anything degraded, with the reason. Advisory: bounded, and never fails the
+# update (the update already succeeded; this only says what it left behind).
+if [[ -x "$VELARIS_DIR/.venv/bin/python" && -f "$VELARIS_DIR/services/case-service/case_service/readiness.py" ]]; then
+  ( cd "$VELARIS_DIR" && PYTHONPATH="$VELARIS_DIR/services/case-service:$VELARIS_DIR/services/_shared${PYTHONPATH:+:$PYTHONPATH}" \
+      timeout 60 "$VELARIS_DIR/.venv/bin/python" -m case_service.readiness 2>/dev/null ) \
+    | sed 's/^/  /' || true
+fi

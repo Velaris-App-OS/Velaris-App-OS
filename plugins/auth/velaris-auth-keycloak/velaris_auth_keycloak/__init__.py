@@ -1,4 +1,4 @@
-"""HELIX auth plugin: keycloak."""
+"""Velaris auth plugin: keycloak."""
 
 class KeycloakBackend:
     """keycloak implementation of the auth Protocol."""

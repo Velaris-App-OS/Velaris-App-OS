@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import uuid
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,23 +41,41 @@ ALL_PATTERNS = [
 ]
 
 
-# ── In-memory sliding window counters ─────────────────────────────────────────
-# Keyed by (actor_id, pattern_type).  Values are lists of UTC timestamps.
-_windows: dict[tuple, list[float]] = defaultdict(list)
+# ── Sliding window counters ───────────────────────────────────────────────────
+# In the shared store (velaris_shared/shared_state.py), keyed by actor, pattern
+# AND window: one count for every copy of the service when the cache is on — a
+# flood spread over several copies no longer stays under every threshold — and
+# this process's when off. The window is in the key so a short-window rule
+# trimming its counter can never drop events a longer-window rule still needs.
+_NS = "hxshield"
 
 
-def _window_count(actor_id: str, pattern: str, window_seconds: int) -> int:
-    """Count events for actor within the rolling window."""
-    now = datetime.now(timezone.utc).timestamp()
-    cutoff = now - window_seconds
-    key = (actor_id, pattern)
-    _windows[key] = [t for t in _windows[key] if t >= cutoff]
-    return len(_windows[key])
+def _wkey(actor_id: str, pattern: str, window_seconds: int) -> str:
+    return f"{actor_id}|{pattern}|{int(window_seconds)}"
 
 
-def _record_event(actor_id: str, pattern: str) -> None:
-    now = datetime.now(timezone.utc).timestamp()
-    _windows[(actor_id, pattern)].append(now)
+async def _window_counts(actor_id: str, rules: list) -> dict[tuple, int]:
+    """Counts BEFORE this event, per (pattern, window) the rules use."""
+    from velaris_shared import shared_state
+    out: dict[tuple, int] = {}
+    for rule in rules:
+        k = (rule.pattern_type, int(rule.window_seconds))
+        if k not in out:
+            out[k] = await shared_state.hits(_NS, _wkey(actor_id, *k), k[1], record=False)
+    return out
+
+
+def _window_count(actor_id: str, pattern: str, window_seconds: int,
+                  counts: dict[tuple, int] | None = None) -> int:
+    """Count events for actor within the rolling window (read before scoring)."""
+    return (counts or {}).get((pattern, int(window_seconds)), 0)
+
+
+async def _record_events(actor_id: str, rules: list) -> None:
+    from velaris_shared import shared_state
+    for rule in rules:
+        await shared_state.hits(_NS, _wkey(actor_id, rule.pattern_type, rule.window_seconds),
+                                int(rule.window_seconds))
 
 
 def _payload_hash(context: dict) -> str:
@@ -90,7 +107,8 @@ async def _get_rules(session) -> list[Any]:
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
-def _score_event(event_type: str, actor_id: str | None, context: dict, rules: list) -> list[Any]:
+def _score_event(event_type: str, actor_id: str | None, context: dict, rules: list,
+                 counts: dict[tuple, int] | None = None) -> list[Any]:
     """Return the list of rules that fire for this event."""
     fired: list[Any] = []
     actor = actor_id or "anonymous"
@@ -100,17 +118,17 @@ def _score_event(event_type: str, actor_id: str | None, context: dict, rules: li
         hit = False
 
         if pattern == PATTERN_DUPLICATE_FLOOD and event_type in ("case_created", "portal_submit"):
-            count = _window_count(actor, pattern, rule.window_seconds)
+            count = _window_count(actor, pattern, rule.window_seconds, counts)
             if count >= rule.threshold:
                 hit = True
 
         elif pattern == PATTERN_DOS_SUBMISSION and event_type in ("case_created", "portal_submit"):
-            count = _window_count(actor, pattern, rule.window_seconds)
+            count = _window_count(actor, pattern, rule.window_seconds, counts)
             if count >= rule.threshold:
                 hit = True
 
         elif pattern == PATTERN_VELOCITY_ANOMALY and event_type in ("case_closed", "case_resolved", "bulk_action"):
-            count = _window_count(actor, pattern, rule.window_seconds)
+            count = _window_count(actor, pattern, rule.window_seconds, counts)
             if count >= rule.threshold:
                 hit = True
 
@@ -118,7 +136,7 @@ def _score_event(event_type: str, actor_id: str | None, context: dict, rules: li
             hour = datetime.now(timezone.utc).hour
             # Off-hours = 22:00-06:00 UTC
             if hour >= 22 or hour < 6:
-                count = _window_count(actor, pattern, rule.window_seconds)
+                count = _window_count(actor, pattern, rule.window_seconds, counts)
                 if count >= rule.threshold:
                     hit = True
 
@@ -136,7 +154,7 @@ def _score_event(event_type: str, actor_id: str | None, context: dict, rules: li
 
         elif pattern == PATTERN_INSIDER_THREAT and event_type == "case_read":
             unassigned_access = context.get("unassigned_case_access", False)
-            count = _window_count(actor, pattern, rule.window_seconds)
+            count = _window_count(actor, pattern, rule.window_seconds, counts)
             if unassigned_access and count >= rule.threshold:
                 hit = True
 
@@ -175,11 +193,11 @@ async def evaluate(
     actor = actor_id or "anonymous"
 
     rules = await _get_rules(session)
-    fired = _score_event(event_type, actor, context, rules)
+    counts = await _window_counts(actor, rules)
+    fired = _score_event(event_type, actor, context, rules, counts)
 
     # Record for sliding-window counters (after scoring to avoid self-inflation)
-    for rule in rules:
-        _record_event(actor, rule.pattern_type)
+    await _record_events(actor, rules)
 
     if not fired:
         # Persist a low-score shield event

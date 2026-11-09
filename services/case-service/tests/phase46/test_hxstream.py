@@ -1,4 +1,4 @@
-"""HELIX P46 — HxStream tests (22 tests).
+"""Velaris P46 — HxStream tests (22 tests).
 
 Covers: emit_trace (broadcast + persist), POST /hxstream/event,
         GET /hxstream/events (list + filters), GET /hxstream/replay,

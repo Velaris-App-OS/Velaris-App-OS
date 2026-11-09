@@ -2,7 +2,7 @@
 BPMN 2.0 Intermediate Representation — Process Models
 ======================================================
 
-These dataclasses are the **shared vocabulary** of Helix.  Every component
+These dataclasses are the **shared vocabulary** of Velaris.  Every component
 — engine compiler, runtime, codegen, scout, migration — speaks this IR.
 
 Design principles:

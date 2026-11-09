@@ -1,4 +1,4 @@
-"""HELIX Temporal — durable SLA timer activity tests.
+"""Velaris Temporal — durable SLA timer activity tests.
 
 Exercises ``sla_timer_activities`` directly, with no Temporal runtime. The
 activities open their own DB session via ``get_session_factory()``; we point

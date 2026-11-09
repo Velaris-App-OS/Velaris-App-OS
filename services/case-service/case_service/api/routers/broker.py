@@ -37,7 +37,7 @@ from velaris_shared.db.models import (
 )
 from velaris_shared.db.session import get_session
 from velaris_shared.llm.guard import _RateLimiter
-from case_service.marketplace import grants as mkt_grants
+from velaris_shared.apps import grant_checks as mkt_grants
 
 router = APIRouter(prefix="/broker", tags=["broker"])
 
@@ -131,7 +131,7 @@ async def _manifest_allows_cases(session: AsyncSession, grant) -> bool:
     not "declared nothing" — it is "not recorded". Those keep working on the
     grant alone rather than losing access to an upgrade nobody asked for.
     """
-    from case_service.marketplace.manifest_version import declares_access
+    from velaris_shared.apps.manifest_version import declares_access
 
     if grant.install_id is None:
         return True

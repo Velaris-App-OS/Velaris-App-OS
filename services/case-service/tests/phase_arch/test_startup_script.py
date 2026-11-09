@@ -47,6 +47,10 @@ SERVICES = {
     "analytics-service": "analytics_service.main:app",
     "hxgraph-service": "hxgraph_service.main:app",
     "hxmigrate-service": "hxmigrate_service.main:app",
+    "commerce-service": "commerce_service.main:app",
+    "portal-service": "portal_service.main:app",
+    "user-service": "user_service.main:app",
+    "worker-service": "case_service.worker.main:app",
 }
 
 

@@ -37,6 +37,15 @@ class _BodyTooLarge(Exception):
     pass
 
 
+def _is_internal_call(scope) -> bool:
+    if not scope.get("path", "").startswith("/internal/"):
+        return False
+    from starlette.requests import HTTPConnection
+
+    from velaris_shared.internal.auth import is_internal_caller
+    return is_internal_caller(HTTPConnection(scope))
+
+
 class BodyLimitMiddleware:
     def __init__(
         self,
@@ -64,6 +73,11 @@ class BodyLimitMiddleware:
                 if scope.get("path", "").startswith(self.migrate_path_prefix)
                 else self.max_upload_bytes
             )
+        elif _is_internal_call(scope):
+            # A sibling service's internal call (R5e step 7), proven by its
+            # secret: a pack bundle may legitimately exceed the user-facing
+            # JSON limit (8 MB per section). Same ceiling as a migration upload.
+            limit = self.max_migrate_upload_bytes
         else:
             limit = self.max_body_bytes
 

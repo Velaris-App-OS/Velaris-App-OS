@@ -200,7 +200,7 @@ class TestDrain:
 
 
 class TestTopicCreation:
-    """Redpanda does not auto-create topics.
+    """The broker does not auto-create topics (bundled Kafka has it switched off).
 
     Without this the relay produced against a missing topic, got
     UnknownTopicOrPartitionError, and retried forever against a broker that
@@ -280,3 +280,75 @@ class TestDisabledPosture:
         resp = await client.get("/api/v1/hxstream/bus/backlog")
         assert resp.status_code == 200, resp.text
         assert resp.json()["enabled"] is False
+
+
+class TestBrokerAuthentication:
+    """The bundled broker requires SASL/PLAIN (November 2026). Without a
+    password the relay must connect exactly as before (an operator's own broker
+    may run without authentication); with one, every client it opens — the
+    producer AND the topic admin — must carry it."""
+
+    async def test_no_password_means_no_sasl(self):
+        assert event_bus._auth_kwargs("velaris", "") == {}
+        assert event_bus._auth_kwargs("", "") == {}
+
+    async def test_password_turns_on_sasl_plain(self):
+        kw = event_bus._auth_kwargs("velaris", "s3cret")
+        assert kw == {
+            "security_protocol": "SASL_PLAINTEXT",
+            "sasl_mechanism": "PLAIN",
+            "sasl_plain_username": "velaris",
+            "sasl_plain_password": "s3cret",
+        }
+
+    async def test_empty_username_falls_back_to_the_default_user(self):
+        assert event_bus._auth_kwargs("", "s3cret")["sasl_plain_username"] == "velaris"
+
+    async def test_producer_is_built_with_the_credentials(self, session_factory, monkeypatch):
+        built = {}
+
+        class _Recording:
+            def __init__(self, **kw):
+                built.update(kw)
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr(event_bus, "_load_producer_class", lambda: _Recording)
+        relay = event_bus.EventBusRelay(
+            session_factory, brokers="127.0.0.1:19092", username="velaris", password="pw",
+        )
+        await relay._ensure_producer()
+        assert built["sasl_plain_password"] == "pw"
+        assert built["security_protocol"] == "SASL_PLAINTEXT"
+
+    async def test_password_is_not_in_the_settings_repr(self, monkeypatch):
+        from velaris_shared.config import Settings
+
+        monkeypatch.setenv("VELARIS_CASE_EVENT_BUS_PASSWORD", "do-not-print-me")
+        s = Settings()
+        assert s.event_bus_password == "do-not-print-me"
+        assert "do-not-print-me" not in repr(s)
+
+
+class TestLoop:
+    """A full batch is followed at once; the pause is for a drained queue (R6 2026-11-06)."""
+
+    async def test_full_batch_is_followed_at_once(self, monkeypatch):
+        relay = event_bus.EventBusRelay(None, brokers="unused:9092")
+        outcomes = iter([event_bus._BATCH_SIZE, 7])
+        sleeps: list[float] = []
+
+        async def fake_drain():
+            return next(outcomes)
+
+        async def fake_sleep(s):
+            sleeps.append(s)
+            if len(sleeps) == 2:
+                relay._running = False
+
+        monkeypatch.setattr(relay, "drain_once", fake_drain)
+        monkeypatch.setattr(event_bus.asyncio, "sleep", fake_sleep)
+        relay._running = True
+        await relay._run()
+        assert sleeps == [0, event_bus._POLL_INTERVAL]

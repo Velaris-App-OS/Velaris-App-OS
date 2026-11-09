@@ -1,49 +1,15 @@
-"""Local filesystem storage backend — used in tests and dev-minimal mode."""
-from __future__ import annotations
-import asyncio
-import os
-from pathlib import Path
+"""Moved to `velaris_shared.storage.local_fs` (2026-10-19, step 7 — the commerce split).
 
-from .backend import StorageBackend, ObjectNotFound, StorageError
+Both case-service and commerce-service call this code in-process, so it lives in
+the shared layer. This module IS that module (`sys.modules` alias): every name,
+every cache and every test patch made through this path reaches the one real
+implementation.
 
+Copyright (c) 2024-2026 Velaris Contributors
+SPDX-License-Identifier: BSL-1.1
+"""
+import sys as _sys
 
-class LocalFSBackend:
-    """Stores objects as files under a base directory.
+import velaris_shared.storage.local_fs as _moved
 
-    Key can contain ``/`` — subdirectories are created as needed.
-    """
-
-    def __init__(self, base_path: str | Path):
-        self.base = Path(base_path)
-        self.base.mkdir(parents=True, exist_ok=True)
-
-    def _path(self, key: str) -> Path:
-        # Reject path-traversal
-        if ".." in Path(key).parts:
-            raise StorageError(f"Invalid key: {key}")
-        return self.base / key
-
-    async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
-        p = self._path(key)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(p.write_bytes, data)
-
-    async def get(self, key: str) -> bytes:
-        p = self._path(key)
-        if not p.exists():
-            raise ObjectNotFound(key)
-        return await asyncio.to_thread(p.read_bytes)
-
-    async def delete(self, key: str) -> None:
-        p = self._path(key)
-        if p.exists():
-            await asyncio.to_thread(p.unlink)
-
-    async def exists(self, key: str) -> bool:
-        return self._path(key).exists()
-
-    async def size(self, key: str) -> int:
-        p = self._path(key)
-        if not p.exists():
-            raise ObjectNotFound(key)
-        return p.stat().st_size
+_sys.modules[__name__] = _moved

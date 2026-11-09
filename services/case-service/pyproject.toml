@@ -15,6 +15,10 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.30.0",
+    # The database query connector (2026-11-08) reads a tenant's MySQL /
+    # MariaDB whatever this install's own database is, so the MySQL driver is
+    # core now. Pure Python. The [mysql] extra below stays as it was.
+    "aiomysql>=0.2.0",
     # [email] — auth_real.py uses `EmailStr` at MODULE scope, and pydantic
     # raises at class-definition time when email-validator is absent. It was
     # only ever present by accident, and `uv sync` being exact would have
@@ -74,12 +78,15 @@ dev = [
     "velaris-analytics-service",
     "velaris-hxgraph-service",
     "velaris-hxmigrate-service",
+    "velaris-commerce-service",   # R5e step 7: the guards sweep its routes too
+    "velaris-portal-service",     # R5e step 8: and the portal's; its routes in mixed suites
+    "velaris-user-service",       # R5e step 10: sign-in; every suite signs in through it
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.0",
     "aiosqlite>=0.20.0",
 ]
-# Durable event log (§2.1) — the outbox fan-out onto Redpanda/Kafka. Optional
+# Durable event log (§2.1) — the outbox fan-out onto Kafka. Optional
 # because the bus is OFF by default: the outbox is already durable on disk, so
 # this adds distribution, not safety. `event_bus.py` imports it lazily, so a
 # deployment without the wheel simply never starts the relay.

@@ -12,7 +12,10 @@
   which is the gateway's whole job to prevent (see `.well-known/velaris-gateway`
   and the workload-identity header).
 */}}
-{{- range $svc, $port := dict "case-service" $.Values.caseService.port "engine" $.Values.engine.port "analytics-service" $.Values.analyticsService.port "hxgraph-service" $.Values.hxgraphService.port "hxmigrate-service" $.Values.hxmigrateService.port }}
+{{- $pols := dict "case-service" $.Values.caseService.port "engine" $.Values.engine.port "analytics-service" $.Values.analyticsService.port "hxgraph-service" $.Values.hxgraphService.port "hxmigrate-service" $.Values.hxmigrateService.port "commerce-service" $.Values.commerceService.port "portal-service" $.Values.portalService.port "user-service" $.Values.userService.port }}
+{{- /* R5e step 9: the jobs pod, when on — same egress as case-service (its code). */}}
+{{- if $.Values.jobs.enabled }}{{- $_ := set $pols "jobs" $.Values.jobs.port }}{{- end }}
+{{- range $svc, $port := $pols }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -51,5 +54,37 @@ spec:
     {{- with $.Values.networkPolicy.extraEgressTo }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- end }}
+{{- if include "helix.poolerOn" $ }}
+---
+# R5d 6a: the pooler holds database connections for every workload, so it
+# gets the same fence — in from this chart's pods only, out to DNS and the
+# database in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "helix.poolerName" $ }}
+  labels: { app: pooler }
+spec:
+  podSelector:
+    matchLabels: { app: pooler }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 6432
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector: {}
+      ports:
+        - port: 5432
 {{- end }}
 {{- end }}

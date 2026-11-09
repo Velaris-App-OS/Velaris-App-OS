@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Velaris hxgraph-service",
         version="0.1.0",
-        description="HxGraph — the Helix native knowledge graph.",
+        description="HxGraph — the Velaris native knowledge graph.",
         docs_url="/docs" if settings.debug else None,
         redoc_url=None,
         # The superadmin boot gate: the middleware only reads the flag this

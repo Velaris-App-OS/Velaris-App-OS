@@ -259,3 +259,47 @@ async def posture(
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# ── Standby link events (R5c step 11 d, mig 222) ─────────────────────────────
+
+# serve_reads_*: the main reads from the standby's copy (R5d 11b part c).
+STANDBY_EVENTS = ("link", "unlink", "promote", "serve_reads_on", "serve_reads_off",
+                  # Step 12 — automatic failover (additive; the column is free text).
+                  "failover_enable", "failover_disable", "failover_pause", "failover_resume",
+                  "auto_promote")
+
+
+async def record_standby_event(session: AsyncSession, *, event: str, peer: str | None = None,
+                               detail: dict | None = None,
+                               recorded_by: str = "standby-velaris.sh"):
+    """One standby event, written by the host tool through standby_cli."""
+    import json
+
+    from velaris_shared.db.models import StandbyEventModel
+    if event not in STANDBY_EVENTS:
+        raise DRError(f"event must be one of {', '.join(STANDBY_EVENTS)}")
+    row = StandbyEventModel(event=event, peer=(peer or None) and peer[:255],
+                            detail=json.dumps(detail or {}, default=str)[:20000],
+                            recorded_by=recorded_by[:64])
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def recent_standby_events(session: AsyncSession, limit: int = 10) -> list[dict]:
+    import json
+
+    from velaris_shared.db.models import StandbyEventModel
+    rows = (await session.execute(
+        select(StandbyEventModel).order_by(StandbyEventModel.occurred_at.desc()).limit(limit)
+    )).scalars().all()
+    out = []
+    for r in rows:
+        try:
+            detail = json.loads(r.detail or "{}")
+        except ValueError:
+            detail = {}
+        out.append({"event": r.event, "peer": r.peer, "occurred_at": r.occurred_at.isoformat(),
+                    "detail": detail})
+    return out

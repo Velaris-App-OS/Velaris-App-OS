@@ -1,0 +1,11 @@
+[Unit]
+Description=Velaris standby — copy documents, settings and vault every minute
+
+[Timer]
+OnBootSec=60
+# 60 s after the previous run FINISHED: runs never overlap, however long one takes.
+OnUnitInactiveSec=60
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

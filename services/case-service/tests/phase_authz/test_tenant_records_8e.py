@@ -29,12 +29,25 @@ from velaris_shared.db.models import (
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from velaris_shared.auth.jwt_handler import create_dev_token
+from velaris_shared.config import get_settings
 
 pytestmark = pytest.mark.asyncio
 
+
+# (was imported from test_payments_authz.py, which moved to commerce-service)
+def _headers(user_id: str, roles: list[str]) -> dict[str, str]:
+    s = get_settings()
+    token = create_dev_token(user_id=user_id, username=user_id, roles=roles,
+                             secret=s.auth_secret,
+                             private_key=s.auth_rsa_private_key or "")
+    return {"Authorization": f"Bearer {token}"}
+
+
 DEV = _headers("devadmin", ["admin"])
 OPS = _headers("defadmin", ["admin"])
+
+
 
 
 @pytest_asyncio.fixture
@@ -96,12 +109,3 @@ async def test_a_whole_platform_package_is_the_operators(api, world):
     r = await api.post("/api/v1/apps/package", headers=OPS,
                        json={"name": "snap", "version": "1.0.0"})
     assert r.status_code == 201, r.text
-
-
-async def test_marketplace_sources_are_the_operators(api, world):
-    """8e (c): sources feed every tenant's catalogue — install-wide."""
-    r = await api.post("/api/v1/marketplace/sources", headers=DEV,
-                       json={"name": "evil", "url": "https://example.invalid/index.json",
-                             "tier": "community"})
-    assert r.status_code == 403, r.text
-    assert "platform operator" in r.text

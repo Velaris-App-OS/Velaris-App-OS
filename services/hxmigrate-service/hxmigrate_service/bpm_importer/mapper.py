@@ -1,7 +1,7 @@
 """P44 — Pass 3: Map.
 
 Uses the bpm_concepts knowledge base (P42) to translate parsed BPM rules
-into Helix-native equivalents. Falls back to keyword heuristics when no
+into Velaris-native equivalents. Falls back to keyword heuristics when no
 KB entry is found.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from velaris_shared.db.models import BpmConceptModel
 
 logger = logging.getLogger(__name__)
 
-# Helix step-type defaults for common BPM step types
+# Velaris step-type defaults for common BPM step types
 _STEP_TYPE_DEFAULTS: dict[str, str] = {
     "user_task":  "user_task",
     "automated":  "automated",
@@ -31,7 +31,7 @@ _CONFIDENCE_ORDER = {"exact": 0, "close": 1, "partial": 2, "manual": 3}
 
 
 async def map_rules(tool: str, parsed: dict, session: AsyncSession, ai_blueprint: dict | None = None) -> dict:
-    """Pass 3: map parsed rules to Helix equivalents.
+    """Pass 3: map parsed rules to Velaris equivalents.
 
     Returns:
       { "case_types": [...], "forms": [...], "sla_rules": [...],

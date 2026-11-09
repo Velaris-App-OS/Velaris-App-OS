@@ -13,6 +13,7 @@ import { NAV_DATA } from "@/app/nav-data";
 import { NAV_ICONS, getNavIcon, NAV_ICON_SIZE } from "@/app/nav-icons";
 import { useFeatureFlags } from "@/app/FeatureFlagsContext";
 import SandboxBanner from "@shared/components/SandboxBanner";
+import DataAsOfNotice from "@shared/components/DataAsOfNotice";
 
 /* ═══════════════════════════════════════════════════════════════════
    App Layout — sidebar + main content area
@@ -67,6 +68,7 @@ export default function AppLayout() {
       <Sidebar onOpenSearch={() => setSearchOpen(true)} onOpenProfile={() => setProfileOpen(true)} />
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg-root)" }}>
         <SandboxBanner />
+        <DataAsOfNotice />
         <PageHeader
           title={navEntry?.label ?? BRAND.name}
           description={navEntry?.description}
@@ -115,7 +117,7 @@ const SECTION_GROUPS: { label: string; filter: (item: NavItem) => boolean }[] = 
   { label: "Admin",        filter: i => !!i.roles?.length && i.roles.every(r => r === "admin" || r === "manager") },
 ];
 
-function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; onOpenProfile: () => void }) {
+export function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; onOpenProfile: () => void }) {
   const location = useLocation();
   const { user } = useAuth();
   const { isRouteAllowed } = usePermissions();
@@ -132,6 +134,7 @@ function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; on
     label: g.label,
     items: visibleItems.filter(g.filter),
   })).filter(s => s.items.length > 0);
+  const [openSections, toggleSection] = useOpenSections();
 
   return (
     <nav
@@ -197,14 +200,20 @@ function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; on
 
       {/* Scrollable nav */}
       <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", padding: "0 var(--space-md)", display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-        {sections.map(section => (
-          <React.Fragment key={section.label}>
-            <SectionLabel label={section.label} />
-            {section.items.map(item => (
-              <NavItem key={item.path} item={item} location={location} />
-            ))}
-          </React.Fragment>
-        ))}
+        {sections.map(section => {
+          const closed = !openSections.has(section.label);
+          // A closed section still shows the page you are on, so you never lose your place.
+          const items = closed ? section.items.filter(item => isActivePath(item.path, location.pathname)) : section.items;
+          return (
+            <React.Fragment key={section.label}>
+              <SectionLabel label={section.label} open={!closed} count={section.items.length}
+                onToggle={() => toggleSection(section.label)} />
+              {items.map(item => (
+                <NavItem key={item.path} item={item} location={location} />
+              ))}
+            </React.Fragment>
+          );
+        })}
       </div>
 
       {/* Bottom */}
@@ -216,10 +225,48 @@ function Sidebar({ onOpenSearch, onOpenProfile }: { onOpenSearch: () => void; on
   );
 }
 
-function SectionLabel({ label }: { label: string }) {
+/* ── Collapsible sections (2026-10-29) ─────────────────────────
+   Every section starts closed (user's choice); the page you are on always
+   shows. What someone opens is remembered in this browser only — a
+   convenience, so storage failing just means everything starts closed. */
+const OPEN_KEY = "velaris.nav.open";
+
+function useOpenSections(): [Set<string>, (label: string) => void] {
+  const [open, setOpen] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(OPEN_KEY) || "[]");
+      return new Set(Array.isArray(raw) ? raw.filter((x: unknown) => typeof x === "string") : []);
+    } catch { return new Set(); }
+  });
+  const toggle = (label: string) => setOpen(prev => {
+    const next = new Set(prev);
+    if (next.has(label)) next.delete(label); else next.add(label);
+    try { localStorage.setItem(OPEN_KEY, JSON.stringify([...next])); } catch { /* stays in memory */ }
+    return next;
+  });
+  return [open, toggle];
+}
+
+function isActivePath(path: string, pathname: string): boolean {
+  return path === "/" ? pathname === "/" : pathname === path || pathname.startsWith(path + "/");
+}
+
+function SectionLabel({ label, open, count, onToggle }: { label: string; open: boolean; count: number; onToggle: () => void }) {
   return (
-    <div
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      title={open ? `Collapse ${label}` : `Expand ${label} (${count})`}
       style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        width: "100%",
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        textAlign: "left",
         fontSize: 10,
         fontWeight: 600,
         color: "var(--text-muted)",
@@ -229,17 +276,15 @@ function SectionLabel({ label }: { label: string }) {
         padding: "var(--space-md) var(--space-sm) var(--space-xs)",
       }}
     >
-      {label}
-    </div>
+      <span aria-hidden style={{ display: "inline-block", width: 8, transition: "transform 0.12s", transform: open ? "rotate(90deg)" : "none" }}>›</span>
+      <span style={{ flex: 1 }}>{label}</span>
+      {!open && <span style={{ fontWeight: 400, letterSpacing: 0 }}>{count}</span>}
+    </button>
   );
 }
 
 function NavItem({ item, location }: { item: typeof NAV_ITEMS[0]; location: ReturnType<typeof useLocation> }) {
-  const isActive =
-    item.path === "/"
-      ? location.pathname === "/"
-      : location.pathname === item.path ||
-        location.pathname.startsWith(item.path + "/");
+  const isActive = isActivePath(item.path, location.pathname);
 
   return (
     <NavLink

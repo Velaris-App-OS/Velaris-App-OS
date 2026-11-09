@@ -1,4 +1,4 @@
-"""HELIX SDK Protocol: SLA Engine.
+"""Velaris SDK Protocol: SLA Engine.
 
 Defines the contract for SLA lifecycle management — starting,
 pausing, resuming, checking, and handling breaches.

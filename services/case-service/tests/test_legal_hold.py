@@ -57,7 +57,7 @@ from case_service.legal_hold import service as lh
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 
@@ -536,7 +536,7 @@ async def test_a_customer_with_a_held_case_is_not_erased_by_staff(api, world):
 
 
 async def test_self_erasure_is_refused_without_saying_why_and_is_not_lost(api, world):
-    from case_service.api.routers import portal_customers as pc
+    from portal_service.api.routers import portal_customers as pc
 
     await _hold(api, world["held"])
     app.dependency_overrides[pc._require_customer] = lambda: world["jane"]

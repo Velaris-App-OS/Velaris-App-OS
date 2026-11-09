@@ -13,9 +13,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
 
 from velaris_shared import hxguard
-from velaris_shared.auth.dependencies import get_current_user
-from velaris_shared.auth.jwt_handler import decode_jwt_token
-from velaris_shared.config import get_settings
+from fastapi import HTTPException
+
+from velaris_shared.auth.dependencies import (
+    WS_CLOSE_UNAUTHORIZED, authenticate_websocket, get_current_user,
+    watch_websocket_auth, websocket_close_code,
+)
 from case_service.core.tenant_path_guard import platform_operator_only
 from case_service.realtime.manager import get_manager
 
@@ -29,28 +32,6 @@ class _Caller:
 
     def __init__(self, user_id: str, roles: list[str], tenant: str | None):
         self.user_id, self.roles, self.tenant_id = user_id, roles, tenant
-
-
-async def _socket_caller(claims: dict) -> _Caller:
-    from sqlalchemy import select
-
-    from velaris_shared.auth.jwt_handler import extract_user_from_claims
-    from velaris_shared.db.models import UserDirectoryModel
-    from velaris_shared.db.session import get_session_factory
-
-    info = extract_user_from_claims(claims)
-    user_id = str(info.get("user_id") or claims.get("sub") or "")
-    tenant = None
-    async with get_session_factory()() as session:
-        for ident in (user_id, info.get("username"), info.get("email")):
-            if not ident:
-                continue
-            row = (await session.execute(select(UserDirectoryModel).where(
-                UserDirectoryModel.user_id == str(ident)))).scalars().first()
-            if row is not None:
-                tenant = row.tenant_id
-                break
-    return _Caller(user_id, list(info.get("roles") or []), tenant)
 
 
 async def authorize_channel(caller: _Caller, channel: str) -> bool:
@@ -83,8 +64,11 @@ async def authorize_channel(caller: _Caller, channel: str) -> bool:
                 case = await session.get(CaseInstanceModel, _uuid.UUID(rest))
             except ValueError:
                 return False
-            return case is not None and await same_tenant(session, case.tenant_id,
-                                                          caller.tenant_id)
+            # case_visible_to, not same_tenant: a tenant-less case follows the
+            # strict-reads switch here as on every other read (2026-11-04).
+            from velaris_shared.tenancy.identity import case_visible_to
+            return case is not None and await case_visible_to(session, case.tenant_id,
+                                                              caller.tenant_id)
     return True     # a channel nothing tenant-owned is published on
 
 
@@ -92,7 +76,7 @@ async def authorize_channel(caller: _Caller, channel: str) -> bool:
 async def websocket_endpoint(
     websocket: WebSocket,
     token: str | None = Query(None),
-    user_id: str = Query("anonymous"),
+    user_id: str = Query("anonymous"),   # ignored: the token names the user
 ):
     """WebSocket endpoint for real-time collaboration.
 
@@ -109,28 +93,25 @@ async def websocket_endpoint(
       Pong:    {"type": "pong"}
       Error:   {"type": "error", "message": "..."}
     """
-    # Validate token before accepting the WebSocket connection
-    authenticated_user_id = user_id
-    if token:
-        try:
-            settings = get_settings()
-            # public_key or this verifies HS256 only — see hxstream.py. On an
-            # RS256 deployment the decode raised and every socket closed 4001.
-            claims = decode_jwt_token(token, secret=settings.auth_secret,
-                                      issuer=settings.auth_issuer, audience=settings.auth_audience,
-                                      public_key=settings.auth_rsa_public_key or "")
-            authenticated_user_id = claims.get("sub", user_id)
-            caller = await _socket_caller(claims)
-        except Exception:
-            await websocket.close(code=4001, reason="Invalid token")
-            return
-    else:
-        await websocket.close(code=4001, reason="Authentication required")
+    # The same sign-in check as every HTTP route (2026-10-19; until then the
+    # signature only — a revoked token, a suspended account or an agent token
+    # got a socket). Refused before the socket is accepted.
+    if not token:
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="Authentication required")
         return
+    try:
+        user = await authenticate_websocket(websocket, token)
+    except HTTPException as exc:
+        await websocket.close(code=websocket_close_code(exc), reason="Invalid token")
+        return
+    authenticated_user_id = user.user_id
+    caller = _Caller(user.user_id, list(user.roles or []), user.tenant_id)
 
     manager = get_manager()
     conn = await manager.connect(websocket, user_id=authenticated_user_id)
     presence_resources = set()
+    # Checked again while open: a revocation closes the socket within a minute.
+    watcher = asyncio.create_task(watch_websocket_auth(websocket, token))
 
     try:
         # Send welcome
@@ -183,6 +164,7 @@ async def websocket_endpoint(
     except Exception as e:
         logger.warning("WebSocket error on %s: %s", conn.id, e)
     finally:
+        watcher.cancel()
         for resource in presence_resources:
             await manager.clear_presence(resource, authenticated_user_id)
         await manager.disconnect(conn)

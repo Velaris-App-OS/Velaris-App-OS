@@ -81,6 +81,10 @@ declare -A VALUE_KEY=(
   [case-service]=caseService [engine]=engine [worker]=worker
   [analytics-service]=analyticsService [hxgraph-service]=hxgraphService
   [hxmigrate-service]=hxmigrateService
+  [commerce-service]=commerceService
+  [portal-service]=portalService
+  [user-service]=userService
+  [jobs]=jobs
 )
 for svc in "${WORKLOADS[@]}"; do
   d="$(deploy_name "$svc")"
@@ -94,7 +98,7 @@ done
 step "Step 3/6 — Container images"
 if [ "$BUILD" = "1" ]; then
   need_tool docker
-  for svc in case-service analytics-service hxgraph-service hxmigrate-service engine; do
+  for svc in case-service analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service engine; do
     df="$VELARIS_DIR/services/$svc/Dockerfile"
     [ "$svc" = "engine" ] && df="$VELARIS_DIR/engine/Dockerfile"
     echo -n "    build $REGISTRY/$svc:$TAG ... "

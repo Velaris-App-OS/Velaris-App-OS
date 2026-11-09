@@ -21,9 +21,11 @@ Usage::
 
 Configuration via environment variables::
 
-    TEMPORAL_HOST       default: localhost:7233
+    TEMPORAL_HOST       then VELARIS_CASE_TEMPORAL_HOST, default: localhost:7233
     TEMPORAL_NAMESPACE  default: default
-    TEMPORAL_TLS        default: false
+    VELARIS_CASE_TEMPORAL_TLS_{CA,CERT,KEY}   mutual TLS; unset = plaintext
+
+(velaris_shared.temporal_connect — one answer for both Temporal clients.)
 """
 
 from __future__ import annotations
@@ -55,14 +57,17 @@ async def connect(
     """
     global _client
 
-    host = host or os.environ.get("TEMPORAL_HOST", "localhost:7233")
-    namespace = namespace or os.environ.get("TEMPORAL_NAMESPACE", "default")
+    from velaris_shared import temporal_connect as tc
+
+    host = host or tc.temporal_target()
+    namespace = namespace or tc.temporal_namespace()
 
     logger.info("temporal_connecting", host=host, namespace=namespace)
 
     _client = await Client.connect(
         host,
         namespace=namespace,
+        tls=tc.temporal_tls(),
     )
 
     logger.info("temporal_connected", host=host, namespace=namespace)

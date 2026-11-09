@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS base
+FROM python:3.12.15-slim AS base
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY libs/ /app/libs/

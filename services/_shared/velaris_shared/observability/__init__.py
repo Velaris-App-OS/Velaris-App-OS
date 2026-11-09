@@ -1,4 +1,4 @@
-"""HELIX Observability — OTel, Prometheus, structlog, correlation IDs."""
+"""Velaris Observability — OTel, Prometheus, structlog, correlation IDs."""
 from .context import (
     request_id_var, trace_id_var, tenant_id_var, user_id_var, get_context,
 )

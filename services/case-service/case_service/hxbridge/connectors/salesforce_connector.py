@@ -116,10 +116,10 @@ class SalesforceConnector:
 
     async def _create_case(self, token: str, data: dict) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "Subject":     data.get("subject", "Case from Helix"),
+            "Subject":     data.get("subject", "Case from Velaris"),
             "Description": data.get("description", ""),
             "Status":      "New",
-            "Origin":      "Helix BPM",
+            "Origin":      "Velaris",
         }
         if data.get("contact_id"):
             payload["ContactId"] = data["contact_id"]

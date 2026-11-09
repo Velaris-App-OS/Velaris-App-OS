@@ -2,7 +2,7 @@
 # Velaris hxgraph-service — extracted from case-service (roadmap 13c-e)
 # ═══════════════════════════════════════════════════════════════════
 
-FROM python:3.12-slim AS base
+FROM python:3.12.15-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

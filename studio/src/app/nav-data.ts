@@ -19,6 +19,10 @@ export interface NavEntry {
   section:     string;
   roles:       NavRole[];
   featureKey?: string;   // if set, nav item is hidden until this feature has any version enabled in the DB
+  /** The install's own screens (2026-11-04): shown only to the platform
+   *  operator (superadmin, or the default tenant). A tenant's admin is refused
+   *  their data by the API anyway; this just stops showing an empty page. */
+  operatorOnly?: boolean;
 }
 
 export const NAV_DATA: NavEntry[] = [
@@ -129,6 +133,13 @@ export const NAV_DATA: NavEntry[] = [
     path: "/form-builder",
     label: "Form Builder",
     description: "Drag-and-drop fields | Sections | Field types | Validation rules | Form preview | JSON schema",
+    section: "Development",
+    roles: ["designer", "admin"],
+  },
+  {
+    path: "/reference-tables",
+    label: "Reference Tables",
+    description: "Branches | Products | Price bands | CSV import | Options for forms | Cascading lists",
     section: "Development",
     roles: ["designer", "admin"],
   },
@@ -380,7 +391,7 @@ export const NAV_DATA: NavEntry[] = [
   {
     path: "/hxcheckout",
     label: "HxCheckout",
-    description: "Commerce integration | Order intake API | Webhook mode (Shopify/WooCommerce/Magento/BigCommerce) | Service tokens | Order board | Returns & complaints | Marketplace app",
+    description: "Commerce integration | Order intake API | Webhook mode (common shop platforms or a custom field map) | Service tokens | Order board | Returns & complaints | Marketplace app",
     section: "Integration",
     roles: ["integration", "admin"],
   },
@@ -450,6 +461,13 @@ export const NAV_DATA: NavEntry[] = [
     description: "Sovereignty & security policy engine | One rule, one deterministic evaluator, one provable decision log | Shadow before enforce, with parity as the evidence | Policies written in plain English, approved by a person",
     section: "Security",
     roles: ["admin", "security", "developer"],
+  },
+  {
+    path: "/allowed-sites",
+    label: "Allowed sites",
+    description: "Sites forms may embed | Platform policy | Blocked sites | Change history",
+    section: "Security",
+    roles: ["admin"],
   },
   {
     path: "/compliance",

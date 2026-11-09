@@ -140,6 +140,14 @@ def start_authz_loops(service_name: str) -> list:
         _log.info("Authz generation poll scheduled (%s)", service_name)
     except Exception as exc:  # noqa: BLE001
         _log.warning("Authz generation poll unavailable in %s: %s", service_name, exc)
+    # The same signal for every other cache that must agree between processes
+    # (feature flags, revoked sessions, data keys, tenant lookups).
+    try:
+        from velaris_shared.generations import generations_cron
+        tasks.append(asyncio.create_task(generations_cron()))
+        _log.info("Platform generations poll scheduled (%s)", service_name)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("Platform generations poll unavailable in %s: %s", service_name, exc)
     return tasks
 
 
@@ -175,20 +183,28 @@ def apply_platform_middleware(app: FastAPI) -> None:
     app.add_middleware(ObservabilityMiddleware)
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestTrackingMiddleware)
+    # R5d 11b: read-your-own-writes mark + where an opted-in read ran.
+    from velaris_shared.middleware.read_routing import ReadRoutingMiddleware
+    app.add_middleware(ReadRoutingMiddleware)
 
+    # Per client ADDRESS, as the gateway (VELARIS_GW_RATE_API, 20 r/s burst 40)
+    # now hands it over. Was 120/min burst 30 when every Studio user arrived as
+    # 127.0.0.1 — on the Redis backend that was ONE bucket for the whole install
+    # (R6, 2026-10-30). Matched to the gateway so this second layer is never the
+    # stricter one: nothing that works today is refused by it.
     if not settings.debug and "PYTEST_CURRENT_TEST" not in os.environ:
         if (getattr(settings, "rate_limit_backend", "memory") == "redis"
                 and getattr(settings, "redis_enabled", False)):
             from velaris_shared.middleware.rate_limit_redis import RedisRateLimitMiddleware
             app.add_middleware(
                 RedisRateLimitMiddleware,
-                requests_per_minute=120, burst=30,
+                requests_per_minute=1200, burst=40,
                 exclude_paths=["/health", "/ready", "/metrics"],
             )
         else:
             app.add_middleware(
                 RateLimitMiddleware,
-                requests_per_minute=120, burst=30,
+                requests_per_minute=1200, burst=40,
                 exclude_paths=["/health", "/ready"],
             )
 
@@ -234,7 +250,7 @@ def apply_platform_error_handlers(app: FastAPI, logger_name: str) -> None:
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
-    from sqlalchemy.exc import InterfaceError, OperationalError
+    from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, PendingRollbackError
 
     from velaris_shared.core.error_codes import (
         DB_UNAVAILABLE_503,
@@ -273,6 +289,30 @@ def apply_platform_error_handlers(app: FastAPI, logger_name: str) -> None:
     # wraps a fault into OperationalError once a connection exists.
     for _fault in (OperationalError, InterfaceError, ConnectionError):
         app.add_exception_handler(_fault, _db_unavailable_handler)
+
+    # A lost connection that a route's `except Exception` swallowed surfaces
+    # later as PendingRollbackError on the next query (R6 failure test,
+    # 2026-11-03: PostgreSQL killed mid-create answered 500). Nothing was
+    # committed, so it is the same "database unavailable". Any other pending
+    # rollback (e.g. a swallowed IntegrityError) is a real bug and stays a 500.
+    @app.exception_handler(PendingRollbackError)
+    async def _pending_rollback_handler(request, exc):  # noqa: ANN001
+        if "Can't reconnect until invalid transaction is rolled back" in str(exc):
+            return await _db_unavailable_handler(request, exc)
+        return await _unhandled_handler(request, exc)
+
+    # A connection dropped mid-query (the pooler or the database killed under
+    # load) can reach us as a plain DBAPIError — asyncpg's
+    # ConnectionDoesNotExistError has no closer SQLAlchemy class (R6 failure
+    # test, 2026-11-03: GET /cases answered 500). SQLAlchemy marks those
+    # `connection_invalidated`; that is "database unavailable". Any other
+    # DBAPIError is a real fault and stays a 500. OperationalError and
+    # InterfaceError keep their own handler above (more specific class wins).
+    @app.exception_handler(DBAPIError)
+    async def _dbapi_handler(request, exc):  # noqa: ANN001
+        if getattr(exc, "connection_invalidated", False):
+            return await _db_unavailable_handler(request, exc)
+        return await _unhandled_handler(request, exc)
 
     @app.exception_handler(Exception)
     async def _unhandled_handler(request, exc):  # noqa: ANN001

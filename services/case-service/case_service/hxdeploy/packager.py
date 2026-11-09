@@ -914,6 +914,11 @@ async def apply_bundle(
     # ── 7. Connectors (preserve existing credentials) ──────────────────────
     for c in bundle.get("connectors", []):
         try:
+            # The same checks as the connector API (2026-11-04): a package can
+            # no more plant an internal target or a reserved key than a person.
+            from velaris_shared.hxbridge.security import check_connector_config
+            await check_connector_config(session, c.get("connector_type", ""), target_tenant_id,
+                                         c.get("config", {}))
             ex = (await session.execute(
                 select(ConnectorRegistryModel).where(
                     ConnectorRegistryModel.name == c["name"],
@@ -976,6 +981,11 @@ async def apply_bundle(
     # ── 9. Form definitions ────────────────────────────────────────────────
     for f in bundle.get("form_definitions", []):
         try:
+            # Embeds from approved sites only, as an ordinary save (2026-11-04).
+            from velaris_shared.forms.embed import form_embed_problem
+            problem = await form_embed_problem(session, _new_owner, f.get("definition_json") or {})
+            if problem:
+                raise ValueError(problem)
             ex = await _owned_match(FormDefinitionModel, name=f["name"], version=f["version"])
             local_dm_id = dm_id_map.get(f.get("data_model_id", "") or "")
             if ex:
@@ -1318,7 +1328,7 @@ async def apply_bundle(
             # The TARGET's policy, not the source's: dev may allow a registry
             # production does not, and the refusal belongs at import rather than
             # at the first run, when nobody is watching.
-            from case_service.marketplace import runtime as _mkt_runtime
+            from velaris_shared.apps import runtime as _mkt_runtime
             try:
                 _mkt_runtime.check_registry_allowed(str(b.get("image") or ""))
             except Exception as exc:

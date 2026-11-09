@@ -37,6 +37,10 @@ DEFAULTS = {
     "VELARIS_ANALYTICS_PORT": "8202",
     "VELARIS_HXGRAPH_PORT": "8203",
     "VELARIS_HXMIGRATE_PORT": "8204",
+    "VELARIS_COMMERCE_PORT": "8207",
+    "VELARIS_PORTAL_PORT": "8205",
+    "VELARIS_USER_PORT": "8206",
+    "VELARIS_WORKER_PORT": "8208",
     "VELARIS_STUDIO_PORT": "5173",
 }
 
@@ -100,6 +104,9 @@ def test_the_launch_script_uses_the_variables():
     ("velaris-analytics-service.service", "VELARIS_ANALYTICS_PORT"),
     ("velaris-hxgraph-service.service", "VELARIS_HXGRAPH_PORT"),
     ("velaris-hxmigrate-service.service", "VELARIS_HXMIGRATE_PORT"),
+    ("velaris-commerce-service.service", "VELARIS_COMMERCE_PORT"),
+    ("velaris-portal-service.service", "VELARIS_PORTAL_PORT"),
+    ("velaris-worker-service.service", "VELARIS_WORKER_PORT"),
     ("velaris-studio.service", "VELARIS_STUDIO_PORT"),
 ])
 def test_units_take_their_port_from_the_environment(unit, var):
@@ -247,11 +254,19 @@ def test_the_public_portal_has_its_own_tighter_zone():
 def test_the_limit_is_not_keyed_on_a_client_controlled_header():
     """`X-Forwarded-For` is set by the caller. Keying a rate limit on it is a
     rate-limit bypass with extra steps; behind a real proxy the answer is
-    `set_real_ip_from`, not trust."""
+    `set_real_ip_from`, not trust.
+
+    Since R6 (2026-10-30) the key is `$velaris_client`: the address Studio's own
+    server names in X-Velaris-Client, believed ONLY from a loopback peer, and the
+    peer's address otherwise — a remote caller's header is never used."""
     conf = NGINX.read_text()
     for m in re.finditer(r"limit_req_zone\s+(\S+)", conf):
-        assert m.group(1) == "$binary_remote_addr", (
+        assert m.group(1) == "$velaris_client", (
             f"rate-limit key {m.group(1)} is client-controlled")
+    assert re.search(r"map \$remote_addr \$velaris_loopback_peer \{ 127\.0\.0\.1 1; default 0; \}", conf)
+    block = conf[conf.index('map "$velaris_loopback_peer|'):]
+    block = block[:block.index("\n    }")]
+    assert '"~^1\\|' in block and "default $remote_addr;" in block
 
 
 def _no_placeholders(conf: str) -> str:

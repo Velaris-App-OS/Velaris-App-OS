@@ -1,4 +1,4 @@
-// HELIX P23 — Observability Dashboard
+// Velaris P23 — Observability Dashboard
 import React, { useEffect, useMemo, useState } from "react";
 import { getAccessToken } from "@/auth/tokenManager";
 

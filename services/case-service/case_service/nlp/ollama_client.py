@@ -9,6 +9,8 @@ import json
 import logging
 from typing import Any
 
+from velaris_shared.llm.ollama_backend import ollama_client_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +34,7 @@ async def generate_json(
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, **ollama_client_kwargs()) as client:
             resp = await client.post(
                 f"{url}/api/generate",
                 json={
@@ -65,7 +67,7 @@ async def check_ollama_available(
     """Quick health check for Ollama."""
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, **ollama_client_kwargs()) as client:
             resp = await client.get(f"{url}/api/tags")
             return resp.status_code == 200
     except Exception:

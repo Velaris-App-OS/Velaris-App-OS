@@ -1,6 +1,6 @@
 """One place where a case action happens — single or bulk.
 
-Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 
 **Why one dispatcher rather than seventeen routes.** Every named action route
 has to remember the same six things: the tenant clause, the per-case ReBAC
@@ -788,6 +788,13 @@ async def perform(
                 # The RELATIONSHIP question, which honours the switch exactly as
                 # the six removed routes did.
                 await hxguard.require_case(session, user, check_name, case_id)
+        # `split` creates a case: the access-group rule for creating one
+        # applies to the child's type, on top of the parent's privileges.
+        if action_name == "split" and user is not None:
+            from velaris_shared.hxguard.case_create import require_case_create
+            raw_ct = str((params or {}).get("case_type_id") or "")
+            if raw_ct:
+                await require_case_create(session, user, raw_ct)
     except Exception as exc:                                    # noqa: BLE001
         # **404 stays 404.** `require_case` answers 404 rather than 403 for a
         # case in another tenant, deliberately: a caller who may not reach a

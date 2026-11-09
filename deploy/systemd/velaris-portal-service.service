@@ -1,0 +1,58 @@
+[Unit]
+Description=Velaris Portal Service — customer portal, customer accounts, portal admin (loopback 127.0.0.1:8205, fronted by nginx on 8200)
+After=network-online.target docker.service
+Wants=network-online.target
+# Requires, not just After: the database, cache and broker are all containers,
+# so without a running Docker daemon this service has nothing to talk to and
+# would boot into serving 500s (which is exactly what happened 2026-08-05).
+Requires=docker.service
+# Never stop trying: a service that gives up after N restarts is a service that
+# is down at 3am with no one watching.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+# Historical default; .env below overrides it when the install sets a port.
+Environment=VELARIS_PORTAL_PORT=8205
+EnvironmentFile=__VELARIS_DIR__/.env
+Environment=PATH=__VELARIS_HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# --reload is deliberately absent. It is a development convenience that forks a
+# file-watching supervisor, which confuses systemd's process tracking and would
+# mask a crash as a reload. Code changes come through update-velaris.sh, which
+# restarts the unit.
+#
+# This service is the customer portal, extracted at R5e step 8. It holds its own connection
+# pool against the same database, so it has exactly case-service's dependency
+# on Docker and the same reason to wait for the port rather than race it.
+#
+# ExecStartPre blocks until the database is actually accepting connections.
+# Ordering After=docker.service only guarantees the daemon, not a bound port —
+# and a case-service that wins the race comes up permanently broken rather than
+# retrying. On timeout this fails the unit on purpose; Restart=always below
+# turns that into a retry loop that recovers by itself.
+ExecStartPre=__WAITDEPS__ __VELARIS_DIR__
+ExecStart=__EXEC__ __VELARIS_DIR__ __UV__ run uvicorn portal_service.main:app --host 127.0.0.1 --port ${VELARIS_PORTAL_PORT} --app-dir services/portal-service --proxy-headers
+
+Restart=always
+RestartSec=5
+# Must exceed the ExecStartPre wait (90s) or systemd kills the wait as a
+# start-up timeout before it can report the real cause.
+TimeoutStartSec=180
+# uvicorn shuts down cleanly on SIGINT; SIGTERM leaves connections hanging.
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-portal-service
+
+# Records peak memory per run, so `systemctl status` and journald can show an
+# OOM for what it is instead of leaving you guessing as we did today.
+MemoryAccounting=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

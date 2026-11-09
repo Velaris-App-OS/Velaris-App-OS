@@ -46,7 +46,8 @@ function money(cents: number, ccy: string) {
 // ── Overview (KPIs) ───────────────────────────────────────────────────────────
 function OverviewTab() {
   const [sum, setSum] = useState<any>(null);
-  useEffect(() => { authFetch(`${API}/analytics/summary`).then(r => r.json()).then(setSum).catch(() => {}); }, []);
+  // Only a real summary: a refusal object rendered as one showed undefined figures.
+  useEffect(() => { authFetch(`${API}/analytics/summary`).then(async r => { if (r.ok) setSum(await r.json()); }).catch(() => {}); }, []);
   if (!sum) return <div style={{ color: "var(--text-muted)" }}>Loading…</div>;
   return (
     <div>
@@ -113,7 +114,7 @@ function TokensTab() {
     <div>
       <div style={S.card}>
         <div style={S.label}>New API key</div>
-        <input style={S.input} placeholder="Label (e.g. My Shopify Store)" value={label} onChange={e => setLabel(e.target.value)} />
+        <input style={S.input} placeholder="Label (e.g. My web shop)" value={label} onChange={e => setLabel(e.target.value)} />
         <select style={S.input} value={mode} onChange={e => setMode(e.target.value)}>
           <option value="live">Live</option><option value="test">Test</option>
         </select>
@@ -145,7 +146,7 @@ function TokensTab() {
 // ── Webhooks (integrations) ─────────────────────────────────────────────────────
 function WebhooksTab() {
   const [integrations, setIntegrations] = useState<any[]>([]);
-  const [platform, setPlatform] = useState("shopify");
+  const [platform, setPlatform] = useState("custom");
   const [label, setLabel] = useState("");
   const [secret, setSecret] = useState("");
 
@@ -165,9 +166,9 @@ function WebhooksTab() {
       <div style={S.card}>
         <div style={S.label}>New webhook integration</div>
         <select style={S.input} value={platform} onChange={e => setPlatform(e.target.value)}>
+          <option value="custom">Custom (field map)</option>
           <option value="shopify">Shopify</option><option value="woocommerce">WooCommerce</option>
           <option value="magento">Magento</option><option value="bigcommerce">BigCommerce</option>
-          <option value="custom">Custom (field map)</option>
         </select>
         <input style={S.input} placeholder="Label" value={label} onChange={e => setLabel(e.target.value)} />
         <input style={S.input} placeholder="HMAC shared secret" value={secret} onChange={e => setSecret(e.target.value)} />

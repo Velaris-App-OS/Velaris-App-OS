@@ -162,6 +162,17 @@ export async function getCaseTypeForm(slug: string, caseTypeId: string): Promise
   return (await r.json()).fields ?? [];
 }
 
+/** The case type's form as the portal draws it (part 10): fields a customer
+ *  cannot fill in are left out by the server. Null when none is attached. */
+export async function getCaseTypeFormDefinition(slug: string, caseTypeId: string): Promise<any | null> {
+  const r = await fetch(`/api/v1/portal/${slug}/case-types/${caseTypeId}/form`);
+  if (!r.ok) return null;
+  const body = await r.json();
+  const d = body.definition;
+  // Embeds (2026-10-29): the sites this portal may show, checked again in the browser.
+  return d && d.sections?.length ? { ...d, embed_origins: Array.isArray(body.embed_origins) ? body.embed_origins : [] } : null;
+}
+
 // ── P3b: voice input on the portal ──────────────────────────────────
 
 export type PortalVoiceStatus = {

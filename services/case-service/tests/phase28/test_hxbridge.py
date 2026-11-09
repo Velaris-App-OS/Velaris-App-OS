@@ -1,4 +1,4 @@
-"""HELIX P28 — HxBridge Connector Protocol Foundation tests (23 tests).
+"""Velaris P28 — HxBridge Connector Protocol Foundation tests (23 tests).
 
 Covers: encryption round-trip, mask_credentials, connector registry
         (list types, create, duplicate 409, list, get detail, update,

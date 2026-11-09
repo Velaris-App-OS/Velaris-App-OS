@@ -1,6 +1,6 @@
 """The five actions §7 unblocked, and the automatic `in_progress`.
 
-Design: `docs/Future/CASE-ACTIONS-STATUS-DESIGN.md` §7, answered 2026-09-08.
+Design: `docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md` §7, answered 2026-09-08.
 Migration **199** (soft delete) is the only schema change; the rest is registry,
 handlers and one rule.
 
@@ -69,6 +69,13 @@ def _token(username: str, roles=("admin",)) -> str:
 
 def _headers(username: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(username)}"}
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _case_creators(setup_db):
+    """Creating a case needs an access group granting it (2026-10-18)."""
+    from tests.conftest import grant_case_create
+    await grant_case_create('ren')
 
 
 @pytest_asyncio.fixture

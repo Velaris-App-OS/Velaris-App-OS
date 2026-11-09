@@ -163,6 +163,15 @@ async def start_sla_endpoint(
             detail=f"SLA policy '{body.sla_policy_id}' not found in case type definition",
         )
 
+    # One instance per (case, policy) — a case's SLAs start when it is created,
+    # so a second start hit the unique key and answered 500 (R5b drill, 2026-10-30).
+    already = (await session.execute(select(CaseSLAInstanceModel.id).where(
+        CaseSLAInstanceModel.case_id == case_id,
+        CaseSLAInstanceModel.sla_policy_id == body.sla_policy_id,
+    ))).scalar_one_or_none()
+    if already is not None:
+        raise HTTPException(status_code=409, detail="This SLA is already running for this case")
+
     sla = await sla_start(
         session,
         case_id=case_id,

@@ -62,6 +62,11 @@
 # 2026-09-29 (8d): `_assert_role_grant` — only a superadmin grants superadmin
 # (break-glass, kind 1). realtime `__init__`/`get_presence` carry roles into
 # a socket caller solely for `is_superadmin`.
+
+# 2026-10-19: realtime `websocket_endpoint` — the socket now signs in through
+# get_current_user and builds that same socket caller from the checked user
+# (kind 1, as `get_presence`); it replaced `_socket_caller`, which read the
+# raw claims.
 access_groups.py::list_access_groups
 access_groups.py::list_access_roles
 access_groups.py::list_portals
@@ -77,6 +82,7 @@ auth_real.py::list_users
 auth_real.py::login_real
 auth_real.py::refresh_token_endpoint
 auth_real.py::register_user
+auth_real.py::restore_deleted_user
 auth_real.py::revoke_device_endpoint
 auth_real.py::sso_callback
 auth_real.py::update_my_profile
@@ -141,6 +147,7 @@ identity_admin.py::list_account_links
 payments.py::reveal_bank_reference
 realtime.py::__init__
 realtime.py::get_presence
+realtime.py::websocket_endpoint
 releases.py::_require_superadmin
 releases.py::create_release
 releases.py::delete_release

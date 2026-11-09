@@ -437,9 +437,16 @@ function PaymentsTab() {
 function WebhooksTab() {
   const [events, setEvents]     = useState<WebhookEvent[]>([]);
   const [selected, setSelected] = useState<WebhookEvent | null>(null);
+  const [refused, setRefused]   = useState<string | null>(null);
 
   useEffect(() => {
-    authFetch(`${API}/webhooks`).then(r => r.json()).then(setEvents).catch(() => {});
+    // A refusal is an object, not a list: fed to .map it threw and blanked the
+    // whole HxConnect page for anyone without the payments role. Say why instead.
+    authFetch(`${API}/webhooks`).then(async r => {
+      const d = await r.json().catch(() => null);
+      if (!r.ok) { setRefused(typeof d?.detail === "string" ? d.detail : `HTTP ${r.status}`); return; }
+      setEvents(Array.isArray(d) ? d : []);
+    }).catch(() => {});
   }, []);
 
   return (
@@ -447,7 +454,8 @@ function WebhooksTab() {
       <div style={S.sidebar}>
         <div style={S.sideHead}>Recent Events ({events.length})</div>
         <div style={S.list}>
-          {events.length === 0 && <div style={S.empty}>No webhook events yet.</div>}
+          {refused && <div style={S.empty}>Not available: {refused}</div>}
+          {!refused && events.length === 0 && <div style={S.empty}>No webhook events yet.</div>}
           {events.map(e => (
             <div
               key={e.id}

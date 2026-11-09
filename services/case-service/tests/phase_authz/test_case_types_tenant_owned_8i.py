@@ -43,7 +43,7 @@ from velaris_shared.db.models import (
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,6 +52,13 @@ GHOST = _headers("ghostadmin", ["admin"])        # tenant claim that resolves to
 OPS = _headers("defadmin", ["admin"])            # default tenant = platform operator
 BASE = "/api/v1/case-types"
 DEFN = {"stages": [{"id": "s1", "name": "Intake", "steps": []}]}
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _case_creators(setup_db):
+    """Creating a case needs an access group granting it (2026-10-18)."""
+    from tests.conftest import grant_case_create
+    await grant_case_create('devadmin', 'defadmin', 'ghostadmin')
 
 
 @pytest_asyncio.fixture

@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select, func, text
+from sqlalchemy import delete, exists, select, func, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +42,8 @@ from velaris_shared.db.models import (
 )
 
 log = logging.getLogger(__name__)
+
+_VERIFY_BLOCK = 5000   # chain links read per query by verify_chain
 GENESIS_HASH = "0" * 64
 #: Inclusive sequence ranges one prune record may carry; a larger prune is
 #: written as several records.
@@ -123,6 +125,8 @@ async def prunes_available(session: AsyncSession) -> bool:
 
 
 def _reset_cache_for_tests() -> None:
+    global _recent_verify  # noqa: PLW0603
+    _recent_verify = None
     global _prunes_seen, _prunes_missing_logged
     _prunes_seen = False
     _prunes_missing_logged = False
@@ -234,22 +238,23 @@ async def _last_chain_row(session: AsyncSession) -> AuditChainModel | None:
 
 
 async def _unsealed_audit_rows(
-    session: AsyncSession, after_id: uuid.UUID | None,
+    session: AsyncSession, limit: int,
 ) -> list[CaseAuditLogModel]:
-    """Audit rows not yet sealed.
+    """The oldest `limit` audit rows not yet sealed, in timestamp + id order.
 
-    Strategy: rely on monotonic timestamp + id ordering. We seal in
-    timestamp order; rows with timestamp > last_sealed_timestamp OR
-    same timestamp + id > last_sealed_id are unsealed.
-
-    Simpler: NOT IN (SELECT audit_log_id FROM chain). We use a LEFT JOIN
-    via subquery for portability across SQLite + Postgres.
+    An anti-join (NOT EXISTS), with the limit in the query. Until 2026-11-06 it
+    was `id NOT IN (every sealed id)` with no limit, the batch cut in Python:
+    at 1.58M audit rows (vx-load, after the R6 soak) one call ran for 50 min on
+    3 cores, holding the seal lock all the while. The anti-join plans as a hash
+    anti-join on PostgreSQL and MySQL — 0.9 s for the same rows. Any row not in
+    the chain is found, a late-committed older one too: no watermark is trusted.
     """
-    sealed_ids_subq = select(AuditChainModel.audit_log_id).subquery()
+    sealed = exists().where(AuditChainModel.audit_log_id == CaseAuditLogModel.id)
     q = (
         select(CaseAuditLogModel)
-        .where(CaseAuditLogModel.id.notin_(select(sealed_ids_subq.c.audit_log_id)))
+        .where(~sealed)
         .order_by(CaseAuditLogModel.timestamp.asc(), CaseAuditLogModel.id.asc())
+        .limit(max(1, int(limit)))
     )
     res = await session.execute(q)
     return list(res.scalars().all())
@@ -267,8 +272,7 @@ async def seal_new_entries(session: AsyncSession, max_rows: int = 10000) -> dict
     last_seq = last.sequence if last else 0
     last_hash = last.content_hash if last else GENESIS_HASH
 
-    pending = await _unsealed_audit_rows(session, last.audit_log_id if last else None)
-    pending = pending[:max_rows]
+    pending = await _unsealed_audit_rows(session, max_rows)
 
     sealed = 0
     for audit_row in pending:
@@ -297,93 +301,179 @@ async def seal_new_entries(session: AsyncSession, max_rows: int = 10000) -> dict
     }
 
 
+async def seal_all_pending(session_factory, batch: int = 10000,
+                           max_batches: int = 10000) -> int:
+    """Seal every pending audit row, one committed transaction per batch.
+
+    The daily anchor sealed one batch (10,000 rows) a day, so an install
+    writing more than that fell behind for good — vx-load, 2026-11-06: 224k of
+    1.58M rows sealed. Each batch is its own short transaction, so the seal
+    lock is never held for long and a stop loses at most one batch (sealed again
+    next time). Returns how many rows were sealed.
+    """
+    import asyncio
+
+    total = 0
+    for _ in range(max_batches):
+        async with session_factory() as session:
+            n = (await seal_new_entries(session, max_rows=batch))["sealed"]
+            await session.commit()
+        total += n
+        if n < batch:
+            break
+        await asyncio.sleep(0)
+    if total:
+        log.info("sealed %d pending audit entries", total)
+    return total
+
+
 async def verify_chain(session: AsyncSession, limit: int | None = None) -> dict:
     """Walk the chain in order. Recompute hashes. Report any breaks.
 
     Returns: {verified, chain_length, breaks: [...], tip_sequence, tip_hash,
     pruned, prunes: [...]}. Rows removed under a valid prune record are counted
     in `pruned` and are not breaks; `verified` is about breaks alone.
+
+    Reads the chain in blocks of `_VERIFY_BLOCK` links, each block's audit rows
+    in ONE query, as plain rows (nothing kept in the session). Until 2026-11-06
+    it loaded the whole chain as objects and fetched every audit row with its
+    own query: at 1.58M links (vx-load) Verify and the evidence pack ran past
+    the gateway's 120 s. The checks, their order and the result are unchanged.
     """
     prune_by_id, prune_problem, covered = await _valid_prunes(session)
     pruned = 0
     prunes: list[dict] = []
-    q = select(AuditChainModel).order_by(AuditChainModel.sequence.asc())
-    if limit:
-        q = q.limit(limit)
-    res = await session.execute(q)
-    chain = list(res.scalars().all())
-
     breaks: list[dict] = []
     expected_prev = GENESIS_HASH
+    length = 0
+    tip_sequence, tip_hash = 0, GENESIS_HASH
+    after: int | None = None
 
-    for row in chain:
-        # 1. Linkage check
-        if row.prev_hash != expected_prev:
-            breaks.append({
-                "sequence": row.sequence,
-                "type": "broken_link",
-                "expected_prev": expected_prev,
-                "actual_prev": row.prev_hash,
-            })
-            # Continue with row.prev_hash as new baseline so downstream
-            # rows aren't all reported as broken too:
-            expected_prev = row.content_hash
-            continue
+    while True:
+        want = _VERIFY_BLOCK if not limit else min(_VERIFY_BLOCK, limit - length)
+        if want <= 0:
+            break
+        q = (select(AuditChainModel.sequence, AuditChainModel.audit_log_id,
+                    AuditChainModel.prev_hash, AuditChainModel.content_hash)
+             .order_by(AuditChainModel.sequence.asc()).limit(want))
+        if after is not None:
+            q = q.where(AuditChainModel.sequence > after)
+        block = (await session.execute(q)).all()
+        if not block:
+            break
+        audit_by_id = {
+            r.id: r for r in (await session.execute(
+                select(CaseAuditLogModel.id, CaseAuditLogModel.case_id,
+                       CaseAuditLogModel.action, CaseAuditLogModel.actor_id,
+                       CaseAuditLogModel.actor_type, CaseAuditLogModel.details,
+                       CaseAuditLogModel.timestamp)
+                .where(CaseAuditLogModel.id.in_([b.audit_log_id for b in block]))
+            )).all()
+        }
+        after = block[-1].sequence
+        length += len(block)
+        tip_sequence, tip_hash = block[-1].sequence, block[-1].content_hash
 
-        # 2. Content check
-        audit_row = await session.get(CaseAuditLogModel, row.audit_log_id)
-        rec = prune_by_id.get(row.audit_log_id) if audit_row is None else None
-        if rec is not None:
-            # This link seals a prune record, not an audit row.
-            if rec.id in prune_problem:
+        for row in block:
+            # 1. Linkage check
+            if row.prev_hash != expected_prev:
                 breaks.append({
                     "sequence": row.sequence,
-                    "type": "prune_record_invalid",
-                    "prune_id": str(rec.id),
-                    "problem": prune_problem[rec.id],
+                    "type": "broken_link",
+                    "expected_prev": expected_prev,
+                    "actual_prev": row.prev_hash,
                 })
-            else:
-                prunes.append({
-                    "sequence": row.sequence, "prune_id": str(rec.id),
-                    "reason": rec.reason, "actor": rec.actor, "cutoff": rec.cutoff,
-                    "recorded_at": rec.recorded_at, "pruned_count": int(rec.pruned_count),
+                # Continue with row.prev_hash as new baseline so downstream
+                # rows aren't all reported as broken too:
+                expected_prev = row.content_hash
+                continue
+
+            # 2. Content check
+            audit_row = audit_by_id.get(row.audit_log_id)
+            rec = prune_by_id.get(row.audit_log_id) if audit_row is None else None
+            if rec is not None:
+                # This link seals a prune record, not an audit row.
+                if rec.id in prune_problem:
+                    breaks.append({
+                        "sequence": row.sequence,
+                        "type": "prune_record_invalid",
+                        "prune_id": str(rec.id),
+                        "problem": prune_problem[rec.id],
+                    })
+                else:
+                    prunes.append({
+                        "sequence": row.sequence, "prune_id": str(rec.id),
+                        "reason": rec.reason, "actor": rec.actor, "cutoff": rec.cutoff,
+                        "recorded_at": rec.recorded_at, "pruned_count": int(rec.pruned_count),
+                    })
+                expected_prev = row.content_hash
+                continue
+            if audit_row is None and row.sequence in covered:
+                pruned += 1
+                expected_prev = row.content_hash
+                continue
+            if audit_row is None:
+                breaks.append({
+                    "sequence": row.sequence,
+                    "type": "missing_audit_row",
+                    "audit_log_id": str(row.audit_log_id),
                 })
-            expected_prev = row.content_hash
-            continue
-        if audit_row is None and row.sequence in covered:
-            pruned += 1
-            expected_prev = row.content_hash
-            continue
-        if audit_row is None:
-            breaks.append({
-                "sequence": row.sequence,
-                "type": "missing_audit_row",
-                "audit_log_id": str(row.audit_log_id),
-            })
-            expected_prev = row.content_hash
-            continue
+                expected_prev = row.content_hash
+                continue
 
-        recomputed = compute_row_hash(audit_row, row.prev_hash)
-        if recomputed != row.content_hash:
-            breaks.append({
-                "sequence": row.sequence,
-                "type": "content_tampered",
-                "audit_log_id": str(row.audit_log_id),
-                "stored_hash": row.content_hash,
-                "recomputed_hash": recomputed,
-            })
+            recomputed = compute_row_hash(audit_row, row.prev_hash)
+            if recomputed != row.content_hash:
+                breaks.append({
+                    "sequence": row.sequence,
+                    "type": "content_tampered",
+                    "audit_log_id": str(row.audit_log_id),
+                    "stored_hash": row.content_hash,
+                    "recomputed_hash": recomputed,
+                })
 
-        expected_prev = row.content_hash
+            expected_prev = row.content_hash
+
+        if len(block) < want:
+            break
 
     return {
         "verified": len(breaks) == 0,
-        "chain_length": len(chain),
+        "chain_length": length,
         "breaks": breaks,
-        "tip_sequence": chain[-1].sequence if chain else 0,
-        "tip_hash": chain[-1].content_hash if chain else GENESIS_HASH,
+        "tip_sequence": tip_sequence,
+        "tip_hash": tip_hash,
         "pruned": pruned,
         "prunes": prunes,
     }
+
+
+_recent_verify: tuple[float, dict] | None = None
+_recent_verify_lock = None
+
+
+async def verify_chain_recent(session: AsyncSession, max_age_s: int = 300) -> dict:
+    """`verify_chain`, reusing this process's last full result for `max_age_s`.
+
+    For callers any tenant can trigger (a tenant's evidence pack): a full
+    verification reads the whole install's chain (61 s at 1.6M links), so one
+    tenant generating packs in a loop must not run one each. Concurrent calls
+    wait for the one run in progress and share it. The result says when it
+    was verified (`verified_at`). The operator's Verify always runs fresh.
+    """
+    import asyncio
+    import time
+
+    global _recent_verify, _recent_verify_lock  # noqa: PLW0603
+    if _recent_verify_lock is None:
+        _recent_verify_lock = asyncio.Lock()
+    async with _recent_verify_lock:
+        now = time.monotonic()
+        if _recent_verify is not None and now - _recent_verify[0] < max_age_s:
+            return _recent_verify[1]
+        out = await verify_chain(session)
+        out = {**out, "verified_at": datetime.now(timezone.utc).isoformat()}
+        _recent_verify = (time.monotonic(), out)
+        return out
 
 
 async def chain_status(session: AsyncSession) -> dict:

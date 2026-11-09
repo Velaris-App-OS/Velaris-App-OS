@@ -1,4 +1,4 @@
-"""HELIX P29 — HxSync tests (26 tests).
+"""Velaris P29 — HxSync tests (26 tests).
 
 Covers: protocol registry, DuckDB adapter (health/schema/push),
         stub adapters (bigquery/snowflake/kafka/kinesis/pubsub),

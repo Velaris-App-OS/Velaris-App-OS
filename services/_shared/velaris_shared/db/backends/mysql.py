@@ -16,6 +16,29 @@ from typing import Any
 from urllib.parse import quote
 
 
+def _fix_aiomysql_ping() -> None:
+    """SQLAlchemy's aiomysql dialect crashes on every pool pre-ping.
+
+    It inherits the pymysql dialect's `do_ping`, which inspects pymysql's
+    `Connection.ping`: since pymysql changed that default to `reconnect=False`,
+    SQLAlchemy calls `ping()` with no argument — but the aiomysql ADAPTER's
+    `ping(self, reconnect)` requires one, so it raises TypeError. With
+    `pool_pre_ping=True` (velaris_shared.db.session) that is every reuse of a
+    pooled connection on a MySQL / MariaDB install. Found 2026-10-16 (R5a step
+    d, verifying a restore on MySQL 8.4). Passing False explicitly is what the
+    adapter asserts anyway. Applied on import, to the dialect class, so every
+    MySQL engine (session, HxDeploy twin, HxDBMigrate source) gets it.
+    """
+    try:
+        from sqlalchemy.dialects.mysql.aiomysql import MySQLDialect_aiomysql
+    except Exception:          # SQLAlchemy without the dialect: nothing to fix
+        return
+    MySQLDialect_aiomysql._send_false_to_ping = True
+
+
+_fix_aiomysql_ping()
+
+
 class MysqlBackend:
     """MySQL 8+ / MariaDB 10.6+ via aiomysql (async) / pymysql (sync)."""
 

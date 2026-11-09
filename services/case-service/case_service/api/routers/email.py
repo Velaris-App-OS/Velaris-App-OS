@@ -20,6 +20,7 @@ from case_service.mail import EmailService
 from case_service.mail.service import ConsentRefused
 from case_service.mail.templates import render_template, TemplateError
 from case_service.mail import tenancy as mail_tenancy
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/email", tags=["email"])
 service = EmailService()
@@ -185,6 +186,24 @@ def _msg_to_dict(m):
 
 
 # Accounts
+async def _require_public_mail_hosts(session, user, smtp_host, imap_host) -> None:
+    """A tenant's SMTP/IMAP servers must be on the internet, never this
+    install's own network (2026-11-04): a tenant admin — a website demo account
+    among them — could point the poller and sender at 127.0.0.1 or the LAN.
+    The platform operator's LAN mail servers are unchanged."""
+    from velaris_shared.hxbridge.security import validate_outbound_host
+    from velaris_shared.tenancy.identity import is_platform_operator
+    hosts = [h for h in (smtp_host, imap_host) if h]
+    if not hosts or await is_platform_operator(session, user):
+        return
+    for h in hosts:
+        try:
+            await validate_outbound_host(h)
+        except ValueError:
+            raise HTTPException(400, f"Mail host {h!r} is not reachable from this platform: "
+                                     "private and internal addresses are refused.")
+
+
 @router.post("/accounts", status_code=201)
 async def create_account(
     body: AccountIn,
@@ -192,6 +211,7 @@ async def create_account(
     user: AuthenticatedUser = Depends(hxguard.guard("platform.email.configure")),
 ):
     scope = await mail_tenancy.scope_for(session, user)
+    await _require_public_mail_hosts(session, user, body.smtp_host, body.imap_host)
     values = body.model_dump()
     values["tenant_id"] = await _tenant_for_write(session, scope, body.tenant_id)
     a = EmailAccountModel(**values)
@@ -225,6 +245,7 @@ async def update_account(
     user: AuthenticatedUser = Depends(hxguard.guard("platform.email.configure")),
 ):
     a, scope = await _own_account(session, user, account_id)
+    await _require_public_mail_hosts(session, user, body.smtp_host, body.imap_host)
     for k, v in body.model_dump().items():
         if k in ("smtp_password", "imap_password") and v is None:
             continue  # None means "keep existing" — never wipe a stored password
@@ -486,7 +507,7 @@ async def assign_to_case(
 
 @router.get("/inbox/stats")
 async def inbox_stats(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("platform.email.read")),
 ):
     scope = await mail_tenancy.scope_for(session, _user)

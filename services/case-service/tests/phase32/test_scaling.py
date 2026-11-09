@@ -1,4 +1,4 @@
-"""HELIX P32 — Redis bridge, rate limiter, realtime multi-instance tests."""
+"""Velaris P32 — Redis bridge, rate limiter, realtime multi-instance tests."""
 from __future__ import annotations
 
 import asyncio
@@ -165,7 +165,13 @@ async def test_06_redis_bridge_fans_out_remote_messages():
 
 
 @pytest.mark.asyncio
-async def test_07_redis_rate_limiter_fails_open_without_redis(monkeypatch):
+async def test_07_redis_rate_limiter_falls_back_without_redis(monkeypatch):
+    """Cache unreachable → the in-process limiter, never no limit.
+
+    It used to fail OPEN here: every request allowed while the cache was down
+    (changed 2026-10-16). A real client address is used because loopback is
+    exempt from the in-process limiter.
+    """
     from velaris_shared.middleware.rate_limit_redis import RedisRateLimitMiddleware
 
     async def _no_redis():
@@ -176,13 +182,84 @@ async def test_07_redis_rate_limiter_fails_open_without_redis(monkeypatch):
     @app.get("/x")
     async def x(): return {"ok": True}
 
-    # Patch get_redis to return None
     monkeypatch.setattr("velaris_shared.redis_client.get_redis", _no_redis)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        for _ in range(20):
-            r = await c.get("/x")
-            assert r.status_code == 200  # fail-open
+    transport = ASGITransport(app=app, client=("203.0.113.9", 4321))
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        codes = [(await c.get("/x")).status_code for _ in range(12)]
+    assert codes[:5] == [200] * 5
+    assert 429 in codes[5:]
+
+
+@pytest.mark.asyncio
+async def test_07b_redis_rate_limiter_reloads_its_script_after_a_cache_restart(monkeypatch):
+    """NOSCRIPT (cache restarted, script cache gone) must not disable limiting
+    for good: the limiter forgets the sha, falls back for that request, and
+    loads the script again on the next one."""
+    from velaris_shared.middleware import rate_limit_redis as rlr
+
+    class RestartedRedis:
+        def __init__(self):
+            self.loads = 0
+            self.fail_next = True
+        async def script_load(self, _lua):
+            self.loads += 1
+            return f"sha{self.loads}"
+        async def evalsha(self, sha, n, *args):
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("NOSCRIPT No matching script")
+            return [1, 2, 0]
+
+    rr = RestartedRedis()
+
+    async def _get_redis():
+        return rr
+    monkeypatch.setattr("velaris_shared.redis_client.get_redis", _get_redis)
+
+    app = FastAPI()
+    app.add_middleware(rlr.RedisRateLimitMiddleware, requests_per_minute=60, burst=3)
+    @app.get("/x")
+    async def x(): return {"ok": True}
+
+    transport = ASGITransport(app=app, client=("203.0.113.9", 4321))
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        first = await c.get("/x")
+        second = await c.get("/x")
+    assert first.status_code == 200 and "X-RateLimit-Backend" not in first.headers
+    assert second.headers.get("X-RateLimit-Backend") == "redis"
+    assert rr.loads == 2, "the script must be loaded again after NOSCRIPT"
+
+
+@pytest.mark.asyncio
+async def test_07c_forwarded_for_cannot_switch_the_limiter_off():
+    """`X-Forwarded-For: 127.0.0.1` used to hit the loopback exemption: the
+    limiter read the header's left-most entry, which the client writes. It now
+    keys on uvicorn's resolved address only."""
+    from velaris_shared.middleware.rate_limit import RateLimitMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst=3)
+    @app.get("/x")
+    async def x(): return {"ok": True}
+
+    transport = ASGITransport(app=app, client=("203.0.113.9", 4321))
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        codes = [
+            (await c.get("/x", headers={"X-Forwarded-For": "127.0.0.1"})).status_code
+            for _ in range(8)
+        ]
+    assert 429 in codes, "a spoofed loopback X-Forwarded-For must not bypass the limit"
+
+
+def test_07d_cache_password_never_reaches_a_log():
+    from velaris_shared.redis_client import _safe_url
+    from velaris_shared.config import Settings
+
+    assert _safe_url("redis://:hunter2@127.0.0.1:6379/0") == "redis://:***@127.0.0.1:6379/0"
+    assert _safe_url("redis://localhost:6379/0") == "redis://localhost:6379/0"
+    s = Settings(redis_password="hunter2")
+    assert "hunter2" not in repr(s)
 
 
 @pytest.mark.asyncio
@@ -277,7 +354,7 @@ def test_10b_every_http_deployment_probes_correctly():
     base = Path(__file__).parents[4] / "deploy" / "helm" / "velaris" / "templates"
     for name in ("case-service-deployment.yaml", "analytics-service-deployment.yaml",
                  "hxgraph-service-deployment.yaml", "hxmigrate-service-deployment.yaml",
-                 "engine-deployment.yaml"):
+                 "commerce-service-deployment.yaml", "engine-deployment.yaml"):
         src = (base / name).read_text()
         for probe in ("startupProbe:", "readinessProbe:", "livenessProbe:"):
             assert probe in src, f"{name} has no {probe}"
@@ -305,7 +382,7 @@ def test_10c_workloads_are_hardened_and_carry_no_plaintext_password():
     base = Path(__file__).parents[4] / "deploy" / "helm" / "velaris"
     assert (base / "templates" / "db-secret.yaml").exists()
     for name in ("case-service", "analytics-service", "hxgraph-service",
-                 "hxmigrate-service", "engine", "worker"):
+                 "hxmigrate-service", "commerce-service", "engine", "worker"):
         src = (base / "templates" / f"{name}-deployment.yaml").read_text()
         assert "automountServiceAccountToken: false" in src, name
         assert 'include "helix.podSecurityContext"' in src, name
@@ -329,7 +406,7 @@ def test_10d_images_declare_a_numeric_non_root_user():
     root = Path(__file__).parents[4]
     for df in ("services/case-service/Dockerfile", "services/analytics-service/Dockerfile",
                "services/hxgraph-service/Dockerfile", "services/hxmigrate-service/Dockerfile",
-               "engine/Dockerfile"):
+               "services/commerce-service/Dockerfile", "engine/Dockerfile"):
         src = (root / df).read_text()
         assert "USER 10001:10001" in src, f"{df} must run as a numeric non-root uid"
 
@@ -420,3 +497,20 @@ def test_15_mysql_points_at_an_image_that_exists():
     mysql = _bundled_images()["mysql"]
     assert mysql.get("repository") != "bitnami/mysql", (
         "bitnami/mysql has no tags at all — a bundled MySQL cannot start from it")
+
+
+def test_07e_endpoint_limiters_key_on_the_resolved_client_not_the_header():
+    """The per-endpoint limiters (storefront subscribe, checkout order lookup,
+    every `rate_limit(...)` dependency) read X-Forwarded-For's left-most entry,
+    which the client writes: a new value per request was a new "address", so
+    tracking-token guessing was unlimited. They now share `_client_ip`, which
+    returns uvicorn's resolved client only."""
+    from types import SimpleNamespace
+    from velaris_shared.middleware.endpoint_rate_limit import _client_ip
+
+    req = SimpleNamespace(
+        headers={"X-Forwarded-For": "198.51.100.77, 203.0.113.9"},
+        client=SimpleNamespace(host="203.0.113.9"),
+    )
+    assert _client_ip(req) == "203.0.113.9"
+    assert _client_ip(SimpleNamespace(headers={}, client=None)) == "unknown"

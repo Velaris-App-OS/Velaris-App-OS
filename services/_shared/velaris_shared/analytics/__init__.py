@@ -1,1 +1,1 @@
-"""P26 HxAnalytics — Semantic Business Intelligence for Helix."""
+"""P26 HxAnalytics — Semantic Business Intelligence for Velaris."""

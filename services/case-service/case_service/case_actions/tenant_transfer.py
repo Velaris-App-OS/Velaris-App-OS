@@ -87,6 +87,9 @@ SEVER: frozenset[str] = frozenset({
     # Oct 18a: which arm of the SOURCE's content rollout the case landed in.
     # The destination has no such rollout; the source keeps its count honest.
     "content_rollout_cases", "content_rollout_shadow",
+    # Form Builder §5 step 6/7: a pin to the SOURCE's form snapshot, and a
+    # source person's unfinished answers. The destination starts afresh.
+    "case_form_versions", "form_drafts",
     # `case_instances.parent_case_id`, both directions.
     "case_instances",
 })
@@ -117,6 +120,9 @@ BLOCK: dict[str, str] = {
     "payment_requests": "it has payment requests",
     "payment_disbursements": "it has disbursements",
     "checkout_orders": "it has orders",
+    # R5e step 7: the case was opened for a commerce order (or its return /
+    # complaint); the order sweep finds it by this row in the source tenant.
+    "commerce_case_requests": "it was opened for a commerce order",
     "esign_requests": "it has e-signature requests, which are evidence bound to the source",
     "identity_verifications": "it has identity verifications performed for the source",
     "case_sessions": "it has recorded sessions, whose consent was given to the source",
@@ -577,7 +583,8 @@ async def accept(session: AsyncSession, *, row: CaseTenantTransferModel, actor: 
     if res.rowcount:
         manifest["severed"]["case_relationships"] = res.rowcount
     for name in ("portal_customer_cases", "portal_submission_refs", "hxwork_sprint_cards",
-                 "content_rollout_cases", "content_rollout_shadow"):
+                 "content_rollout_cases", "content_rollout_shadow",
+                 "case_form_versions", "form_drafts"):
         t = tables[name]
         res = await session.execute(delete(t).where(t.c.case_id == case.id))
         if res.rowcount:

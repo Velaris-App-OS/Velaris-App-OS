@@ -156,7 +156,8 @@ class TestEveryServiceRunsTheLoops:
 
         tasks = start_authz_loops("test-service")
         try:
-            assert len(tasks) == 2, f"expected both authz loops, got {len(tasks)}"
+            # role store + authz generation + platform generations (step 5).
+            assert len(tasks) == 3, f"expected all three loops, got {len(tasks)}"
         finally:
             for t in tasks:
                 t.cancel()

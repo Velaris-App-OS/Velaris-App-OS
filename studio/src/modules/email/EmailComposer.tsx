@@ -1,4 +1,4 @@
-// HELIX P25 — Reusable email composer for case-context send.
+// Velaris P25 — Reusable email composer for case-context send.
 // Usage in CaseDetail.tsx:
 //   <EmailComposer caseId={caseId} onSent={() => refreshTimeline()} />
 import React, { useEffect, useState } from "react";

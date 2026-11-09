@@ -982,7 +982,7 @@ function ServiceTaskPanel({ implementation, onChange }: { implementation: string
         </div>
       )}
       <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4, fontFamily: "var(--font-mono)", lineHeight: 1.4 }}>
-        helix:// → Helix internal service · https:// → External HTTP POST
+        helix:// → Velaris internal service · https:// → External HTTP POST
       </div>
     </div>
   );

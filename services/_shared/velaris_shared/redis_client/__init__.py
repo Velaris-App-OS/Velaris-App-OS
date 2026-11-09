@@ -18,6 +18,20 @@ _client: Optional["Redis"] = None
 _lock = asyncio.Lock()
 
 
+def _safe_url(url: str) -> str:
+    """The URL without any password it carries, for logs."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p = urlsplit(url)
+        if p.password is None:
+            return url
+        host = p.hostname or ""
+        netloc = f"{p.username or ''}:***@{host}" + (f":{p.port}" if p.port else "")
+        return urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
+    except Exception:
+        return "<unparseable redis url>"
+
+
 async def get_redis() -> Optional["Redis"]:
     """Return the singleton async Redis client, or None if disabled/unavailable."""
     global _client
@@ -33,13 +47,16 @@ async def get_redis() -> Optional["Redis"]:
         if not getattr(s, "redis_enabled", False):
             return None
         try:
+            kw = {}
+            if getattr(s, "redis_password", ""):
+                kw["password"] = s.redis_password
             _client = from_url(
                 s.redis_url,
                 encoding="utf-8", decode_responses=True,
-                socket_timeout=3.0, socket_connect_timeout=3.0,
+                socket_timeout=3.0, socket_connect_timeout=3.0, **kw,
             )
             await _client.ping()
-            log.info("Redis connected: %s", s.redis_url)
+            log.info("Redis connected: %s", _safe_url(s.redis_url))
         except Exception as e:
             log.warning("Redis connect failed: %s — falling back to in-process", e)
             _client = None

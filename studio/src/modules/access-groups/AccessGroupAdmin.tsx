@@ -1,9 +1,9 @@
-// HELIX P37 — Access Directory
+// Velaris P37 — Access Directory
 // Unified: Access Groups, Access Roles, User Directory, Portals
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import UserDirectory from "@modules/user-directory/UserDirectory";
 import { getAccessToken } from "@/auth/tokenManager";
-import { Tabs } from "@shared/components";
+import { Tabs, Pill, Banner, SectionTitle, TextInput } from "@shared/components";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -264,7 +264,7 @@ function InlineModuleEditor({
 const ALL_MODULE_SLUGS = [
   "work-center", "cases", "hxnexus", "help", "hxdocs", "hxcanvas",
   "analytics", "hxanalytics", "documents", "inbox",
-  "case-designer", "form-builder", "nlp-builder", "modeler", "app-builder",
+  "case-designer", "form-builder", "reference-tables", "nlp-builder", "modeler", "app-builder",
   "hxwork", "importer", "graph", "process-mining", "live-activity", "monitor",
   "hxconnect", "hxbridge", "devconn", "hxsync", "hxfusion",
   "hxshield", "hxstream", "hxlogs", "compliance", "observability",
@@ -658,10 +658,10 @@ function RolesTab() {
   );
 }
 
-// ── Privilege matrix types ────────────────────────────────────────────────────
+// ── Privilege editor types ────────────────────────────────────────────────────
 
-interface CatalogAction   { id: string; label: string }
-interface CatalogResource { id: string; label: string; actions: CatalogAction[] }
+interface CatalogAction   { id: string; label: string; description?: string }
+interface CatalogResource { id: string; label: string; actions: CatalogAction[]; platform?: boolean }
 
 // One privilege row: { resource, case_type_id, actions[] }
 interface PrivRow { resource: string; case_type_id: string; actions: string[] }
@@ -680,101 +680,218 @@ function rowsToPriv(rows: PrivRow[]): Record<string, unknown>[] {
     .map(r => ({ resource: r.resource, case_type_id: r.case_type_id || "*", actions: r.actions }));
 }
 
-// ── Interactive privilege matrix ──────────────────────────────────────────────
+/** "view_sensitive" → "View sensitive". Labels come from the catalog; a
+ *  platform action's label IS its verb, so it is only tidied, never invented. */
+function prettyAction(a: CatalogAction): string {
+  const s = (a.label && a.label !== a.id ? a.label : a.id).replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
-function PrivilegeMatrix({
-  rows, catalog, onChange,
-}: { rows: PrivRow[]; catalog: CatalogResource[]; onChange: (r: PrivRow[]) => void }) {
-  const catalogMap = Object.fromEntries(catalog.map(c => [c.id, c]));
-  const allActions = Array.from(new Set(catalog.flatMap(c => c.actions.map(a => a.id))));
+/** Which heading a resource is listed under in the picker. Case-level
+ *  resources are one group; platform ones group by their first segment
+ *  (`legal.holds` → Legal), so a new area appears with no list to update. */
+function groupOf(c: CatalogResource): string {
+  if (!c.platform) return "Case access";
+  const head = c.id.split(".")[0].replace(/_/g, " ");
+  return "Platform › " + head.charAt(0).toUpperCase() + head.slice(1);
+}
 
-  const toggleCell = (rowIdx: number, action: string) => {
-    onChange(rows.map((r, i) => {
-      if (i !== rowIdx) return r;
-      const has = r.actions.includes(action);
-      return { ...r, actions: has ? r.actions.filter(a => a !== action) : [...r.actions, action] };
-    }));
-  };
+// ── Resource picker: grouped + searchable ─────────────────────────────────────
 
-  const addRow = () => {
-    const used = new Set(rows.map(r => r.resource));
-    const next = catalog.find(c => !used.has(c.id));
-    if (next) onChange([...rows, { resource: next.id, case_type_id: "*", actions: [] }]);
-  };
+function ResourcePicker({
+  catalog, exclude, onPick, onClose,
+}: {
+  catalog: CatalogResource[];
+  exclude: Set<string>;
+  onPick: (id: string) => void;
+  onClose: () => void;
+}) {
+  const [q, setQ] = useState("");
 
-  const removeRow   = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
-  const updateScope = (idx: number, val: string) => onChange(rows.map((r, i) => i !== idx ? r : { ...r, case_type_id: val }));
-  const updateRes   = (idx: number, val: string) => onChange(rows.map((r, i) => i !== idx ? r : { ...r, resource: val, actions: [] }));
-
-  const cols = `150px 90px repeat(${allActions.length}, minmax(48px, 1fr)) 28px`;
+  const needle = q.trim().toLowerCase();
+  const groups = new Map<string, CatalogResource[]>();
+  for (const c of catalog) {
+    if (exclude.has(c.id)) continue;
+    if (needle && !(`${c.id} ${c.label} ${groupOf(c)}`.toLowerCase().includes(needle))) continue;
+    const g = groupOf(c);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(c);
+  }
+  // Case access first, then platform areas alphabetically.
+  const names = [...groups.keys()].sort((a, b) =>
+    a === "Case access" ? -1 : b === "Case access" ? 1 : a.localeCompare(b));
 
   return (
-    <div style={{ marginBottom: 12 }}>
-      {/* Header row */}
-      <div style={{ display: "grid", gridTemplateColumns: cols, gap: 2, minWidth: 0, alignItems: "center", marginBottom: 4, borderBottom: "1px solid var(--border-subtle)", paddingBottom: 4 }}>
-        <div style={matHdrCell}>Resource</div>
-        <div style={matHdrCell}>Scope</div>
-        {allActions.map(a => (
-          <div key={a} style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: "6px 2px" }}>
-            <span style={{
-              fontSize: 9, fontFamily: "var(--font-mono)",
-              textTransform: "uppercase", letterSpacing: "0.05em",
-              color: "var(--text-muted)", textAlign: "center",
-            }}>{a}</span>
+    // Inline, full width of the panel — not a floating popover. Anchored to
+    // the button it opened to the LEFT and was cut off by the panel edge.
+    <div style={{
+      marginTop: 6, width: "100%", maxHeight: 360, display: "flex", flexDirection: "column",
+      boxSizing: "border-box",
+      background: "var(--bg-card)", border: "1px solid var(--border-default)",
+      borderRadius: "var(--radius-md)", boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+    }}>
+      <div style={{ padding: 8, borderBottom: "1px solid var(--border-subtle)" }}>
+        <TextInput autoFocus placeholder="Search resources…" value={q}
+          onChange={e => setQ(e.target.value)}
+          onKeyDown={e => { if (e.key === "Escape") onClose(); }}
+          style={{ width: "100%" }} />
+      </div>
+      <div style={{ overflowY: "auto", padding: "4px 0" }}>
+        {names.length === 0 && (
+          <div style={{ padding: "10px 12px", fontSize: 12, color: "var(--text-muted)" }}>Nothing matches.</div>
+        )}
+        {names.map(g => (
+          <div key={g}>
+            <div style={{ ...labelStyle, padding: "8px 12px 4px", marginBottom: 0 }}>{g}</div>
+            {groups.get(g)!.map(c => (
+              <button key={c.id} type="button" onClick={() => onPick(c.id)}
+                title={c.id}
+                style={{
+                  display: "flex", justifyContent: "space-between", gap: 8, width: "100%",
+                  padding: "6px 12px", background: "none", border: "none", cursor: "pointer",
+                  color: "var(--text-primary)", fontSize: 13, textAlign: "left",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-elevated)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}>
+                <span>{c.label}</span>
+                <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                  {c.actions.length}
+                </span>
+              </button>
+            ))}
           </div>
         ))}
-        <div />
       </div>
-
-      {/* Data rows */}
-      {rows.map((row, idx) => {
-        const res = catalogMap[row.resource];
-        const available = res ? new Set(res.actions.map(a => a.id)) : new Set<string>();
-        return (
-          <div key={idx} style={{ display: "grid", gridTemplateColumns: cols, gap: 2, marginBottom: 2, alignItems: "center", minWidth: 0 }}>
-            <select value={row.resource} onChange={e => updateRes(idx, e.target.value)}
-              style={{ ...matCell, padding: "5px 6px", cursor: "pointer" }}>
-              {catalog.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-            </select>
-            <input value={row.case_type_id} onChange={e => updateScope(idx, e.target.value)}
-              placeholder="*" title="* = all case types"
-              style={{ ...matCell, padding: "5px 6px", fontSize: 11, fontFamily: "var(--font-mono)" }} />
-            {allActions.map(action => {
-              const on = row.actions.includes(action);
-              return (
-                <div key={action} style={{ display: "flex", justifyContent: "center" }}>
-                  {available.has(action)
-                    ? <input type="checkbox" checked={on} onChange={() => toggleCell(idx, action)}
-                        style={{ width: 14, height: 14, cursor: "pointer", accentColor: "var(--accent)" }} />
-                    : <span style={{ color: "var(--border-subtle)", fontSize: 11 }}>—</span>}
-                </div>
-              );
-            })}
-            <button type="button" onClick={() => removeRow(idx)}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--status-failed)", fontSize: 14, padding: 0 }}>✕</button>
-          </div>
-        );
-      })}
-
-      <button type="button" onClick={addRow} style={{ ...smallBtnStyle, marginTop: 8, fontSize: 11 }}>
-        + Add Resource Row
-      </button>
     </div>
   );
 }
 
-const matHdrCell: React.CSSProperties = {
-  fontSize: 9, fontFamily: "var(--font-mono)", textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "var(--text-muted)", padding: "3px 4px",
-};
+// ── Cascading privilege editor: ① resource → ② that resource's own actions ────
+//
+// The old grid gave every action in the whole catalog its own column (72 of
+// them across 179 resources), so it ran far off the right edge while most cells
+// were "—". Each row now shows only what its resource can do, and wraps.
+//
+// A role stays generic — which case types a person reaches is the ACCESS
+// GROUP's `allowed_case_type_ids`, not the role's. New rows save as "*". A row
+// that already carries a narrower `case_type_id` is kept exactly as saved and
+// labelled, so editing a role never silently widens it.
 
-const matCell: React.CSSProperties = {
-  background: "var(--bg-input)", border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-sm)", color: "var(--text-primary)", fontSize: 12,
-  width: "100%",
-};
+function PrivilegeEditor({
+  rows, catalog, onChange,
+}: { rows: PrivRow[]; catalog: CatalogResource[]; onChange: (r: PrivRow[]) => void }) {
+  const [picking, setPicking] = useState(false);
+  // Outside-click closes the picker. The wrapper holds the button too, so the
+  // button toggles it instead of closing and instantly reopening it.
+  const pickRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!picking) return;
+    const h = (e: MouseEvent) => {
+      if (pickRef.current && !pickRef.current.contains(e.target as Node)) setPicking(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [picking]);
+  const catalogMap = Object.fromEntries(catalog.map(c => [c.id, c]));
 
-// ── Role form with interactive privilege matrix ───────────────────────────────
+  const toggle = (idx: number, action: string) => onChange(rows.map((r, i) => {
+    if (i !== idx) return r;
+    const has = r.actions.includes(action);
+    return { ...r, actions: has ? r.actions.filter(a => a !== action) : [...r.actions, action] };
+  }));
+  const setAll = (idx: number, actions: string[]) =>
+    onChange(rows.map((r, i) => i !== idx ? r : { ...r, actions }));
+  const remove = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
+  const add = (id: string) => { onChange([...rows, { resource: id, case_type_id: "*", actions: [] }]); setPicking(false); };
+
+  // A resource already granted for every case type is not offered again.
+  const exclude = new Set(rows.filter(r => r.case_type_id === "*").map(r => r.resource));
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {rows.length === 0 && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "10px 0" }}>
+          No privileges yet — add a resource, then tick what this role may do with it.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {rows.map((row, idx) => {
+          const res = catalogMap[row.resource];
+          // Actions the catalog offers, plus any saved one it no longer lists —
+          // dropping those on save would revoke something nobody chose to.
+          const offered: CatalogAction[] = res ? [...res.actions] : [];
+          for (const a of row.actions) if (!offered.some(o => o.id === a)) offered.push({ id: a, label: a });
+          const allIds = offered.map(a => a.id);
+          const allOn = allIds.length > 0 && allIds.every(a => row.actions.includes(a));
+          return (
+            <div key={idx} style={{
+              border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)",
+              background: "var(--bg-card)", padding: "10px 12px",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                <span style={{ fontWeight: 600, fontSize: 13, color: "var(--text-primary)" }}>
+                  {res ? res.label : row.resource}
+                </span>
+                {res?.platform && <Pill tone="info">platform</Pill>}
+                {!res && <Pill tone="warn" title="Not in this server's catalog — kept as saved">unknown resource</Pill>}
+                {row.case_type_id !== "*" && (
+                  <Pill tone="warn" title={`Saved as limited to case type ${row.case_type_id}. Kept as is; new privileges apply to all case types the access group allows.`}>
+                    limited to 1 case type
+                  </Pill>
+                )}
+                <span style={{ flex: 1 }} />
+                {allIds.length > 1 && (
+                  <button type="button" onClick={() => setAll(idx, allOn ? [] : allIds)}
+                    style={{ ...smallBtnStyle, padding: "2px 8px", fontSize: 10 }}>
+                    {allOn ? "Clear" : "All"}
+                  </button>
+                )}
+                <button type="button" onClick={() => remove(idx)} aria-label={`Remove ${row.resource}`}
+                  title="Remove this resource"
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--status-failed)", fontSize: 14, padding: 0 }}>✕</button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {offered.map(a => {
+                  const on = row.actions.includes(a.id);
+                  return (
+                    <label key={a.id} title={a.description || a.id} style={{
+                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                      padding: "3px 10px", borderRadius: 100, fontSize: 12,
+                      border: `1px solid ${on ? "var(--accent)" : "var(--border-default)"}`,
+                      background: on ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg-elevated)",
+                      color: on ? "var(--accent-text)" : "var(--text-secondary)",
+                    }}>
+                      <input type="checkbox" checked={on} onChange={() => toggle(idx, a.id)}
+                        style={{ width: 12, height: 12, margin: 0, accentColor: "var(--accent)" }} />
+                      {prettyAction(a)}
+                    </label>
+                  );
+                })}
+              </div>
+              {row.actions.length === 0 && (
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                  Nothing ticked — this row is not saved.
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div ref={pickRef} style={{ marginTop: 10 }}>
+        <button type="button" onClick={() => setPicking(p => !p)} style={{ ...smallBtnStyle, fontSize: 11 }}>
+          + Add privilege
+        </button>
+        {picking && (
+          <ResourcePicker catalog={catalog} exclude={exclude} onPick={add} onClose={() => setPicking(false)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Role form — opens as a side panel beside the role list ────────────────────
 
 function RoleForm({
   initial, onSave, onCancel,
@@ -785,20 +902,27 @@ function RoleForm({
     tenant_id:   initial?.tenant_id ?? "",
   });
   const [rows, setRows] = useState<PrivRow[]>(() => privToRows(initial?.privileges ?? []));
-  const [catalog, setCatalog]     = useState<CatalogResource[]>([]);
-  const [showRaw, setShowRaw]     = useState(false);
-  const [rawJson, setRawJson]     = useState("");
-  const [rawErr, setRawErr]       = useState<string | null>(null);
-  const [tenants, setTenants]     = useState<{ id: string; name: string; slug: string }[]>([]);
+  const [catalog, setCatalog]       = useState<CatalogResource[]>([]);
+  const [catalogErr, setCatalogErr] = useState<string | null>(null);
+  const [showRaw, setShowRaw]       = useState(false);
+  const [rawJson, setRawJson]       = useState("");
+  const [rawErr, setRawErr]         = useState<string | null>(null);
+  const [tenants, setTenants]       = useState<{ id: string; name: string; slug: string }[]>([]);
 
   useEffect(() => {
     api("/access-roles/catalog")
-      .then((d: any) => { if (d?.resources) setCatalog(d.resources); })
-      .catch(() => {});
+      .then((d: any) => { if (d?.resources) setCatalog(d.resources); else setCatalogErr("The privilege catalog came back empty."); })
+      .catch((e: any) => setCatalogErr(e?.message || "Could not load the privilege catalog."));
     api("/tenants")
       .then((data: any) => setTenants(Array.isArray(data) ? data : (data?.items ?? [])))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, [onCancel]);
 
   // Sync raw JSON when rows change
   useEffect(() => {
@@ -808,10 +932,11 @@ function RoleForm({
   function applyRaw() {
     try {
       const parsed = JSON.parse(rawJson);
+      if (!Array.isArray(parsed)) throw new Error("not a list");
       setRows(privToRows(parsed));
       setRawErr(null);
       setShowRaw(false);
-    } catch { setRawErr("Invalid JSON — check format."); }
+    } catch { setRawErr("Invalid JSON — expected a list of privileges."); }
   }
 
   function submit(e: React.FormEvent) {
@@ -825,69 +950,94 @@ function RoleForm({
   }
 
   return (
-    <form onSubmit={submit} style={{ ...formStyle, width: "100%" }}>
-      <div style={{ fontWeight: 600, marginBottom: 12 }}>{initial ? "Edit Role" : "New Role"}</div>
-
-      {initial && !initial.tenant_id && (
-        <div style={{ fontSize: 12, padding: "8px 12px", marginBottom: 12, borderRadius: "var(--radius-sm)", background: "color-mix(in srgb, #f59e0b 12%, transparent)", color: "#f59e0b", borderLeft: "3px solid #f59e0b" }}>
-          Built-in system role — changes affect all groups that use it. Proceed carefully.
+    <div role="dialog" aria-modal="true" aria-label={initial ? "Edit role" : "New role"}
+      style={{ position: "fixed", inset: 0, zIndex: 900, display: "flex", justifyContent: "flex-end", background: "rgba(0,0,0,0.35)" }}
+      onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+      <form onSubmit={submit} style={{
+        width: "min(640px, 100vw)", height: "100%", boxSizing: "border-box",
+        display: "flex", flexDirection: "column",
+        background: "var(--bg-surface, var(--bg-card))", borderLeft: "1px solid var(--border-default)",
+        boxShadow: "-8px 0 32px rgba(0,0,0,0.25)",
+      }}>
+        <div style={{ padding: "var(--space-lg) var(--space-xl)", borderBottom: "1px solid var(--border-subtle)" }}>
+          <SectionTitle style={{ margin: 0 }} right={
+            <button type="button" onClick={onCancel} aria-label="Close"
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 16 }}>✕</button>
+          }>
+            {initial ? `Edit role — ${initial.name}` : "New role"}
+          </SectionTitle>
         </div>
-      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-md)", marginBottom: 12 }}>
-        <div>
-          <label style={labelStyle}>Role name</label>
-          <input style={inputStyle} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
-        </div>
-        <div>
-          <label style={labelStyle}>Tenant (blank = built-in)</label>
-          <select style={inputStyle} value={form.tenant_id} onChange={e => setForm({ ...form, tenant_id: e.target.value })}>
-            <option value="">— built-in (system-wide) —</option>
-            {tenants.map(t => (
-              <option key={t.id} value={t.id}>{t.name} ({t.slug})</option>
-            ))}
-          </select>
-        </div>
-      </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "var(--space-lg) var(--space-xl)" }}>
+          {initial && !initial.tenant_id && (
+            <div style={{ marginBottom: 12 }}>
+              <Banner tone="warn">
+                Built-in system role — changes affect all groups that use it. Proceed carefully.
+              </Banner>
+            </div>
+          )}
 
-      <label style={labelStyle}>Description</label>
-      <input style={inputStyle} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <label style={labelStyle}>Privileges</label>
-        <button type="button" onClick={() => {
-          if (!showRaw) setRawJson(JSON.stringify(rowsToPriv(rows), null, 2));
-          setShowRaw(!showRaw);
-          setRawErr(null);
-        }} style={{ ...smallBtnStyle, fontSize: 10 }}>
-          {showRaw ? "← Back to Visual" : "{ } Raw JSON"}
-        </button>
-      </div>
-
-      {showRaw ? (
-        <>
-          {rawErr && <ErrBox err={rawErr} />}
-          <textarea
-            style={{ ...inputStyle, height: 160, fontFamily: "var(--font-mono)", fontSize: 11 }}
-            value={rawJson}
-            onChange={e => { setRawErr(null); setRawJson(e.target.value); }}
-          />
-          <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 8 }}>
-            Format: {`[{"resource":"case","case_type_id":"*","actions":["create","read"]}]`}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "var(--space-md)" }}>
+            <div>
+              <label style={labelStyle}>Role name</label>
+              <input style={inputStyle} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
+            </div>
+            <div>
+              <label style={labelStyle}>Tenant (blank = built-in)</label>
+              <select style={inputStyle} value={form.tenant_id} onChange={e => setForm({ ...form, tenant_id: e.target.value })}>
+                <option value="">— built-in (system-wide) —</option>
+                {tenants.map(t => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.slug})</option>
+                ))}
+              </select>
+            </div>
           </div>
-          <button type="button" onClick={applyRaw} style={{ ...smallBtnStyle, marginBottom: 12 }}>Apply JSON</button>
-        </>
-      ) : (
-        catalog.length > 0
-          ? <PrivilegeMatrix rows={rows} catalog={catalog} onChange={setRows} />
-          : <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>Loading privilege catalog…</div>
-      )}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        <button type="submit" style={btnStyle}>Save Role</button>
-        <button type="button" style={smallBtnStyle} onClick={onCancel}>Cancel</button>
-      </div>
-    </form>
+          <label style={labelStyle}>Description</label>
+          <input style={inputStyle} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "8px 0" }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Privileges</label>
+            <button type="button" onClick={() => {
+              if (!showRaw) setRawJson(JSON.stringify(rowsToPriv(rows), null, 2));
+              setShowRaw(!showRaw);
+              setRawErr(null);
+            }} style={{ ...smallBtnStyle, fontSize: 10 }}>
+              {showRaw ? "← Back to Visual" : "{ } Raw JSON"}
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+            A role says what may be done. Which case types it reaches is set on the access group.
+          </div>
+
+          {showRaw ? (
+            <>
+              {rawErr && <ErrBox err={rawErr} />}
+              <textarea
+                style={{ ...inputStyle, height: 220, fontFamily: "var(--font-mono)", fontSize: 11 }}
+                value={rawJson}
+                onChange={e => { setRawErr(null); setRawJson(e.target.value); }}
+              />
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 8 }}>
+                Format: {`[{"resource":"case","case_type_id":"*","actions":["create","read"]}]`}
+              </div>
+              <button type="button" onClick={applyRaw} style={{ ...smallBtnStyle, marginBottom: 12 }}>Apply JSON</button>
+            </>
+          ) : catalogErr ? (
+            <ErrBox err={`${catalogErr} The visual editor needs it; Raw JSON still works.`} />
+          ) : catalog.length > 0 ? (
+            <PrivilegeEditor rows={rows} catalog={catalog} onChange={setRows} />
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>Loading privilege catalog…</div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, padding: "var(--space-md) var(--space-xl)", borderTop: "1px solid var(--border-subtle)" }}>
+          <button type="submit" style={btnStyle}>Save Role</button>
+          <button type="button" style={smallBtnStyle} onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
+    </div>
   );
 }
 

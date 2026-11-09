@@ -85,6 +85,7 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   "/case-designer":  CaseDesignerIcon,
   "/case-config":    CaseConfigIcon,
   "/form-builder":   FormBuilderIcon,
+  "/reference-tables": ReferenceTablesIcon,
   "/nlp-builder":    withSparkleBox(NLPBuilderIcon),
   "/modeler":        ModelerIcon,
   "/app-builder":    AppBuilderIcon,
@@ -126,6 +127,7 @@ export const NAV_ICONS: Record<string, NavIconComponent> = {
   "/hxlogs":        withSparkleBox(HxLogsIcon),
   "/hxdbmanager":   withSparkleBox(HxDBManagerIcon),
   "/compliance":    ComplianceIcon,
+  "/allowed-sites": AllowedSitesIcon,
   "/observability": ObservabilityIcon,
 
   // Admin
@@ -160,6 +162,19 @@ export function getNavIcon(path: string): NavIconComponent {
 // ══════════════════════════════════════════════════════════════════════════════
 // Base icon components — one function per route, no sharing.
 // ══════════════════════════════════════════════════════════════════════════════
+
+/** Allowed sites (2026-11-04): a globe behind a check — outside sites approved. */
+function AllowedSitesIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="7" cy="7" r="5.25" stroke={c} strokeWidth="1.3" />
+      <path d="M1.9 7h10.2M7 1.8c1.5 1.6 2.2 3.3 2.2 5.2S8.5 10.6 7 12.2M7 1.8C5.5 3.4 4.8 5.1 4.8 7s.7 3.6 2.2 5.2" stroke={c} strokeWidth="1.1" />
+      <circle cx="12" cy="12" r="3" fill="var(--bg-card, #fff)" stroke={c} strokeWidth="1.2" />
+      <path d="M10.7 12l.9.9 1.7-1.8" stroke={c} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 function DefaultIcon({ active, size = 16 }: NavIconProps) {
   const c = active ? "var(--accent)" : "var(--text-muted)";
@@ -580,6 +595,17 @@ function FormBuilderIcon({ active, size = 16 }: NavIconProps) {
       {/* + badge — bottom-right corner */}
       <circle cx="12.5" cy="12.5" r="2" fill="var(--bg-panel)" stroke={c} strokeWidth="1" />
       <path d="M12.5 11v3M11 12.5h3" stroke={c} strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ReferenceTablesIcon({ active, size = 16 }: NavIconProps) {
+  const c = active ? "var(--accent)" : "var(--text-muted)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      {/* A small table — header row and two columns */}
+      <rect x="2" y="3" width="12" height="10" rx="1.5" stroke={c} strokeWidth="1.3" />
+      <path d="M2 6.5h12M2 9.75h12M6.5 6.5v6.5" stroke={c} strokeWidth="1.1" />
     </svg>
   );
 }

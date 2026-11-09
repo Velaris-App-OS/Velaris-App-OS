@@ -16,7 +16,7 @@ from hxmigrate_service.scout.base import (
 )
 
 
-# Pega class → HELIX artifact mapping
+# Pega class → Velaris artifact mapping
 PEGA_CLASS_MAP = {
     "Rule-Obj-Class": (ArtifactType.CASE_TYPE, CompatibilityLevel.HIGH, "CaseType", 4.0),
     "Rule-Obj-CaseType": (ArtifactType.CASE_TYPE, CompatibilityLevel.HIGH, "CaseType", 4.0),
@@ -80,7 +80,7 @@ def scan_pega_export(content: str, filename: str = "") -> ScanResult:
 
 
 def _add_pega_artifact(result: ScanResult, pega_class: str, name: str):
-    """Map a Pega rule to a HELIX artifact."""
+    """Map a Pega rule to a Velaris artifact."""
     if pega_class in PEGA_CLASS_MAP:
         art_type, compat, mapped, hours = PEGA_CLASS_MAP[pega_class]
         result.artifacts.append(ScannedArtifact(

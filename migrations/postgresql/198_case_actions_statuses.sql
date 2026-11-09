@@ -1,6 +1,6 @@
 -- 198 — case statuses become data; case actions get one dispatcher.
 --
--- Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+-- Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 --
 -- WHY. `case_instances.status` is VARCHAR(30) with a default of 'new' and NO
 -- validation anywhere: `POST /cases/{id}/status` accepts any string a caller

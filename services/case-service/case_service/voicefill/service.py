@@ -66,12 +66,15 @@ MAX_RAW_FIELD_CHARS = 4_000
 
 #: Field types a human can actually speak into, mapped to how we coerce them.
 #: file_upload / connector_lookup / connector_result / json_display /
-#: table_display are deliberately absent — nobody dictates a file or a
+#: table_display / record_details are deliberately absent — nobody dictates a file or a
 #: connector payload, and offering to would be theatre.
 _FORM_TYPE_KINDS: dict[str, str] = {
     "text": "str", "textarea": "str", "email": "str", "phone": "str",
     "number": "num", "currency": "num", "slider": "num", "rating": "num",
     "date": "date", "datetime": "datetime", "checkbox": "bool",
+    # Small controls (2026-10-29). Consent is deliberately absent: agreeing is
+    # the person's own act, never a model's reading of what they said.
+    "toggle": "bool", "percentage": "num", "url": "str",
     "dropdown": "choice", "radio": "choice", "multi_select": "multi",
 }
 

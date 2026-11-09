@@ -85,12 +85,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Skip excluded paths
         if request.url.path in self.exclude_paths:
             return await call_next(request)
+        # A sibling service's internal call (R5e step 7) — proven by its secret,
+        # never a user's request — is not subject to the per-address limit.
+        from velaris_shared.internal.auth import is_internal_caller
+        if is_internal_caller(request):
+            return await call_next(request)
 
-        # Get client IP
+        # The client's address as uvicorn resolved it. Behind the gateway that
+        # is already the real peer: `--proxy-headers` trusts X-Forwarded-For
+        # only from the gateway and takes the right-most untrusted hop. Reading
+        # the header here instead took its LEFT-most entry, which the client
+        # writes — `X-Forwarded-For: 127.0.0.1` then hit the localhost bypass
+        # below and switched this limit off (fixed 2026-10-16).
         client_ip = request.client.host if request.client else "unknown"
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
 
         # Bypass rate limiting for localhost (load tests, dev tooling)
         if client_ip in ("127.0.0.1", "::1", "localhost"):

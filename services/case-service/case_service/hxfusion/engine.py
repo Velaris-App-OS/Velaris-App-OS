@@ -342,14 +342,16 @@ async def _run_service_task(
 
     try:
         from velaris_shared.db.session import get_session_factory as _get_sf
-        from case_service.hxbridge.protocol import get_connector
-
         async with _get_sf()() as session:
-            connector = await get_connector(connector_id, session)
-            if connector is None:
-                return None, f"Connector '{connector_id}' not found"
+            # Through HxBridge's executor (2026-11-04) — this called the
+            # connector TYPE factory with an id and failed every time.
+            from case_service.hxbridge.executor import run_connector_by_id
             payload = {k: v for k, v in context.items() if not k.startswith("_")}
-            result = await connector.execute(payload)
+            op = node.extensions.get("operation")
+            result = await run_connector_by_id(
+                session, connector_id, payload, owner_tenant=getattr(instance, "tenant_id", None),
+                step_id=f"fusion:{node.id}", operation=op if isinstance(op, str) else None)
+            await session.commit()
             return result, None
     except Exception as exc:
         return None, str(exc)

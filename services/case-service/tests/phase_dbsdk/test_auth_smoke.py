@@ -19,7 +19,7 @@ import uuid
 
 import pytest
 
-from case_service.api.routers.auth_real import _hash_password
+from velaris_shared.auth.passwords import hash_password as _hash_password
 from velaris_shared.db.models import HelixUserModel
 from tests.conftest import ADMIN_HEADERS
 

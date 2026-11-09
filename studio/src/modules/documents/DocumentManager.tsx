@@ -1,4 +1,4 @@
-// HELIX P24 — Document Manager (multi-select + version delete)
+// Velaris P24 — Document Manager (multi-select + version delete)
 import React, { useEffect, useState } from "react";
 import { errorFromResponse, verifyDocument, listDocumentVerifications, type DocCheck , openDocument } from "@shared/api/client";
 import ErrorCodeLink from "@shared/errors/ErrorCodeLink";

@@ -1,4 +1,4 @@
-"""HELIX channels plugin: email."""
+"""Velaris channels plugin: email."""
 
 class EmailBackend:
     """email implementation of the channels Protocol."""

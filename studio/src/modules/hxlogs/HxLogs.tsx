@@ -1,7 +1,7 @@
 /**
  * P63 — HxLogs: AI-Driven Log Analyser
  *
- * Unified log viewer for all Helix services. Select lines and click
+ * Unified log viewer for all Velaris services. Select lines and click
  * "Analyse →" to get HxNexus root-cause analysis on any error or traceback.
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";

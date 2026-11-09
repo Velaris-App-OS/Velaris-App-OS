@@ -6,7 +6,7 @@ All data is derived live from the DB — no static files.
 Endpoints:
   GET /knowledge/overview          platform summary (counts, health, phases)
   GET /knowledge/case-types        all case types with stages/steps in plain English
-  GET /knowledge/glossary          Helix concept glossary (static + DB-derived terms)
+  GET /knowledge/glossary          Velaris concept glossary (static + DB-derived terms)
   GET /knowledge/modules           modules list with descriptions (from sitemap)
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from velaris_shared.db.models import (
 )
 from velaris_shared.db.session import get_session
 from case_service.api.routers.sitemap import MODULES, PHASES
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -137,7 +138,7 @@ def _summarise_case_type(ct: CaseTypeModel) -> dict:
 
 @router.get("/overview")
 async def knowledge_overview(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
     """Platform summary — counts, phase history, module list."""
@@ -208,7 +209,7 @@ async def knowledge_glossary(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Helix concept glossary — static definitions + live DB-derived terms."""
+    """Velaris concept glossary — static definitions + live DB-derived terms."""
     # Augment with live DB terms — one entry per case type name (latest version)
     # Every tenant's rows until 2026-09-29 (8d).
     from case_service.tenancy.identity import scope_to_caller

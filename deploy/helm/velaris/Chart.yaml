@@ -1,6 +1,6 @@
 apiVersion: v2
 name: helix
-description: HELIX BPM platform — case-service, engine, worker, database, Valkey
+description: Velaris platform — case-service, engine, worker, database, Valkey
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

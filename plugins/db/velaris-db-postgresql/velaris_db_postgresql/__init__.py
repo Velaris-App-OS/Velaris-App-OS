@@ -1,4 +1,4 @@
-"""HELIX db plugin: postgresql."""
+"""Velaris db plugin: postgresql."""
 
 class PostgresqlBackend:
     """postgresql implementation of the db Protocol."""

@@ -55,6 +55,25 @@ _velaris_tls_args() {
     fi
   fi
 
+  # ── Issue a missing certificate from the install's existing CA ─────────
+  # A service added by an update (commerce-service R5e step 7, portal-service
+  # step 8, user-service step 10) has no certificate on an install whose CA predates it, and the CA
+  # script refuses to run twice. The rotation script issues any known leaf that
+  # is missing; doing it here means the new service starts with TLS instead of
+  # in plaintext until the timer next fires. Same lock as above.
+  if { [ ! -f "$dir/$service.crt" ] || [ ! -f "$dir/$service.key" ]; } \
+     && [ -f "$dir/ca.crt" ] && [ -f "$dir/ca.key" ]; then
+    local rotate="${VELARIS_DIR:-$PWD}/deploy/tls/rotate-internal-certs.sh"
+    if [ -x "$rotate" ]; then
+      echo "NOTICE: $service has no certificate yet. Issuing one from the install's CA." >&2
+      if command -v flock >/dev/null 2>&1; then
+        flock "$dir" "$rotate" --no-reload >&2 || \
+          echo "WARNING: issuing failed; see below." >&2
+      else
+        "$rotate" --no-reload >&2 || echo "WARNING: issuing failed; see below." >&2
+      fi
+    fi
+  fi
   if [ ! -f "$dir/$service.crt" ] || [ ! -f "$dir/$service.key" ]; then
     # Loud, and NOT fatal: a service that refuses to start because a certificate
     # is missing takes the platform down over a setting nobody meant to enable.

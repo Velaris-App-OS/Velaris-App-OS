@@ -30,7 +30,7 @@ async def receive_webhook(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Receive any inbound webhook and route it to a Helix case.
+    """Receive any inbound webhook and route it to a Velaris case.
 
     Unauthenticated by design (external senders), but: when the connector's
     credentials contain a ``webhook_secret``, the request MUST carry a valid
@@ -212,8 +212,15 @@ class ConnectorOut(BaseModel):
 async def build_connector(
     body: BuildConnectorIn,
     session: AsyncSession = Depends(get_session),
-    user: AuthenticatedUser = Depends(get_current_user),
+    # Was any signed-in user, a viewer included (2026-11-04); the same action
+    # as every other connector write in this router.
+    user: AuthenticatedUser = Depends(hxguard.guard("devconn.rules.write")),
 ):
+    from velaris_shared.hxbridge.security import check_connector_targets
+    try:
+        await check_connector_targets(session, _tenant(user), {"url": body.url})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     row = await service.build_http_connector(
         session, _tenant(user),
         body.name, body.method, body.url,

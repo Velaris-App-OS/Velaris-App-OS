@@ -1,0 +1,28 @@
+[Unit]
+Description=Velaris standby — pull documents, settings and vault from the main server
+Documentation=file://__VELARIS_DIR__/docs/recovery-runbook.md
+After=network-online.target velaris-standby-tunnel.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+# Linked or nothing: without tunnel.env (not linked, or unlinked) the run is
+# skipped, not failed.
+# fence.env: after `promote --main-is-down`, this server keeps trying to
+# demote the old main in case it comes back (standby-velaris.sh fence_retry).
+ExecCondition=/bin/sh -c 'test -f __VELARIS_DIR__/.standby/tunnel.env || test -f __VELARIS_DIR__/.standby/fence.env'
+# Exit 1 (a part failed, or deletions held back) marks the run FAILED so
+# `systemctl --failed` shows it; the main's `standby-velaris.sh status` shows
+# the detail from the standby's report.
+ExecStart=__VELARIS_DIR__/standby-velaris.sh sync
+# The first copy of a large document store takes a while; later runs are
+# incremental.
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-standby-sync

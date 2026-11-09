@@ -8,7 +8,7 @@ VELARIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INIT_FILE="$VELARIS_DIR/deploy/openbao/.bao-init.json"
 
 HEALTH=$(curl -s -m 3 -o /dev/null -w '%{http_code}' \
-  "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || echo "000")
+  "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || true)
 case "$HEALTH" in
   200|429) exit 0 ;;                      # already unsealed
   472) ;;                                  # sealed — proceed

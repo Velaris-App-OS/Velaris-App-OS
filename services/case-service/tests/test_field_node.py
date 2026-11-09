@@ -48,7 +48,7 @@ from case_service.handoff import service as handoff
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 

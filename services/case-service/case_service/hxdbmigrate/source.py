@@ -109,8 +109,11 @@ def _build_url(source_type: str, host: str, port: int | None, database: str,
     return f"{driver}://{userinfo}@{host}:{p}/{database}"
 
 
-def _connect_args(source_type: str, ssl_mode: str = "disable") -> dict[str, Any]:
+def _connect_args(source_type: str, ssl_mode: str = "disable",
+                  verify_name: str | None = None) -> dict[str, Any]:
     # Per-driver connect timeout so a bad host fails fast instead of hanging, plus TLS.
+    # `verify_name` (2026-11-08): the socket goes to a pinned address, and the
+    # certificate is still checked against this host name.
     st = normalise_type(source_type)
     base: dict[str, Any] = {"timeout": 10} if st == "postgresql" else {"connect_timeout": 10}
 
@@ -120,6 +123,10 @@ def _connect_args(source_type: str, ssl_mode: str = "disable") -> dict[str, Any]
     if mode == "disable":
         return base
 
+    if mode == "verify" and verify_name:
+        from velaris_shared.hxbridge.sql_query import verified_tls
+        base["ssl"] = verified_tls(verify_name)
+        return base
     if st == "postgresql":
         # asyncpg accepts TLS mode strings directly.
         base["ssl"] = "require" if mode == "require" else "verify-full"
@@ -146,18 +153,61 @@ async def _set_read_only(session: AsyncSession, source_type: str) -> None:
         pass
 
 
+async def pinned_public_address(host: str) -> str:
+    """For a TENANT's source (2026-11-04): resolve once, refuse unless EVERY
+    address is public, and return the address to connect to — so a name cannot
+    pass this check and then resolve inward for the connection (DNS rebinding).
+    The platform operator's LAN sources never come here."""
+    h = (host or "").strip().strip("[]").lower()
+    if not h:
+        raise SourceError("Source host is required")
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.run_in_executor(None, socket.getaddrinfo, h, None)
+    except socket.gaierror:
+        raise SourceError(f"Source host does not resolve: {host!r}")
+    addrs = []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            raise SourceError("That database host is not reachable from this platform: "
+                              "private and internal addresses are refused.")
+        addrs.append(str(ip))
+    if not addrs:
+        raise SourceError(f"Source host does not resolve: {host!r}")
+    return addrs[0]
+
+
 @asynccontextmanager
 async def source_session(source_type: str, host: str, port: int | None, database: str,
                          username: str, password: str,
-                         ssl_mode: str = "disable") -> AsyncIterator[AsyncSession]:
+                         ssl_mode: str = "disable", *,
+                         public_only: bool = False) -> AsyncIterator[AsyncSession]:
     """Yield a READ-ONLY AsyncSession to the source. Validates host (SSRF) first.
+
+    `public_only` (a tenant's source): connect to the one public address the
+    name resolved to, never re-resolving. Off = as before (the operator's).
 
     NullPool: introspection connections are short-lived — never hold a pool to a foreign DB.
     """
     await validate_source_host(host)
+    verify_name = None
+    if public_only:
+        # Always connect to the checked address (2026-11-08: verified TLS too —
+        # it had kept the name, so the driver resolved it again). The
+        # certificate is checked against the name the tenant gave.
+        verify_name = host.strip().strip("[]")
+        host = await pinned_public_address(host)
+        if ":" in host:
+            host = f"[{host}]"
     url = _build_url(source_type, host, port, database, username, password)
     engine = create_async_engine(url, poolclass=NullPool,
-                                 connect_args=_connect_args(source_type, ssl_mode))
+                                 connect_args=_connect_args(source_type, ssl_mode, verify_name))
     try:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         async with Session() as session:
@@ -168,10 +218,12 @@ async def source_session(source_type: str, host: str, port: int | None, database
 
 
 async def test_connection(source_type: str, host: str, port: int | None, database: str,
-                          username: str, password: str, ssl_mode: str = "disable") -> None:
+                          username: str, password: str, ssl_mode: str = "disable", *,
+                          public_only: bool = False) -> None:
     """Open a read-only session and run SELECT 1. Raises SourceError on any failure."""
     try:
-        async with source_session(source_type, host, port, database, username, password, ssl_mode) as s:
+        async with source_session(source_type, host, port, database, username, password, ssl_mode,
+                                  public_only=public_only) as s:
             await s.execute(text("SELECT 1"))
     except SourceError:
         raise

@@ -24,7 +24,9 @@ in constant time and never logged.
 are reached directly and legitimately — by systemd's `ExecStartPre`, by Docker
 health checks, and by a metrics scrape. None of them reads tenant data; the
 first two return a fixed shape and `/metrics` is already an anonymous endpoint
-on case-service. Everything else is refused.
+on case-service. `/internal/v1/demo/*` carrying the demo provisioning secret
+(`velaris_shared.internal.auth.is_demo_caller`) is the website's one direct
+call; that secret opens nothing else. Everything else is refused.
 
 Copyright (c) 2024-2026 Velaris Contributors
 SPDX-License-Identifier: BSL-1.1
@@ -69,6 +71,11 @@ class GatewayIdentityMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if not self._secret or request.url.path in EXEMPT_PATHS:
+            return await call_next(request)
+        # The website's demo provisioning (2026-11-04) holds its own secret,
+        # valid on /internal/v1/demo/* only — never the gateway's.
+        from velaris_shared.internal.auth import is_demo_caller
+        if is_demo_caller(request):
             return await call_next(request)
 
         presented = request.headers.get(HEADER, "")

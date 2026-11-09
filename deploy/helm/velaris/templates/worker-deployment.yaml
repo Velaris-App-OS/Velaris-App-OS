@@ -21,6 +21,9 @@ spec:
       securityContext:
         {{- include "helix.podSecurityContext" . | nindent 8 }}
       terminationGracePeriodSeconds: {{ add (.Values.terminationDrainSeconds | default 5) 25 }}
+      {{- if include "helix.temporalTlsOn" . }}
+      {{- include "helix.temporalTlsVolume" . | nindent 6 }}
+      {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.image.worker.repository }}:{{ .Values.image.worker.tag }}"
@@ -40,6 +43,7 @@ spec:
                 command: ["sh", "-c", "sleep {{ .Values.terminationDrainSeconds | default 5 }}"]
           command: ["python", "-m", "case_service.temporal.worker"]
           env:
+            {{- include "helix.authSecretEnv" . | nindent 12 }}
             - name: VELARIS_CASE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -47,10 +51,17 @@ spec:
                   key: {{ include "helix.dbSecretKey" . }}
             - name: VELARIS_CASE_DATABASE_BACKEND
               value: {{ include "helix.databaseBackend" . | quote }}
+            {{- include "helix.poolerEnv" . | nindent 12 }}
             - name: TEMPORAL_HOST
               value: {{ .Values.worker.temporalHost | quote }}
+            {{- if include "helix.temporalTlsOn" . }}
+            {{- include "helix.temporalTlsEnv" . | nindent 12 }}
+            {{- end }}
             - name: VELARIS_CASE_TASK_QUEUE
               value: {{ .Values.worker.taskQueue | quote }}
+          {{- if include "helix.temporalTlsOn" . }}
+          {{- include "helix.temporalTlsMount" . | nindent 10 }}
+          {{- end }}
           securityContext:
             {{- include "helix.containerSecurityContext" . | nindent 12 }}
           resources:

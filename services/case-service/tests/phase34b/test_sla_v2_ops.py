@@ -1,4 +1,4 @@
-"""HELIX P34b — UserDirectory, dynamic targets, lifecycle wiring tests."""
+"""Velaris P34b — UserDirectory, dynamic targets, lifecycle wiring tests."""
 from __future__ import annotations
 
 import uuid

@@ -456,6 +456,19 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
           "afterwards is far harder. User: use a different address or recover the account.",
         related: ["VEL-AUTH-CREDENTIALS-401"],
       },
+      {
+        code: "VEL-AUTH-CHECK-BUSY-503",
+        http: "503",
+        symptom: "\"The server is busy. Please try again in a moment.\"",
+        rootCause:
+          "The sign-in check (token not revoked, account active, access group) could not " +
+          "reach the database — the connection pool was exhausted or the database refused.",
+        resolution:
+          "Operator: check the database and the connection pooler, and the service log for " +
+          "\"QueuePool limit ... reached\". User: nothing — Studio retries on its own; the " +
+          "request never ran, so retrying is safe.",
+        related: ["VEL-DB-UNAVAILABLE-503"],
+      },
     ],
   },
 
@@ -541,6 +554,16 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
           "Preview generation supports only PDF and common image types; anything else (zip, Office) returns no preview. This is by design.",
         resolution:
           "User: download the file to view it; previews exist only for PDFs and images.",
+      },
+      {
+        code: "VEL-DOC-UNREADABLE-409",
+        http: "409",
+        symptom: "409 'This document cannot be read on this install: its encryption key is not the one it was stored with'.",
+        rootCause:
+          "The file was stored encrypted under a VELARIS_CASE_STORAGE_MASTER_KEY this install no longer has — the key was changed, emptied or lost.",
+        resolution:
+          "Operator: put back the key the file was stored with (backup set's .env, or OpenBao) and restart case-service; never generate a new key over an existing one. User: ask the administrator — the file is intact.",
+        related: ["VEL-DOC-ENCRYPT-503"],
       },
       {
         code: "VEL-DOC-DELETE-403",
@@ -1134,6 +1157,46 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
         related: ["VEL-LEGALHOLD-HELD-409"],
       },
       {
+        code: "VEL-LEGALHOLD-SELF-APPROVAL-403",
+        http: "403",
+        symptom: "403 when approving a legal hold release.",
+        rootCause: "This tenant names an approving group, so a release happens only when someone OTHER than the person who asked approves it.",
+        resolution: "Operator: Ask another member of the approving group to approve. User: Ask a colleague in the compliance group to approve your request.",
+        related: ["VEL-LEGALHOLD-NOT-APPROVER-403"],
+      },
+      {
+        code: "VEL-LEGALHOLD-NOT-APPROVER-403",
+        http: "403",
+        symptom: "403 when approving or refusing a legal hold release.",
+        rootCause: "Only an active member of the tenant's approving access group may approve or refuse a release; the person who asked may only withdraw it.",
+        resolution: "Operator: Add the approver to the approving group (Access Directory), or check the group is active. User: Ask a member of the compliance group.",
+        related: ["VEL-LEGALHOLD-SELF-APPROVAL-403"],
+      },
+      {
+        code: "VEL-LEGALHOLD-NO-REQUEST-404",
+        http: "404",
+        symptom: "404 when approving or refusing a release.",
+        rootCause: "The hold has no open release request \u2014 it was already approved, refused, withdrawn, or released directly.",
+        resolution: "Operator: List the case's holds to see the current state. User: Refresh; somebody else already acted.",
+        related: ["VEL-LEGALHOLD-STATE-409"],
+      },
+      {
+        code: "VEL-LEGALHOLD-GROUP-400",
+        http: "400",
+        symptom: "400 when naming the approving group for legal hold releases.",
+        rootCause: "The access group does not exist in the caller's tenant or is not active, or the caller's account has no tenant.",
+        resolution: "Operator: Pick an active access group of this tenant, or clear the setting. User: Ask an administrator.",
+        related: ["VEL-LEGALHOLD-SETTING-LOCKED-403"],
+      },
+      {
+        code: "VEL-LEGALHOLD-SETTING-LOCKED-403",
+        http: "403",
+        symptom: "403 when changing or clearing the approving group.",
+        rootCause: "Once a group is named, changing or removing it needs a member of that group (or the platform superadmin) \u2014 otherwise the person the rule binds could switch it off and release alone.",
+        resolution: "Operator: Have a member of the current approving group make the change; if the group is gone, the platform superadmin can re-point it. User: Ask a member of the compliance group.",
+        related: ["VEL-LEGALHOLD-GROUP-400"],
+      },
+      {
         code: "VEL-CASE-BULK-STAGE-CONFIRM-409",
         http: "409",
         symptom: "409 saying the confirmation is missing, expired, malformed or does not match. No case was moved.",
@@ -1513,6 +1576,13 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
         resolution: "Operator: Grant the `integration` role if appropriate. User: Ask an administrator.",
       },
       {
+        code: "VEL-CONN-FORM-LOOKUP-403",
+        http: "403",
+        symptom: "The lookup button shows \"This lookup is not part of a saved form\".",
+        rootCause: "A form lookup runs only the connector and input mapping saved on that form's lookup field. Free input needs `integration.connectors.execute` (the builder's Test).",
+        resolution: "Operator: Save the form, and check the field's connector in Form Builder. User: Ask the form's designer.",
+      },
+      {
         code: "VEL-CONN-UNKNOWN-TYPE-400",
         http: "400",
         symptom: "400 quoting the type.",
@@ -1775,6 +1845,19 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
         related: ["VEL-PORTAL-INACTIVE-403", "VEL-PORTAL-ACCESS-404"],
       },
       {
+        code: "VEL-PORTAL-UNAVAILABLE-503",
+        http: "503",
+        symptom: "503 \"The service is temporarily unavailable\" on a portal action that changes a case.",
+        rootCause:
+          "The portal service could not reach case-service's internal API: case-service is down or " +
+          "restarting, VELARIS_CASE_SERVICE_INTERNAL_URL is wrong, or internal TLS refused the " +
+          "connection. Nothing was written.",
+        resolution:
+          "Operator: check velaris-case-service is running and the portal service's log for " +
+          "\"internal call … failed (network)\". User: try again in a minute.",
+        related: ["VEL-DB-UNAVAILABLE-503"],
+      },
+      {
         code: "VEL-PORTAL-INACTIVE-403",
         http: "403",
         symptom: "The portal resolves but refuses to load or accept a submission.",
@@ -1889,6 +1972,18 @@ export const ERROR_CATALOG: Record<string, ComponentErrors> = {
           "Operator: none. To allow a genuine change, remove the existing record deliberately rather " +
           "than making the endpoint idempotent. User: your response was already recorded.",
         related: ["VEL-PORTAL-CLOSED-400"],
+      },
+      {
+        code: "VEL-PORTAL-DEFAULT-403",
+        http: "403",
+        symptom: "403 on turning a case type's portal on or off, or editing its portal display.",
+        rootCause:
+          "The case type is a platform default, which every tenant inherits. Only the platform " +
+          "operator changes a default; a tenant admin's change would apply to every tenant.",
+        resolution:
+          "Operator: none. User: edit your own copy of the case type (the Case Designer forks the " +
+          "default on first edit) and set the portal on that copy.",
+        related: ["VEL-PORTAL-NOTFOUND-404"],
       },
     ],
   },

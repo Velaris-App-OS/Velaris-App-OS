@@ -16,3 +16,4 @@ from . import teams_connector        # noqa: F401  — HxMeet P1
 from . import zoom_connector         # noqa: F401  — HxMeet P1
 from . import gmeet_connector        # noqa: F401  — HxMeet P1
 from . import meet_generic_connector # noqa: F401  — HxMeet P1
+from . import sql_query_connector    # noqa: F401  — database query (2026-11-08)

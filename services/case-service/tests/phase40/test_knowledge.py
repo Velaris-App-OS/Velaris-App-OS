@@ -1,4 +1,4 @@
-"""HELIX P40 — Knowledge Center tests (22 tests).
+"""Velaris P40 — Knowledge Center tests (22 tests).
 
 Covers: /knowledge/overview (stats, quick_start, phases),
         /knowledge/case-types (plain English, stages, steps, step type labels),

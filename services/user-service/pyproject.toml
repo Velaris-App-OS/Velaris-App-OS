@@ -1,10 +1,37 @@
 [project]
 name = "velaris-user-service"
 version = "0.1.0"
-description = "Velaris user-service"
+description = "Velaris user-service — sign-in and identity: login, MFA, SSO, SAML, SCIM, the user directory"
 requires-python = ">=3.12"
-license = {text = "BSL-1.1"}
-dependencies = ["velaris-sdk", "velaris-ir", "fastapi>=0.115,<1", "uvicorn[standard]>=0.34"]
+license = "LicenseRef-BSL-1.1"
+dependencies = [
+    "velaris-shared",
+    "velaris-sdk",               # BRAND_NAME in the SAML metadata and mail text
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "httpx>=0.28.0",             # the internal client + SAML metadata fetch
+    "python-multipart>=0.0.9",   # the SAML ACS / SLO bindings post forms
+    # [email] — auth_real.py uses `EmailStr` at MODULE scope.
+    "pydantic[email]>=2.10.0",
+    "pyotp>=2.9.0",              # MFA — imported at module scope by auth_real
+    "bcrypt>=4.9.9",
+    "pyjwt[crypto]>=2.8",
+    "cryptography>=42.0",
+    "webauthn>=2.0.0",
+    "defusedxml>=0.7.1",
+    # SAML 2.0 SP — XML-DSig verification, pure Python over lxml + cryptography.
+    "signxml>=4.0",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+# case-service is a TEST-ONLY dependency: these tests seed fixtures through the
+# case API and the internal API, so the test client mounts both apps behind an
+# in-process copy of the gateway (see tests/conftest.py). The service package
+# itself must never import it — that is test-enforced.
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.28", "aiosqlite>=0.20", "velaris-case-service"]
+mysql = ["aiomysql>=0.2.0", "pymysql>=1.1.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -12,3 +39,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["user_service"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

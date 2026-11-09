@@ -571,6 +571,13 @@ class TestTheExportIsRunnable:
         from case_service.codegen.generator import AppConfig, generate_app
 
         routes = {getattr(r, "path", "") for r in fastapi_app.routes}
+        # The generated app talks to the customer portal, which portal-service
+        # serves behind the same gateway (R5e step 8).
+        from portal_service.main import app as portal_app
+        routes |= {getattr(r, "path", "") for r in portal_app.routes}
+        # …and signs in through user-service (R5e step 10).
+        from user_service.main import app as user_app
+        routes |= {getattr(r, "path", "") for r in user_app.routes}
         # Every path the app knows lives in one table, so this cannot miss one
         # by failing to guess how it was written at the call site.
         endpoints = generate_app(AppConfig())["src/api/endpoints.ts"]

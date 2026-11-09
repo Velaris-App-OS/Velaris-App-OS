@@ -1,4 +1,4 @@
-"""HELIX P37 — Operator & Access Group Model tests (25 tests).
+"""Velaris P37 — Operator & Access Group Model tests (25 tests).
 
 Covers: portals CRUD, access-roles CRUD, access-groups CRUD,
         member management, /auth/me, /auth/switch-context,
@@ -164,6 +164,16 @@ async def test_create_access_role(client: AsyncClient):
     data = resp.json()
     assert data["name"] == "adjuster"
     assert len(data["privileges"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_role_name_is_409_not_500(client: AsyncClient):
+    """R6 seed re-run, 2026-10-30: the unique (name, tenant) key surfaced as 500."""
+    _override_admin()
+    body = {"name": "dup-role", "privileges": [], "tenant_id": "tenant-1"}
+    assert (await client.post("/api/v1/access-roles", json=body)).status_code == 201
+    r = await client.post("/api/v1/access-roles", json=body)
+    assert r.status_code == 409 and "already exists" in r.text
 
 
 @pytest.mark.asyncio

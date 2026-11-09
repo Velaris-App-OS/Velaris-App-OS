@@ -121,7 +121,7 @@ async def _sign(session: AsyncSession, row: ProcessFragmentModel) -> None:
 
     try:
         from case_service.hxvault import keyring
-        from case_service.modelmarket import packaging
+        from velaris_shared.modelmarket import packaging
 
         dek = keyring.cached_dek(row.tenant_id) or await keyring.ensure_dek(
             session, row.tenant_id)

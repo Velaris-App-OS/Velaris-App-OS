@@ -1,1 +1,1 @@
-"""HELIX vcs-service."""
+"""Velaris vcs-service."""

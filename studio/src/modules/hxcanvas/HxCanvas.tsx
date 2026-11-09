@@ -19,7 +19,9 @@ function authFetch(url: string, opts: RequestInit = {}): Promise<Response> {
 
 const WS_URL = () => {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${window.location.host}/api/v1/hxstream/ws?event_types=canvas.item_created,canvas.item_updated,canvas.item_deleted,canvas.bulk_updated`;
+  // Signed in with the access token, read at each (re)connect.
+  const token = encodeURIComponent(getAccessToken() ?? "");
+  return `${proto}://${window.location.host}/api/v1/hxstream/ws?token=${token}&event_types=canvas.item_created,canvas.item_updated,canvas.item_deleted,canvas.bulk_updated`;
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""HELIX git plugin: local."""
+"""Velaris git plugin: local."""
 
 class LocalBackend:
     """local implementation of the git Protocol."""

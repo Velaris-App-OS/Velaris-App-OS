@@ -1,0 +1,104 @@
+{{/*
+commerce-service — extracted from case-service at R5e step 7 (2026-10-19).
+
+The ingress routes /api/v1/checkout, /payments, /storefront, /marketplace and
+/model-market here. It asks case-service for case work over case-service's
+internal API — by its cluster address, with the release's internal secret.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helix.commerceServiceName" . }}
+  labels: { app: commerce-service }
+spec:
+  replicas: {{ .Values.commerceService.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector: { matchLabels: { app: commerce-service } }
+  template:
+    metadata: { labels: { app: commerce-service } }
+    spec:
+      # Nothing here talks to the Kubernetes API, so the default token has no
+      # reader — and a mounted token is a credential an escaped process finds.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "helix.podSecurityContext" . | nindent 8 }}
+      terminationGracePeriodSeconds: {{ add (.Values.terminationDrainSeconds | default 5) 25 }}
+      containers:
+        - name: commerce-service
+          image: "{{ .Values.image.commerceService.repository }}:{{ .Values.image.commerceService.tag }}"
+          imagePullPolicy: {{ .Values.image.commerceService.pullPolicy }}
+          # Stop accepting new work, then linger while the endpoint is
+          # withdrawn from every node's kube-proxy. Without this a deleted pod
+          # closes connections that are still in flight: measured at 29 of
+          # 26,561 requests (0.11%) on a three-node cluster, and invisible on
+          # one node because the replacement is local.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.terminationDrainSeconds | default 5 }}"]
+          ports:
+            - containerPort: {{ .Values.commerceService.port }}
+          env:
+            {{- include "helix.authSecretEnv" . | nindent 12 }}
+            - name: VELARIS_CASE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helix.dbSecretName" . }}
+                  key: {{ include "helix.dbSecretKey" . }}
+            - name: VELARIS_CASE_DATABASE_BACKEND
+              value: {{ include "helix.databaseBackend" . | quote }}
+            {{- include "helix.poolerEnv" . | nindent 12 }}
+            {{- include "helix.readReplicaEnv" . | nindent 12 }}
+            {{- include "helix.poolerCommerceEnv" . | nindent 12 }}
+            - name: VELARIS_CASE_REDIS_URL
+              value: {{ include "helix.redisUrl" . | quote }}
+            # R5e step 7: case-service's internal API — its cluster address and
+            # the release's internal secret (internal-secret.yaml).
+            - name: VELARIS_CASE_SERVICE_INTERNAL_URL
+              value: "http://{{ include "helix.caseServiceName" . }}:8200"
+            - name: VELARIS_INTERNAL_SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.internalService.existingSecret | default (printf "%s-internal" (include "helix.fullname" .)) }}
+                  key: internal-service-secret
+            - name: VELARIS_SERVICE_NAME
+              value: commerce-service
+            {{- range $k, $v := .Values.commerceService.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          securityContext:
+            {{- include "helix.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.commerceService.resources | nindent 12 }}
+          # Startup probe: the boot budget lives HERE, not in a liveness
+          # `initialDelaySeconds` that has to guess. Liveness and readiness are
+          # held off until this passes, so a slow first boot (migrations, a cold
+          # model, a busy node) is waited out instead of being restarted in a
+          # loop — and once it passes, liveness reacts at its own quick period.
+          # 30 x 5s = up to 150s to come up; after that the pod is restarted.
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.commerceService.port }} }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ready, port: {{ .Values.commerceService.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.commerceService.port }} }
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "helix.commerceServiceName" . }}
+spec:
+  selector: { app: commerce-service }
+  ports:
+    - port: 8200
+      targetPort: {{ .Values.commerceService.port }}
+      name: http

@@ -322,7 +322,10 @@ function SecurityEventsTab() {
               fontSize: 9, padding: "2px 6px", borderRadius: 3,
               background: outcomeColor(e.outcome) + "33", color: outcomeColor(e.outcome),
               fontFamily: "var(--font-mono)", textTransform: "uppercase", width: "fit-content",
-            }}>{e.outcome}</span>
+            }}>{e.outcome}{(e.repeat_count ?? 1) > 1 && (
+              // One row for many refused repeats inside a minute (migration 231).
+              <span title={`${e.repeat_count} identical refusals within a minute`}> ×{e.repeat_count}</span>
+            )}</span>
             <span style={{ color: "var(--text-muted)", fontSize: 10 }}><TimeAgo date={e.timestamp} /></span>
           </div>
         ))}

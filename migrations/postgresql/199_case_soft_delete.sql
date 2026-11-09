@@ -1,6 +1,6 @@
 -- 199 — a case can be deleted, and deletion is SOFT.
 --
--- Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md §7, answered 2026-09-08.
+-- Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md §7, answered 2026-09-08.
 --
 -- WHY THERE WAS NO DELETE AT ALL. Until now the only `DELETE` under `/cases`
 -- was `/{id}/shares`. That was not an oversight — a hard delete of a case

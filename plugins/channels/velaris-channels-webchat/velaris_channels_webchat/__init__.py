@@ -1,4 +1,4 @@
-"""HELIX channels plugin: webchat."""
+"""Velaris channels plugin: webchat."""
 
 class WebchatBackend:
     """webchat implementation of the channels Protocol."""

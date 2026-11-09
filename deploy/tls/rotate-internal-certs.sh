@@ -48,7 +48,7 @@ done
 
 [ -f "$CERT_DIR/ca.crt" ] || { echo "No CA in $CERT_DIR — run make-internal-ca.sh first" >&2; exit 1; }
 
-LEAVES=(case-service analytics-service hxgraph-service hxmigrate-service gateway)
+LEAVES=(case-service analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service worker-service gateway website)
 
 _days_left() {
   local end
@@ -61,6 +61,7 @@ if [ "$CHECK_ONLY" = 1 ]; then
   rc=0
   for name in "${LEAVES[@]}" ca; do
     f="$CERT_DIR/${name}.crt"
+    [ "$name" = website ] && [ ! -f "$f" ] && continue   # only where a website was set up
     [ -f "$f" ] || { echo "MISSING  ${name}"; rc=1; continue; }
     d="$(_days_left "$f")"
     if [ "$d" -lt "$DAYS_BEFORE" ]; then
@@ -75,15 +76,23 @@ fi
 RENEWED=0
 for name in "${LEAVES[@]}"; do
   f="$CERT_DIR/${name}.crt"
-  [ -f "$f" ] || { echo "  ! ${name}.crt missing — re-run make-internal-ca.sh" >&2; exit 1; }
-  d="$(_days_left "$f")"
-  if [ "$FORCE" != 1 ] && [ "$d" -ge "$DAYS_BEFORE" ]; then
+  # The website's client certificate (2026-11-04) is issued by setup-website.sh,
+  # on the operator's run — never here, where a missing one would restart every
+  # service on an install that has no website.
+  if [ "$name" = website ] && [ ! -f "$f" ]; then continue; fi
+  # A service added after the CA was made (commerce-service, R5e step 7) has no
+  # certificate yet: issue it from the existing CA rather than stop — the CA
+  # script refuses to run twice, so this is the only way an install gets one.
+  if [ -f "$f" ]; then d="$(_days_left "$f")"; else d=0; echo "▶ ${name}: no certificate yet — issuing one"; fi
+  if [ -f "$f" ] && [ "$FORCE" != 1 ] && [ "$d" -ge "$DAYS_BEFORE" ]; then
     echo "  ${name}: ${d} days left, not due"
     continue
   fi
 
   echo "▶ Renewing ${name} (${d} days left)"
-  usage="serverAuth"; [ "$name" = "gateway" ] && usage="clientAuth"
+  usage="serverAuth"; case "$name" in gateway|website) usage="clientAuth" ;; esac
+  # Call case-service's /internal API directly (R5e steps 7, 8) — server AND client.
+  case "$name" in commerce-service|portal-service|user-service) usage="serverAuth, clientAuth" ;; esac
   cat > "$CERT_DIR/${name}.ext" <<EXT
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
@@ -117,6 +126,14 @@ EXT
   RENEWED=$((RENEWED + 1))
 done
 
+# The website's container mounts only certs/website/ — never this directory,
+# which holds ca.key. Keep its copy current (2026-11-04).
+if [ -f "$CERT_DIR/website.crt" ]; then
+  mkdir -p "$CERT_DIR/website" && chmod 700 "$CERT_DIR/website"
+  cp -f "$CERT_DIR/ca.crt" "$CERT_DIR/website.crt" "$CERT_DIR/website.key" "$CERT_DIR/website/"
+  chmod 600 "$CERT_DIR/website/website.key"
+fi
+
 if [ "$RENEWED" = 0 ]; then
   echo "Nothing due."
   exit 0
@@ -139,8 +156,17 @@ UNMANAGED=""
 # exact failure this script exists to prevent, and it is the shape of the dev
 # box, where the services run under `nohup` rather than systemd.
 for pair in velaris-case-service:8201 velaris-analytics-service:8202 \
-            velaris-hxgraph-service:8203 velaris-hxmigrate-service:8204; do
+            velaris-hxgraph-service:8203 velaris-hxmigrate-service:8204 \
+            velaris-commerce-service:8207 velaris-portal-service:8205 \
+            velaris-user-service:8206 \
+            velaris-worker-service:8208; do
   unit="${pair%%:*}"; port="${pair##*:}"
+  # Without its own unit, an extracted service runs inside case-service's unit
+  # (velaris-exec.sh) and was just restarted with it — not an unmanaged process.
+  if [ "$unit" != velaris-case-service ] && [ ! -f "${VELARIS_UNIT_DIR:-/etc/systemd/system}/$unit.service" ] \
+     && systemctl is-active --quiet velaris-case-service 2>/dev/null; then
+    continue
+  fi
   if systemctl is-active --quiet "$unit" 2>/dev/null; then
     systemctl restart "$unit" || FAILED="$FAILED $unit"
   elif command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${port}[[:space:]]"; then

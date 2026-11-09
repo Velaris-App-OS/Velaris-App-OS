@@ -279,7 +279,6 @@ async def search_case_instances(
         # HxGuard enforce mode: restrict the list to cases the user has a
         # relationship with — owner, tuple (assignee/viewer/editor), or an
         # access-group-allowed case type. Mirrors RebacBackend.evaluate.
-        from sqlalchemy import exists, or_
         from velaris_shared.db.models import HxGuardTupleModel as _HXT
         uid, allowed_type_ids = accessible_to_user
         from sqlalchemy import String as _Str, cast as _cast
@@ -287,11 +286,19 @@ async def search_case_instances(
             AccessGroupModel as _AG, OperatorAccessGroupModel as _OAG,
         )
 
+        # Shape (R6 soak, 2026-11-02): `id IN (one indexed lookup per way in)`,
+        # never `col = x OR EXISTS(…) OR EXISTS(…)`. The OR form could only be
+        # answered by reading EVERY case in the tenant and probing each one —
+        # 28,000 rows read to return a worker's 470, twice per list (page +
+        # count) — so a list got slower with every case anyone created, and
+        # at 400 users PostgreSQL took the box (p95 17 s). Each branch below
+        # is an index lookup (created_by: migration 228; tuples: subject
+        # index; case type: idx_cases_type); the result is the same set.
+        from sqlalchemy import union_all
         clauses = [
-            CaseInstanceModel.created_by == uid,
-            exists().where(
+            select(CaseInstanceModel.id).where(CaseInstanceModel.created_by == uid),
+            select(_HXT.object_id).where(
                 _HXT.object_type == "case",
-                _HXT.object_id == CaseInstanceModel.id,
                 _HXT.subject_type == "user",
                 _HXT.subject_id == uid,
                 _HXT.relation.in_(("assignee", "viewer", "editor")),
@@ -316,9 +323,8 @@ async def search_case_instances(
             # THIRD form of the same mismatch in this codebase — after
             # `costing._authorized_case` (GUID vs slug) and the access-group
             # tenant check earlier today.
-            exists().where(
+            select(_HXT.object_id).where(
                 _HXT.object_type == "case",
-                _HXT.object_id == CaseInstanceModel.id,
                 _HXT.subject_type == "access_group",
                 _HXT.relation.in_(("assignee", "viewer", "editor")),
                 _HXT.subject_id.in_(
@@ -330,8 +336,9 @@ async def search_case_instances(
             ),
         ]
         if allowed_type_ids:
-            clauses.append(CaseInstanceModel.case_type_id.in_(allowed_type_ids))
-        cond = or_(*clauses)
+            clauses.append(select(CaseInstanceModel.id)
+                           .where(CaseInstanceModel.case_type_id.in_(allowed_type_ids)))
+        cond = CaseInstanceModel.id.in_(union_all(*clauses))
         base = base.where(cond)
         count_base = count_base.where(cond)
 

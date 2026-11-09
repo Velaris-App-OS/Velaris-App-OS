@@ -209,12 +209,33 @@ async def list_environments(
     return [EnvOut.from_model(e) for e in envs]
 
 
+async def _require_public_env_urls(session: AsyncSession, user: AuthenticatedUser,
+                                   *urls: str | None) -> None:
+    """A tenant's deployment targets must be on the internet (2026-11-04): a
+    tenant admin — a website demo account among them — registered an
+    environment on this install's own network and read status, timing and
+    errors back from its health check (a LAN port scanner), and pushed or
+    webhooked there. The platform operator's private environments are unchanged."""
+    from velaris_shared.hxbridge.security import validate_outbound_url
+    from case_service.tenancy.identity import is_platform_operator
+    urls = tuple(u for u in urls if u)
+    if not urls or await is_platform_operator(session, user):
+        return
+    for u in urls:
+        try:
+            await validate_outbound_url(u)
+        except ValueError:
+            raise HTTPException(400, f"{u!r} is not reachable from this platform: "
+                                     "private and internal addresses are refused.")
+
+
 @router.post("/environments", response_model=EnvOut, status_code=201)
 async def register_environment(
     body: EnvIn,
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(hxguard.guard("deploy.environments.write")),
 ):
+    await _require_public_env_urls(session, user, body.url, body.webhook_url)
     env = await service.register_environment(
         session, _tenant(user), body.name, body.label, body.url, body.order_index,
         delivery_method=body.delivery_method,
@@ -234,6 +255,7 @@ async def update_environment(
     user: AuthenticatedUser = Depends(hxguard.guard("deploy.environments.write")),
 ):
     env = await _env_or_404(session, env_id, user)
+    await _require_public_env_urls(session, user, body.url, body.webhook_url)
     env.label            = body.label
     env.url              = body.url if body.url is not None else env.url
     env.order_index      = body.order_index
@@ -841,7 +863,7 @@ async def import_bundle(
     declared = bundle.get("package_checksum")
     if declared:
         from case_service.hxdeploy.packages import canonical_bytes
-        from case_service.marketplace.checksum import ChecksumError, verify_checksum
+        from velaris_shared.apps.checksum import ChecksumError, verify_checksum
         try:
             verify_checksum(canonical_bytes(bundle), str(declared))
         except ChecksumError as exc:

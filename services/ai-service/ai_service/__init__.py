@@ -1,1 +1,1 @@
-"""HELIX ai-service."""
+"""Velaris ai-service."""

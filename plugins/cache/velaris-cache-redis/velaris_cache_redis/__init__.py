@@ -1,4 +1,4 @@
-"""HELIX cache plugin: redis."""
+"""Velaris cache plugin: redis."""
 
 class RedisBackend:
     """redis implementation of the cache Protocol."""

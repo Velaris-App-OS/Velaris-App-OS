@@ -1,6 +1,6 @@
 """Authoring the status set and the action configuration a case type runs on.
 
-Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 
 **What a customer owns here, and what they do not.** Statuses entirely — names,
 labels, categories, which end a case, which transitions are legal. Actions only

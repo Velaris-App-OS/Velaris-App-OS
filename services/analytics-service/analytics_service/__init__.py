@@ -1,1 +1,1 @@
-"""HELIX analytics-service."""
+"""Velaris analytics-service."""

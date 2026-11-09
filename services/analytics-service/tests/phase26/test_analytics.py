@@ -1,4 +1,4 @@
-"""HELIX P26 — HxAnalytics tests (24 tests).
+"""Velaris P26 — HxAnalytics tests (24 tests).
 
 Covers: platform_snapshot (empty DB), cases_over_time, sla_performance,
         funnel_by_case_type, query_engine (structured: count/throughput/sla/

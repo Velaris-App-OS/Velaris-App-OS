@@ -1,4 +1,4 @@
-"""HELIX SDK Protocol: Work Queue Manager.
+"""Velaris SDK Protocol: Work Queue Manager.
 
 Defines the contract for work queue operations — fetching items,
 claiming, releasing, assigning, and completing work.

@@ -1,4 +1,4 @@
-"""HELIX Compliance — audit chain, evidence reports, data lineage."""
+"""Velaris Compliance — audit chain, evidence reports, data lineage."""
 from .audit_chain import (
     seal_new_entries, verify_chain, chain_status, compute_row_hash,
 )

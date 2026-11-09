@@ -32,6 +32,7 @@ from velaris_shared.auth.dependencies import require_role
 from velaris_shared.db.session import get_session
 
 from velaris_shared import hxguard
+from velaris_shared.db.read_routing import get_read_session
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(hxguard.guard("platform.admin.access"))])
 
@@ -129,7 +130,7 @@ async def search_audit_log(
     days: int = Query(7, ge=1, le=365),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Search audit log across all cases with filters."""
@@ -186,7 +187,7 @@ async def search_audit_log(
 
 @router.get("/audit-log/actions")
 async def list_audit_actions(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List distinct audit action types."""

@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from velaris_shared.hxguard import generation as _hxguard_generation
@@ -406,10 +407,31 @@ async def create_access_role(
     session: AsyncSession = Depends(get_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("identity.roles.write")),
 ):
+    await _role_tenant(session, _user, body)
     r = AccessRoleModel(**body.model_dump())
     session.add(r)
-    await session.flush()
+    await _flush_role(session, body.name)
     return _role_out(r)
+
+
+async def _role_tenant(session: AsyncSession, user: AuthenticatedUser, body: AccessRoleIn) -> None:
+    """A role's tenant was stored as sent (2026-10-30): a tenant admin who sent
+    none made a built-in role — in every tenant's list — and a PATCH could move
+    their role there. The operator keeps that choice; a tenant admin writes
+    into their own tenant, as for portals and groups."""
+    try:
+        body.tenant_id = await tenant_for_write(session, user, body.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+async def _flush_role(session: AsyncSession, name: str) -> None:
+    """A role name is unique per tenant; a duplicate answered 500 (R6, 2026-10-30)."""
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(409, f"An access role named '{name}' already exists")
 
 
 @router.get("/access-roles/{role_id}", response_model=AccessRoleOut)
@@ -441,13 +463,14 @@ async def update_access_role(
     # Rewriting `privileges` can strip the bootstrap action from a role that
     # every access group carries — the same lockout as deleting the role, by a
     # quieter route. Checked before the write, like every other holder check.
+    await _role_tenant(session, _user, body)
     fields = body.model_dump()
     await lockout.assert_role_edit_survivable(
         session, r, fields.get("privileges"), fields.get("name"),
         context=f"updating access role {role_id}")
     for k, v in fields.items():
         setattr(r, k, v)
-    await session.flush()
+    await _flush_role(session, body.name)
     return _role_out(r)
 
 
@@ -702,14 +725,9 @@ async def remove_member(
 
 # ── Auth context endpoints ────────────────────────────────────────────────────
 
-@router.get("/auth/me")
-async def get_me(user: AuthenticatedUser = Depends(get_current_user)):
-    """Return the current operator's full context — active group, portal, privileges.
-
-    This is the load-bearing endpoint for P38/P39+ frontends to determine
-    which portal to render and what the operator is allowed to do.
-    """
-    return user.to_dict()
+# `GET /auth/me` was defined here as well, but `api/routers/auth.py` was always
+# registered first and answered it, so this copy was never reached. It went with
+# the sign-in split (R5e step 10): `/auth/me` is user-service's.
 
 
 @router.post("/auth/switch-context")

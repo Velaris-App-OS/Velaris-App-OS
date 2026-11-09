@@ -1,0 +1,361 @@
+{
+ "definition": {
+  "sections": [
+   {
+    "id": "s",
+    "title": "Claim",
+    "description": "About it",
+    "order": 0,
+    "fields": [
+     {
+      "id": "f1",
+      "type": "text",
+      "label": "Name",
+      "field_key": "name",
+      "placeholder": "Your name",
+      "required_message": "Name please"
+     },
+     {
+      "id": "f2",
+      "type": "dropdown",
+      "label": "Colour",
+      "field_key": "colour",
+      "options": [
+       {
+        "label": "Red",
+        "value": "r"
+       },
+       {
+        "label": "Blue",
+        "value": "b"
+       },
+       "green"
+      ]
+     },
+     {
+      "id": "f3",
+      "type": "repeating_group",
+      "label": "Items",
+      "field_key": "items",
+      "add_label": "Add item",
+      "fields": [
+       {
+        "id": "c1",
+        "type": "number",
+        "label": "Qty",
+        "field_key": "qty"
+       }
+      ]
+     },
+     {
+      "id": "f4",
+      "type": "paragraph",
+      "label": "Note",
+      "field_key": "note",
+      "text": "Read this"
+     }
+    ]
+   }
+  ],
+  "translations": {
+   "de": {
+    "form": {
+     "submit_label": "Senden"
+    },
+    "sections": {
+     "s": {
+      "title": "Schaden",
+      "description": ""
+     }
+    },
+    "fields": {
+     "name": {
+      "label": "Name (de)",
+      "required_message": "Bitte Namen"
+     },
+     "colour": {
+      "label": "Farbe",
+      "options": {
+       "r": "Rot",
+       "green": "Grün"
+      }
+     },
+     "items": {
+      "add_label": "Position hinzufügen"
+     },
+     "items.qty": {
+      "label": "Menge"
+     },
+     "note": {
+      "text": "Bitte lesen"
+     }
+    }
+   },
+   "pt-BR": {
+    "fields": {
+     "name": {
+      "label": "Nome"
+     }
+    }
+   },
+   "bad code!": {
+    "fields": {}
+   }
+  }
+ },
+ "pick": [
+  {
+   "accept": [
+    "de-AT",
+    "de",
+    "en"
+   ],
+   "lang": "de"
+  },
+  {
+   "accept": [
+    "pt-br"
+   ],
+   "lang": "pt-BR"
+  },
+  {
+   "accept": [
+    "pt"
+   ],
+   "lang": null
+  },
+  {
+   "accept": [
+    "fr",
+    "en"
+   ],
+   "lang": null
+  },
+  {
+   "accept": [],
+   "lang": null
+  }
+ ],
+ "translate": [
+  {
+   "lang": "de",
+   "expect": {
+    "sections": [
+     {
+      "id": "s",
+      "title": "Schaden",
+      "description": "About it",
+      "order": 0,
+      "fields": [
+       {
+        "id": "f1",
+        "type": "text",
+        "label": "Name (de)",
+        "field_key": "name",
+        "placeholder": "Your name",
+        "required_message": "Bitte Namen"
+       },
+       {
+        "id": "f2",
+        "type": "dropdown",
+        "label": "Farbe",
+        "field_key": "colour",
+        "options": [
+         {
+          "label": "Rot",
+          "value": "r"
+         },
+         {
+          "label": "Blue",
+          "value": "b"
+         },
+         {
+          "label": "Grün",
+          "value": "green"
+         }
+        ]
+       },
+       {
+        "id": "f3",
+        "type": "repeating_group",
+        "label": "Items",
+        "field_key": "items",
+        "add_label": "Position hinzufügen",
+        "fields": [
+         {
+          "id": "c1",
+          "type": "number",
+          "label": "Menge",
+          "field_key": "qty"
+         }
+        ]
+       },
+       {
+        "id": "f4",
+        "type": "paragraph",
+        "label": "Note",
+        "field_key": "note",
+        "text": "Bitte lesen"
+       }
+      ]
+     }
+    ],
+    "translations": {
+     "de": {
+      "form": {
+       "submit_label": "Senden"
+      },
+      "sections": {
+       "s": {
+        "title": "Schaden",
+        "description": ""
+       }
+      },
+      "fields": {
+       "name": {
+        "label": "Name (de)",
+        "required_message": "Bitte Namen"
+       },
+       "colour": {
+        "label": "Farbe",
+        "options": {
+         "r": "Rot",
+         "green": "Grün"
+        }
+       },
+       "items": {
+        "add_label": "Position hinzufügen"
+       },
+       "items.qty": {
+        "label": "Menge"
+       },
+       "note": {
+        "text": "Bitte lesen"
+       }
+      }
+     },
+     "pt-BR": {
+      "fields": {
+       "name": {
+        "label": "Nome"
+       }
+      }
+     },
+     "bad code!": {
+      "fields": {}
+     }
+    },
+    "settings": {
+     "submit_label": "Senden"
+    }
+   }
+  },
+  {
+   "lang": "pt-BR",
+   "expect": {
+    "sections": [
+     {
+      "id": "s",
+      "title": "Claim",
+      "description": "About it",
+      "order": 0,
+      "fields": [
+       {
+        "id": "f1",
+        "type": "text",
+        "label": "Nome",
+        "field_key": "name",
+        "placeholder": "Your name",
+        "required_message": "Name please"
+       },
+       {
+        "id": "f2",
+        "type": "dropdown",
+        "label": "Colour",
+        "field_key": "colour",
+        "options": [
+         {
+          "label": "Red",
+          "value": "r"
+         },
+         {
+          "label": "Blue",
+          "value": "b"
+         },
+         "green"
+        ]
+       },
+       {
+        "id": "f3",
+        "type": "repeating_group",
+        "label": "Items",
+        "field_key": "items",
+        "add_label": "Add item",
+        "fields": [
+         {
+          "id": "c1",
+          "type": "number",
+          "label": "Qty",
+          "field_key": "qty"
+         }
+        ]
+       },
+       {
+        "id": "f4",
+        "type": "paragraph",
+        "label": "Note",
+        "field_key": "note",
+        "text": "Read this"
+       }
+      ]
+     }
+    ],
+    "translations": {
+     "de": {
+      "form": {
+       "submit_label": "Senden"
+      },
+      "sections": {
+       "s": {
+        "title": "Schaden",
+        "description": ""
+       }
+      },
+      "fields": {
+       "name": {
+        "label": "Name (de)",
+        "required_message": "Bitte Namen"
+       },
+       "colour": {
+        "label": "Farbe",
+        "options": {
+         "r": "Rot",
+         "green": "Grün"
+        }
+       },
+       "items": {
+        "add_label": "Position hinzufügen"
+       },
+       "items.qty": {
+        "label": "Menge"
+       },
+       "note": {
+        "text": "Bitte lesen"
+       }
+      }
+     },
+     "pt-BR": {
+      "fields": {
+       "name": {
+        "label": "Nome"
+       }
+      }
+     },
+     "bad code!": {
+      "fields": {}
+     }
+    }
+   }
+  }
+ ]
+}

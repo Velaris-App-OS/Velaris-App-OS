@@ -52,6 +52,58 @@ def _as_uuid(token: str) -> uuid.UUID | None:
 def clear_cache() -> None:
     """Drop the resolver cache — for tests and for tenant mutations."""
     _cache.clear()
+    _closed_cache.clear()
+
+
+#: Tokens (id and slug) of ARCHIVED tenants — offboarded: nobody of theirs
+#: signs in, their portal answers 404. Read for every request, so cached; a
+#: change of status clears it everywhere (tenants generation), and the TTL
+#: bounds it if that signal is missed.
+_CLOSED_TTL_SECONDS = 30.0
+_closed_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+
+async def tenant_closed(session: AsyncSession, token: Any) -> bool:
+    """Has this tenant been archived (offboarded)?
+
+    Archiving set `status = "archived"` and nothing read it (found 2026-10-30,
+    R7): an offboarded tenant's staff kept signing in and its portal kept
+    taking submissions. The default tenant can never be archived (the route
+    refuses), so a token with no tenant is never closed.
+    """
+    key = str(token).strip() if token not in (None, "") else ""
+    if not key or key == DEFAULT_TENANT:
+        return False
+    hit = _closed_cache.get("all")
+    if hit is None or hit[0] <= time.monotonic():
+        rows = (await session.execute(
+            select(TenantModel.id, TenantModel.slug).where(TenantModel.status == "archived")
+        )).all()
+        closed = frozenset({str(r[0]) for r in rows} | {str(r[1]) for r in rows})
+        _closed_cache["all"] = (time.monotonic() + _CLOSED_TTL_SECONDS, closed)
+        hit = _closed_cache["all"]
+    return key in hit[1]
+
+
+async def tenants_changed(session: AsyncSession, *, reason: str) -> None:
+    """Call after a tenant is created or renamed, in its transaction.
+
+    Until R5e step 5 nothing did: a new tenant's slug, looked up a moment
+    before it existed, stayed cached as "no such tenant" for 60 s — in every
+    process, including the one that created it.
+    """
+    from velaris_shared import generations
+
+    await generations.bump(session, "tenants", reason=reason)
+    _cache.clear()
+    _closed_cache.clear()
+    _actor_cache.clear()
+
+
+async def _on_tenants_change(session: AsyncSession) -> None:
+    _cache.clear()
+    _closed_cache.clear()
+    _actor_cache.clear()
 
 
 async def resolve_tenant(
@@ -140,8 +192,24 @@ async def caller_tenant_uuid(session: AsyncSession, user: Any) -> uuid.UUID | No
     return resolved[0] if resolved else None
 
 
+#: Tables whose tenant-less rows are genuinely PLATFORM-SHARED CONFIGURATION —
+#: defaults every tenant is meant to read (2026-11-04). Everywhere else a row
+#: with no tenant is a RECORD written before it had an owner (audit, logs,
+#: incidents, jobs, tokens…), which the platform reads as the default tenant's;
+#: until now such rows were listed to every tenant, which every website demo
+#: tenant would have read. Add a table here only if a tenant must see the
+#: operator's rows of it.
+SHARED_CONFIG_TABLES = frozenset({
+    "case_types", "portals", "access_groups", "access_roles", "security_rules",
+    "sovereignty_rules", "retention_policies", "bot_tenant_limits",
+    "sso_providers",   # a platform-wide IdP is every tenant's sign-in (no secret is listed)
+})
+
+
 async def scope_to_caller(stmt, model, session: AsyncSession, user: Any, *, via=None):
-    """Narrow a list query to the caller's tenant — plus platform-shared rows.
+    """Narrow a list query to the caller's tenant — plus tenant-less rows where
+    they are shared configuration (`SHARED_CONFIG_TABLES`), or the caller is the
+    default tenant, whose legacy records they are.
 
     8d (2026-09-29): some forty list routes returned every tenant's rows. This
     is the one rule they now share: a row whose `tenant_id` is the caller's
@@ -155,12 +223,25 @@ async def scope_to_caller(stmt, model, session: AsyncSession, user: Any, *, via=
     tokens = await caller_tenant_tokens(session, user)
     if tokens is None:
         return stmt
+    # A tenant-less row: shared configuration is everybody's; a record is the
+    # default tenant's, so only the default tenant (the operator) reads it.
+    is_default = await same_tenant_as_default(
+        session, getattr(user, "tenant_id", None) or DEFAULT_TENANT)
+    shared = getattr(model, "__tablename__", "") in SHARED_CONFIG_TABLES
+    null_ok = shared or is_default
     if via is not None:
         fk_col, parent = via
         pk = next(iter(parent.__table__.primary_key.columns))
         allowed = await scope_to_caller(_select(getattr(parent, pk.name)), parent,
                                         session, user)
-        return stmt.where(or_(fk_col.in_(allowed), fk_col.is_(None)))
+        if not null_ok:
+            # A RECORD under a shared parent (an intake event on a default case
+            # type) is the default tenant's, not every tenant's (2026-11-04):
+            # its parent must be the caller's own, not a shared default.
+            pcol = parent.tenant_id
+            allowed = allowed.where(pcol.is_not(None))
+        return stmt.where(or_(fk_col.in_(allowed), fk_col.is_(None)) if null_ok
+                          else fk_col.in_(allowed))
     col = model.tenant_id
     if type(col.type).__name__ == "GUID":
         values = []
@@ -171,7 +252,7 @@ async def scope_to_caller(stmt, model, session: AsyncSession, user: Any, *, via=
                 continue
     else:
         values = list(tokens)
-    return stmt.where(or_(col.in_(values), col.is_(None)))
+    return stmt.where(or_(col.in_(values), col.is_(None)) if null_ok else col.in_(values))
 
 
 async def is_platform_operator(session: AsyncSession, user: Any) -> bool:
@@ -397,6 +478,12 @@ _actor_cache: dict[str, tuple[float, uuid.UUID | None]] = {}
 def clear_actor_cache() -> None:
     """Drop the actor resolver cache — for tests and for user mutations."""
     _actor_cache.clear()
+
+
+# A tenant changed in another process: drop the lookups now (R5e step 5).
+from velaris_shared import generations as _generations  # noqa: E402
+
+_generations.on_change("tenants", _on_tenants_change)
 
 
 async def actor_uuid(session: AsyncSession, user: Any) -> uuid.UUID | None:

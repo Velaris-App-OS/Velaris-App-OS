@@ -1,4 +1,4 @@
-"""HELIX P27 — Push Notification tests (25 tests).
+"""Velaris P27 — Push Notification tests (25 tests).
 
 All channel HTTP calls are mocked; no real FCM/APNs/WebPush traffic.
 """

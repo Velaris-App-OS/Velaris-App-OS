@@ -790,10 +790,11 @@ function AdvisorTab() {
     <div style={{ ...S.card, borderLeft: "4px solid var(--status-warning)" }}>
       <div style={{ fontWeight: 700, marginBottom: 8 }}>pg_stat_statements not enabled</div>
       <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
-        The Advisor tab requires <code>pg_stat_statements</code> to be enabled in your PostgreSQL configuration.
+        The Advisor tab reads query statistics (<code>pg_stat_statements</code>), which are off on this database.
+        Turning them on restarts the database once (a few seconds).
       </div>
       <pre style={{ ...S.mono, fontSize: 11, background: "var(--bg-base)", padding: 10, borderRadius: 6 }}>
-        {`# Add to postgresql.conf:\nshared_preload_libraries = 'pg_stat_statements'\n\n# Then run:\nCREATE EXTENSION IF NOT EXISTS pg_stat_statements;`}
+        {`# Bundled database — on the server, in the install folder:\n#   set in .env:  VELARIS_DB_QUERY_STATS=true\n./scripts/db-query-stats.sh\n\n# Database on another server (managed or your own):\n#   shared_preload_libraries = 'pg_stat_statements'  (its parameter settings), then:\nCREATE EXTENSION IF NOT EXISTS pg_stat_statements;`}
       </pre>
     </div>
   );
@@ -837,6 +838,10 @@ function AdvisorTab() {
 
       {err && <div style={S.err}>{err}</div>}
 
+      {advice?.note && (
+        <div style={{ ...S.card, fontSize: 13, color: "var(--text-secondary)" }}>{advice.note}</div>
+      )}
+
       {advice?.recommendations?.map((r: any, i: number) => (
         <div key={i} style={{ ...S.card, borderLeft: "4px solid var(--accent)" }}>
           <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--text-primary)" }}>
@@ -844,9 +849,9 @@ function AdvisorTab() {
             <span style={{ ...S.tag, background: "var(--bg-hover)", color: "var(--text-secondary)", marginLeft: 8 }}>{r.index_type}</span>
           </div>
           <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 8 }}>{r.reason}</div>
-          {r.ddl_fix && (
+          {(r.ddl || r.ddl_fix) && (
             <pre style={{ ...S.mono, fontSize: 11, background: "var(--bg-base)", padding: 10, borderRadius: 6, marginBottom: 0 }}>
-              {r.ddl_fix}
+              {r.ddl || r.ddl_fix}
             </pre>
           )}
         </div>

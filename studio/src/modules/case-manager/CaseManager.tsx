@@ -26,7 +26,7 @@ import {
   completeStep,
   listStepCompletions,
   unlockStep,
-  getForm,
+  getCaseForm,
   listMeetProviders,
   listCaseSessions,
   listCaseMessages,
@@ -59,7 +59,9 @@ import {
 } from "@shared/api/client";
 import ErrorCodeLink from "@shared/errors/ErrorCodeLink";
 import type { MyTaskResult, CaseSession, MeetProvider } from "@shared/api/client";
+import { loadPrefill } from "../form-builder/prefill";
 import FormRenderer from "@modules/form-builder/FormRenderer";
+import { useFormDraft } from "@modules/form-builder/drafts";
 import { Button, Card, EmptyState, MeetRoom, Spinner, Stat, Tabs, TimeAgo, VoiceInput, appendTranscript } from "@shared/components";
 import { getAccessToken } from "@/auth/tokenManager";
 import type { CaseSummary, CaseAuditEntry, CaseStatus, CasePriority, SLAStatusInfo, CaseTypeSummary } from "@shared/types";
@@ -2114,7 +2116,7 @@ function StepCard({
         <div style={{ borderTop: "1px solid var(--border-subtle)", padding: "6px 10px 8px 28px" }}>
           {/* If this step had a form, show View Form button instead of raw key-value dump */}
           {step.form_id ? (
-            <ViewFormButton formId={step.form_id} data={completion.data} stepName={step.name} />
+            <ViewFormButton formId={step.form_id} caseId={caseId} data={completion.data} stepName={step.name} />
           ) : (
             Object.entries(completion.data).map(([k, v]) => (
               <div key={k} style={{ fontSize: 11, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
@@ -2130,8 +2132,10 @@ function StepCard({
 
 /* ── View Submitted Form (read-only modal) ─────────────────────── */
 
-function ViewFormButton({ formId, data, stepName }: {
+function ViewFormButton({ formId, caseId, data, stepName }: {
   formId: string;
+  /** The form as this case used it (its pinned version when versioned per case). */
+  caseId: string;
   data: Record<string, unknown>;
   stepName: string;
 }) {
@@ -2145,7 +2149,7 @@ function ViewFormButton({ formId, data, stepName }: {
     setOpen(true);
     if (formDef) return;
     setLoading(true);
-    getForm(formId)
+    getCaseForm(caseId, formId)
       .then(f => { setFormDef(f.definition_json); setFormName(f.name); })
       .catch(e => setErr(e.message || "Failed to load form"))
       .finally(() => setLoading(false));
@@ -2243,28 +2247,40 @@ function FormBuilderStep({
 }) {
   const [formDef, setFormDef] = useState<any>(null);
   const [formName, setFormName] = useState("");
+  const [prefill, setPrefill] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  // Save as draft (§5 step 7): the person's own unfinished answers, restored on open.
+  const draft = useFormDraft(caseId, formId);
 
   useEffect(() => {
-    getForm(formId)
-      .then((f) => { setFormDef(f.definition_json); setFormName(f.name); })
+    // The form opens with the case's variables filled in, as in Work Center —
+    // in the version this case uses (§5 step 6).
+    getCaseForm(caseId, formId)
+      .then(async (f) => {
+        setPrefill(await loadPrefill(caseId, f.definition_json));
+        setFormDef(f.definition_json); setFormName(f.name);
+      })
       .catch((e) => setErr(e.message || "Failed to load form"))
       .finally(() => setLoading(false));
-  }, [formId]);
+  }, [formId, caseId]);
 
-  if (loading) return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading form…</div>;
+  if (loading || !draft.ready) return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading form…</div>;
   if (err) return <div style={{ fontSize: 12, color: "var(--status-failed)" }}>Form error: {err}</div>;
   if (!formDef) return null;
 
   return (
     <FormRenderer
+      key={draft.key}
       formName={formName}
       definition={formDef}
+      initialValues={{ ...prefill, ...draft.values }}
       onSubmit={async (values) => onSubmit(values)}
       onCancel={onCancel}
       caseId={caseId}
       formId={formId}
+      notice={draft.notice}
+      secondaryAction={draft.action}
     />
   );
 }

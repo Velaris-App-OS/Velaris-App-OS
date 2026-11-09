@@ -1,4 +1,4 @@
-"""HELIX P43 — App Export & Environment Pipeline tests (22 tests).
+"""Velaris P43 — App Export & Environment Pipeline tests (22 tests).
 
 Covers: POST /apps/package (creates bundle + manifest), GET /apps/packages
         (list, status filter), GET /apps/packages/{id} (detail + manifest),

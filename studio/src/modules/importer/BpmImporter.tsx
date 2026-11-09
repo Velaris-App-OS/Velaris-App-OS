@@ -1,6 +1,6 @@
 /**
  * P44 — BPM Importer: Upload a Pega JAR, Camunda BPMN, Appian ZIP, or
- * ServiceNow XML export and convert it into a Helix application.
+ * ServiceNow XML export and convert it into a Velaris application.
  * Tabs: Import · Jobs · Result
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";

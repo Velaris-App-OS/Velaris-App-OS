@@ -2,6 +2,7 @@
  * P28 — HxBridge: Connector Registry, call history, DLQ, and webhook receiver.
  * Tabs: Connectors · Call History · Dead Letter Queue
  */
+import OperationsEditor from "./OperationsEditor";
 import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useBranchMode, useCurrentUserGroups } from "@shared/hooks";
@@ -254,6 +255,8 @@ function ConnectorsTab() {
               <textarea style={{ ...S.input, height: 70, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
                         value={form.config} onChange={e => setForm(f => ({ ...f, config: e.target.value }))} />
             </div>
+            <OperationsEditor connectorType={form.connector_type} configText={form.config}
+              onChange={text => setForm(f => ({ ...f, config: text }))} />
             <div style={{ marginBottom: 8 }}>
               <span style={S.label}>Credentials (JSON — encrypted at rest)</span>
               <textarea style={{ ...S.input, height: 50, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
@@ -421,6 +424,11 @@ function ConnectorsTab() {
                 />
                 {branchConfigErr && (
                   <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>{branchConfigErr}</div>
+                )}
+                {selected && (
+                  <OperationsEditor connectorType={selected.connector_type} configText={branchConfigStr}
+                    disabled={branchMode.isLocked}
+                    onChange={text => { setBranchConfigStr(text); setBranchConfigErr(null); }} />
                 )}
                 <button
                   style={{ ...S.btn, ...S.btnPrimary, marginTop: 8, opacity: (branchMode.saving || branchMode.isLocked) ? 0.6 : 1 }}

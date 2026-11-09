@@ -506,7 +506,10 @@ export default function HxNexus() {
       const res = await r.json();
       setUploadResult(res.queued
         ? `✓ Queued "${res.filename}" for background indexing — see the Index Queue tab`
-        : `✓ Indexed ${res.chunks_indexed} chunks from "${res.filename}"`);
+        : res.warning
+          // R4: chunks no embedding model reached are stored but unsearchable — say so.
+          ? `⚠ Indexed ${res.chunks_indexed} chunks from "${res.filename}". ${res.warning}`
+          : `✓ Indexed ${res.chunks_indexed} chunks from "${res.filename}"`);
       setUploadFile(null);
     } catch (e: any) {
       setUploadResult(`Error: ${e.message}`);

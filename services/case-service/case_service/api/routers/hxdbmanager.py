@@ -15,10 +15,9 @@ Safety rules (non-negotiable):
 """
 from __future__ import annotations
 
-import asyncio
 import bcrypt
-import collections
 import hashlib
+import json
 import logging
 import re
 import time
@@ -79,8 +78,8 @@ _DDL_KEYWORDS = {"create", "drop", "alter", "truncate", "vacuum", "cluster", "re
 _DML_KEYWORDS = {"insert", "update", "delete", "merge", "upsert"}
 
 # ── Per-user rate limit on /execute: max 20 calls per 60s ────────────────────
-_EXECUTE_RATE: dict[str, collections.deque] = {}
-_EXECUTE_RATE_LOCK: dict[str, "asyncio.Lock"] = {}
+# Counted in the shared store (velaris_shared/shared_state.py): one count for
+# every copy of the service when the cache is on; this process's when off.
 _EXECUTE_RATE_LIMIT   = 20   # max calls
 _EXECUTE_RATE_WINDOW  = 60   # seconds
 
@@ -372,8 +371,8 @@ def _mask_rows(
 
 # ── Breach detection — in-memory tracking, auto-disable on CRITICAL ───────────
 
-_BREACH_EVENTS: dict[str, collections.deque] = {}  # user_id → deque[(ts, sev)]
-_BREACH_LOCK:   dict[str, asyncio.Lock]       = {}
+# Counted in the shared store, so events spread over several copies of the
+# service still add up to an auto-disable (they did not, per process).
 
 _BREACH_HIGH_WINDOW_S    = 600  # 10 minutes
 _BREACH_HIGH_FOR_CRITICAL = 3   # 3 HIGH events in window → CRITICAL
@@ -383,12 +382,12 @@ _BREACH_REJECT_FOR_CRITICAL = 5 # 5 rejections in window → CRITICAL
 # ── DBView re-auth elevation ("sudo mode" for Tier 2 data) ───────────────────
 # Re-proving the user's own password unlocks Tier 2 visibility for 15 minutes —
 # mirrors `sudo` on Linux rather than issuing a new login token.
-_DBVIEW_ELEVATIONS: dict[str, float] = {}   # user_id → expiry (monotonic seconds)
-_DBVIEW_ELEVATION_LOCK = asyncio.Lock()
+# Held in the shared store (user_id → wall-clock expiry), so an elevation
+# granted by one copy of the service holds on the next request to any other.
 _DBVIEW_ELEVATION_TTL_S = 15 * 60   # 15 minutes
 
-# DML preview cache (TTL 5 minutes)
-_DML_PREVIEWS: dict[str, dict] = {}
+# DML previews (TTL 5 minutes), shared the same way: preview on one copy,
+# execute on another.
 _DML_PREVIEW_TTL = 300.0
 
 # Regex to extract table name and WHERE clause from DELETE/UPDATE for before-image.
@@ -431,20 +430,9 @@ def _check_protected_write(sql: str) -> str | None:
 
 
 async def _check_execute_rate(user_id: str) -> bool:
-    """Return True if user is within rate limit, False if exceeded. Thread-safe under asyncio."""
-    if user_id not in _EXECUTE_RATE_LOCK:
-        _EXECUTE_RATE_LOCK[user_id] = asyncio.Lock()
-    async with _EXECUTE_RATE_LOCK[user_id]:
-        now = time.monotonic()
-        if user_id not in _EXECUTE_RATE:
-            _EXECUTE_RATE[user_id] = collections.deque()
-        dq = _EXECUTE_RATE[user_id]
-        while dq and now - dq[0] > _EXECUTE_RATE_WINDOW:
-            dq.popleft()
-        if len(dq) >= _EXECUTE_RATE_LIMIT:
-            return False
-        dq.append(now)
-        return True
+    """Return True if user is within rate limit, False if exceeded."""
+    from velaris_shared import shared_state
+    return await shared_state.allow("dbm-exec", user_id, _EXECUTE_RATE_LIMIT, _EXECUTE_RATE_WINDOW)
 
 
 def _wrap_select_with_limit(sql: str, limit: int) -> str:
@@ -514,19 +502,28 @@ def _require_write(user: AuthenticatedUser):
         raise coded(403, DBM_ROLE_403, "DB Manager write access requires superadmin role")
 
 
-def _has_active_elevation(user_id: str) -> bool:
-    expiry = _DBVIEW_ELEVATIONS.get(user_id)
-    return expiry is not None and time.monotonic() < expiry
+async def _elevation_expiry(user_id: str) -> float | None:
+    from velaris_shared import shared_state
+    raw = await shared_state.get("dbm-elevation", user_id)
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
 
 
-def _user_has_dbview(user: AuthenticatedUser) -> bool:
+async def _has_active_elevation(user_id: str) -> bool:
+    expiry = await _elevation_expiry(user_id)
+    return expiry is not None and time.time() < expiry
+
+
+async def _user_has_dbview(user: AuthenticatedUser) -> bool:
     """True only when the user holds db_manager.view_sensitive AND has an active
     re-auth elevation. Superadmins use the separate, broader `expose` flow
     (_require_write) — DBView exists to grant Tier 2 visibility to non-superadmin
     admins without handing them the keys to Tier 1 / DDL as well."""
     if not user.has_privilege("db_manager", "view_sensitive"):
         return False
-    return _has_active_elevation(user.user_id)
+    return await _has_active_elevation(user.user_id)
 
 
 async def _log_dbview_reveal(session: AsyncSession, user: AuthenticatedUser, where: str) -> None:
@@ -573,29 +570,17 @@ async def _fire_breach_event(
     from velaris_shared.db.security_events import log_security_event
 
     user_id = user.user_id
-    if user_id not in _BREACH_LOCK:
-        _BREACH_LOCK[user_id] = asyncio.Lock()
-
     effective_severity = severity
     triggered_critical = False
 
-    async with _BREACH_LOCK[user_id]:
-        now = time.monotonic()
-        if user_id not in _BREACH_EVENTS:
-            _BREACH_EVENTS[user_id] = collections.deque()
-        dq = _BREACH_EVENTS[user_id]
-        # Purge events outside the longest window
-        cutoff = now - max(_BREACH_HIGH_WINDOW_S, _BREACH_REJECT_WINDOW_S)
-        while dq and dq[0][0] < cutoff:
-            dq.popleft()
-        dq.append((now, severity))
+    from velaris_shared import shared_state
+    recent_1m = await shared_state.hits("dbm-breach-all", user_id, _BREACH_REJECT_WINDOW_S)
+    recent_high = await shared_state.hits("dbm-breach-high", user_id, _BREACH_HIGH_WINDOW_S,
+                                          record=(severity == "HIGH"))
 
-        recent_1m  = sum(1 for ts, _   in dq if now - ts < _BREACH_REJECT_WINDOW_S)
-        recent_high = sum(1 for ts, sev in dq if sev == "HIGH" and now - ts < _BREACH_HIGH_WINDOW_S)
-
-        if recent_1m >= _BREACH_REJECT_FOR_CRITICAL or recent_high >= _BREACH_HIGH_FOR_CRITICAL:
-            effective_severity = "CRITICAL"
-            triggered_critical = True
+    if recent_1m >= _BREACH_REJECT_FOR_CRITICAL or recent_high >= _BREACH_HIGH_FOR_CRITICAL:
+        effective_severity = "CRITICAL"
+        triggered_critical = True
 
     # Always log the security event
     await log_security_event(
@@ -688,6 +673,11 @@ async def _disable_account(
             await session.flush()
         except Exception:
             pass  # duplicate token_hash — already revoked
+        # Refused at once here; every other process reloads within seconds.
+        from velaris_shared import generations
+        from velaris_shared.auth.dependencies import note_revoked
+        await generations.bump(session, "revocation", reason="breach auto-disable")
+        note_revoked(token_hash)
 
     await _send_breach_email(session, user, reason)
     log.warning("Account auto-disabled for breach: user=%s reason=%s", user.user_id, reason)
@@ -925,9 +915,10 @@ async def dbview_reauth(
         log.warning("hxdbmanager: HxArbiter elevation PEP unavailable: %s",
                        _arb_exc)
 
-    expiry = time.monotonic() + _DBVIEW_ELEVATION_TTL_S
-    async with _DBVIEW_ELEVATION_LOCK:
-        _DBVIEW_ELEVATIONS[current_user.user_id] = expiry
+    from velaris_shared import shared_state
+    expiry = time.time() + _DBVIEW_ELEVATION_TTL_S
+    await shared_state.put("dbm-elevation", current_user.user_id, str(expiry),
+                           _DBVIEW_ELEVATION_TTL_S)
 
     from velaris_shared.db.security_events import log_security_event
     await log_security_event(
@@ -955,8 +946,8 @@ async def dbview_reauth_status(
     """Return whether the caller currently holds an active DBView elevation,
     and how many seconds remain before it expires."""
     has_privilege = current_user.has_privilege("db_manager", "view_sensitive")
-    expiry = _DBVIEW_ELEVATIONS.get(current_user.user_id)
-    remaining = max(0, int(expiry - time.monotonic())) if expiry else 0
+    expiry = await _elevation_expiry(current_user.user_id)
+    remaining = max(0, int(expiry - time.time())) if expiry else 0
     return {
         "has_dbview_privilege": has_privilege,
         "elevated": has_privilege and remaining > 0,
@@ -1030,7 +1021,7 @@ async def get_table_rows(
             "expose_mode":         True,
         }
 
-    dbview = _user_has_dbview(current_user)
+    dbview = await _user_has_dbview(current_user)
     masked_rows, had_sensitive, revealed_tier2 = _mask_rows(raw_rows, user_has_dbview=dbview)
     if revealed_tier2:
         await _log_dbview_reveal(session, current_user, f"table viewer — {table_name}")
@@ -1158,7 +1149,7 @@ async def execute_query(
     if status != "success":
         raise coded(400, DBM_QUERY_400, error_detail or "Query failed")
 
-    dbview = _user_has_dbview(current_user)
+    dbview = await _user_has_dbview(current_user)
     masked_rows, had_sensitive, revealed_tier2 = _mask_rows(rows, user_has_dbview=dbview)
     if revealed_tier2:
         await _log_dbview_reveal(session, current_user, "/execute query result")
@@ -1459,36 +1450,151 @@ async def get_slow_queries(
     return await get_introspector(session).slow_queries(session, limit)
 
 
+# What the advisor sends and keeps (2026-10-23). It sent the 20 heaviest
+# statements whole — catalog queries, INSERTs, BEGIN — 10 KB the local model took
+# 180 s over, past the gateway's 120 s ("Gateway Time-out"), and what came back
+# was indexes on primary keys and insert-only tables.
+_ADVISOR_SKIP = re.compile(
+    r"\b(pg_catalog|information_schema|pg_stat\w*|pg_class|pg_namespace|pg_index\w*|pg_extension)\b", re.I)
+_ADVISOR_TABLE = re.compile(r'\b(?:FROM|JOIN|UPDATE)\s+"?([a-z_][a-z0-9_]*)"?', re.I)
+_ADVISOR_MAX_QUERIES = 10
+_ADVISOR_AI_SECONDS = 100            # under the gateway's 120 s
+# One run is noise, and an index on a small table is never used — PostgreSQL
+# reads a few thousand rows faster than it walks an index (a GIN index on a
+# 4-row table's SET column, seen 2026-10-23, would only have slowed its UPDATE).
+_ADVISOR_MIN_CALLS = 5
+_ADVISOR_MIN_ROWS = 10_000
+
+
+def _advisor_candidates(queries: list[dict], min_mean_ms: float) -> list[dict]:
+    """The statements an index could help, slow enough to matter, shortened to
+    what an index is chosen from (FROM / JOIN / WHERE / ORDER BY)."""
+    out = []
+    for q in queries:
+        sql = re.sub(r"\s+", " ", str(q.get("query") or "")).strip()
+        head = sql.split(" ", 1)[0].upper()
+        if head not in ("SELECT", "UPDATE", "DELETE", "WITH") or _ADVISOR_SKIP.search(sql):
+            continue
+        if not re.search(r"\b(WHERE|JOIN|ORDER BY)\b", sql, re.I):
+            continue
+        if float(q.get("mean_exec_time") or 0) < min_mean_ms or int(q.get("calls") or 0) < _ADVISOR_MIN_CALLS:
+            continue
+        sql = re.sub(r"^SELECT .*? FROM ", "SELECT … FROM ", sql, count=1, flags=re.I)
+        out.append({"q": sql[:400], "calls": int(q.get("calls") or 0),
+                    "mean_ms": round(float(q.get("mean_exec_time") or 0), 1),
+                    "total_ms": round(float(q.get("total_exec_time") or 0))})
+    out.sort(key=lambda r: r["total_ms"], reverse=True)
+    return out[:_ADVISOR_MAX_QUERIES]
+
+
+def _leading_cols(ddl: str) -> tuple[str, ...]:
+    m = re.search(r"\(([^)]*)\)", ddl or "")
+    if not m:
+        return ()
+    return tuple(c.strip().strip('"').split(" ")[0].lower() for c in m.group(1).split(",") if c.strip())
+
+
+def _searched(queries: list[dict], table: str, col: str) -> bool:
+    """`col` is searched, joined or sorted on (not only written) by a query on `table`."""
+    rx = re.compile(rf'(?<![\w"])(?:"?{re.escape(table)}"?\.)?"?{re.escape(col)}"?(?![\w"])', re.I)
+    for q in queries:
+        sql = q["q"]
+        if table not in {t.lower() for t in _ADVISOR_TABLE.findall(sql)}:
+            continue
+        m = re.search(r"\b(WHERE|JOIN|ORDER BY)\b", sql, re.I)
+        if m and rx.search(sql[m.start():]):
+            return True
+    return False
+
+
+def _advisor_keep(recs: Any, tables: set[str], existing: dict[str, list[str]],
+                  queries: list[dict] | None = None) -> tuple[list[dict], int]:
+    """Only an index on a table the queries use, as CREATE INDEX, that no index
+    on that table already starts with, led by a column the queries search on."""
+    kept, dropped = [], 0
+    for r in recs if isinstance(recs, list) else []:
+        if not isinstance(r, dict):
+            dropped += 1
+            continue
+        table = str(r.get("table") or "").strip().strip('"').lower()
+        ddl = str(r.get("ddl") or r.get("ddl_fix") or "").strip()
+        cols = _leading_cols(ddl)
+        if (table not in tables or not re.match(r"^CREATE\s+(UNIQUE\s+)?INDEX\b", ddl, re.I) or not cols
+                or any(_leading_cols(d)[:len(cols)] == cols for d in existing.get(table, []))
+                or (queries is not None and not _searched(queries, table, cols[0]))):
+            dropped += 1
+            continue
+        col = r.get("column") or r.get("columns") or ", ".join(cols)
+        kept.append({"table": table, "column": ", ".join(col) if isinstance(col, list) else str(col),
+                     "index_type": str(r.get("index_type") or "btree"), "ddl": ddl,
+                     "reason": str(r.get("reason") or "")[:500]})
+    return kept, dropped
+
+
 @router.get("/index-advisor")
 async def get_index_advice(
+    min_mean_ms: float = Query(5.0, ge=0, le=60000),
     current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """AI index recommendations based on pg_stat_statements slow queries."""
+    """AI index recommendations from the slow statements in pg_stat_statements.
+
+    No statement averaging `min_mean_ms` → said so at once, no AI call: an index
+    for a sub-millisecond query costs every write and gains nothing."""
     _require_admin(current_user)
+
+    insp = get_introspector(session)
+    stats = await insp.slow_queries(session, 200)
+    if not stats.get("available"):
+        raise coded(503, DBM_PGSTAT_503, stats.get("message")
+                     or "Slow-query statistics are not available on this backend.")
+    slow = _advisor_candidates(stats["queries"], min_mean_ms)
+    if not slow:
+        return {"recommendations": [], "analysed": 0,
+                "note": f"No query that an index could help averages {min_mean_ms:g} ms or more — "
+                        "nothing worth an index yet."}
 
     from velaris_shared.llm.factory import get_llm_backend, check_ai_available
     if not await check_ai_available():
         raise coded(503, DBM_AI_503, "HxNexus AI is not available")
 
-    insp = get_introspector(session)
-    stats = await insp.slow_queries(session, 20)
-    if not stats.get("available"):
-        raise coded(503, DBM_PGSTAT_503, stats.get("message")
-                     or "Slow-query statistics are not available on this backend.")
-    slow = stats["queries"]
+    tables = {t.lower() for r in slow for t in _ADVISOR_TABLE.findall(r["q"])}
+    existing: dict[str, list[str]] = {}
+    if insp.name == "postgresql" and tables:
+        sizes = dict((await session.execute(text(
+            "SELECT relname, reltuples FROM pg_class WHERE relkind = 'r' "
+            "AND relnamespace = 'public'::regnamespace AND relname = ANY(:t)"),
+            {"t": sorted(tables)})).all())
+        tables = {t for t in tables if float(sizes.get(t) or 0) >= _ADVISOR_MIN_ROWS}
+        slow = [r for r in slow if tables & {t.lower() for t in _ADVISOR_TABLE.findall(r["q"])}]
+        if not slow:
+            return {"recommendations": [], "analysed": 0,
+                    "note": f"The slow queries read only small tables (under {_ADVISOR_MIN_ROWS:,} rows) — "
+                            "an index there would not be used. Nothing worth an index yet."}
+        rows = (await session.execute(text(
+            "SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'public' "
+            "AND tablename = ANY(:t)"), {"t": sorted(tables)})).all()
+        for t, d in rows:
+            existing.setdefault(t, []).append(d)
 
+    import asyncio as _asyncio
     import json as _json
     _dialect_name = {"postgresql": "PostgreSQL", "mysql": "MySQL", "mariadb": "MariaDB"}[insp.name]
     system = (
-        f"You are a {_dialect_name} indexing expert. Given the top 20 slowest queries, "
-        "recommend indexes that would have the greatest impact. "
-        "Return JSON: {recommendations: [{table, column, index_type, ddl, reason, affected_queries}]}"
+        f"You are a {_dialect_name} indexing expert. For these slow queries recommend at most 5 "
+        "indexes that would help most; skip any you are not sure of. Never recommend an index "
+        "that already exists (listed under existing_indexes) or one on a primary key. "
+        'Reply with JSON only: {"recommendations": [{"table": str, "columns": [str], '
+        '"index_type": str, "ddl": "CREATE INDEX ...", "reason": str}]}'
     )
-    import re as _re
+    prompt = _json.dumps({"queries": slow, "existing_indexes": existing}, default=str)
     llm = get_llm_backend()
     try:
-        raw = await llm.complete(_json.dumps(slow, default=str), system=system, temperature=0.2)
+        raw = await _asyncio.wait_for(llm.complete(prompt, system=system, temperature=0.2),
+                                      timeout=_ADVISOR_AI_SECONDS)
+    except _asyncio.TimeoutError:
+        raise coded(503, DBM_AI_503, f"HxNexus took longer than {_ADVISOR_AI_SECONDS} s — "
+                                     "try again, or use a faster model for the AI backend.")
     except Exception as exc:
         log.warning("HxNexus index advisor call failed: %s", exc)
         raise coded(503, DBM_AI_503, "HxNexus did not respond. Check that your AI backend is running.")
@@ -1496,14 +1602,22 @@ async def get_index_advice(
     if not raw or not raw.strip():
         raise coded(502, DBM_AI_502, "HxNexus returned an empty response.")
 
-    cleaned = _re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=_re.IGNORECASE)
-    cleaned = _re.sub(r'\s*```$', '', cleaned).strip()
-
+    cleaned = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*```$', '', cleaned).strip()
     try:
-        return _json.loads(cleaned)
+        parsed = _json.loads(cleaned)
     except _json.JSONDecodeError:
         log.warning("Index advisor: could not parse JSON: %s", cleaned[:200])
         raise coded(502, DBM_AI_502, f"HxNexus returned a response that could not be parsed. Raw: {cleaned[:200]}")
+
+    kept, dropped = _advisor_keep(parsed.get("recommendations") if isinstance(parsed, dict) else None,
+                                  tables, existing, slow)
+    out: dict[str, Any] = {"recommendations": kept, "analysed": len(slow), "dropped": dropped}
+    if not kept:
+        out["note"] = ("No index recommended" + (f" ({dropped} suggestion(s) discarded: already covered by an "
+                       "existing index, not on a column the queries search, or not a valid CREATE INDEX)"
+                       if dropped else "") + ".")
+    return out
 
 
 # ── DML Preview + Confirm (rollback-safe DML) ─────────────────────────────────
@@ -1570,22 +1684,18 @@ async def dml_preview(
     except Exception as exc:
         raise coded(400, DBM_QUERY_400, f"Preview failed: {exc}")
 
-    # Purge expired previews
+    from velaris_shared import shared_state
     now = time.time()
-    expired = [pid for pid, p in _DML_PREVIEWS.items() if p["expires_at"] < now]
-    for pid in expired:
-        _DML_PREVIEWS.pop(pid, None)
-
     preview_id = str(uuid.uuid4())
-    _DML_PREVIEWS[preview_id] = {
+    await shared_state.put("dbm-preview", preview_id, json.dumps({
         "sql":        sql,
         "kind":       kind,
         "row_count":  row_count,
         "user_id":    current_user.user_id,
         "expires_at": now + _DML_PREVIEW_TTL,
-    }
+    }), _DML_PREVIEW_TTL)
 
-    dbview = _user_has_dbview(current_user)
+    dbview = await _user_has_dbview(current_user)
     masked_preview, had_sensitive, revealed_tier2 = _mask_rows(preview_rows[:50], user_has_dbview=dbview)
     if revealed_tier2:
         await _log_dbview_reveal(session, current_user, "DML preview")
@@ -1616,13 +1726,15 @@ async def dml_confirm(
     """
     _require_write(current_user)
 
-    preview = _DML_PREVIEWS.get(preview_id)
+    from velaris_shared import shared_state
+    _raw_preview = await shared_state.get("dbm-preview", preview_id)
+    preview = json.loads(_raw_preview) if _raw_preview else None
     if not preview:
         raise coded(404, DBM_PREVIEW_404, "Preview not found or expired")
     if preview["user_id"] != current_user.user_id:
         raise coded(403, DBM_PREVIEW_403, "Preview belongs to a different user")
     if time.time() > preview["expires_at"]:
-        _DML_PREVIEWS.pop(preview_id, None)
+        await shared_state.delete("dbm-preview", preview_id)
         raise coded(410, DBM_PREVIEW_410, "Preview has expired (5-minute limit). Re-run /dml/preview.")
 
     sql  = preview["sql"]
@@ -1674,12 +1786,12 @@ async def dml_confirm(
     await _log_query(session, _tid, current_user.user_id, sql, status,
                      duration_ms, rows_affected, error_detail)
 
-    _DML_PREVIEWS.pop(preview_id, None)
+    await shared_state.delete("dbm-preview", preview_id)
 
     if status != "success":
         raise coded(400, DBM_QUERY_400, error_detail or "DML execution failed")
 
-    dbview = _user_has_dbview(current_user)
+    dbview = await _user_has_dbview(current_user)
     masked_rows, had_sensitive, revealed_tier2 = _mask_rows(result_rows, user_has_dbview=dbview)
     if revealed_tier2:
         await _log_dbview_reveal(session, current_user, "DML confirm result")

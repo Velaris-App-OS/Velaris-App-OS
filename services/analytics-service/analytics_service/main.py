@@ -62,6 +62,14 @@ async def _tenant_scope(
     criteria to every SELECT. The dependency cache hands the routes these same
     session objects."""
     await scope_session_to_caller(request, ro, rw)
+    # The sign-in check above ran on `rw` (the request's registered session)
+    # and left its read transaction open: that analytics connection then sat
+    # "idle in transaction" for the whole request — 20-30 s under load (R6
+    # soak, 2026-11-02). End it now; nothing is pending (only reads ran), the
+    # tenant mark lives on the session and survives, and a route that does use
+    # `rw` simply takes a connection again.
+    if rw.in_transaction():
+        await rw.commit()
 
 SERVICE_NAME = "analytics-service"
 API_PREFIX = "/api/v1"

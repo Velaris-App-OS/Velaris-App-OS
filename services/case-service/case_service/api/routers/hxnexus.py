@@ -47,6 +47,7 @@ from case_service.hxnexus.service import (
     next_best_action, qa_over_documents, chat, index_document,
 )
 from case_service.storage import get_storage_backend
+from velaris_shared.db.read_routing import get_read_session
 
 log = logging.getLogger(__name__)
 
@@ -158,10 +159,13 @@ class IndexRequest(BaseModel):
 async def llmops_metrics(
     group_by: str = "model",
     hours: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("ai.metrics.read")),
 ):
     """Per-call AI metrics — cost, volume, latency, error rate (#32, §5.4).
+
+    The platform operator sees every call; a tenant's admin its own tenant's
+    (2026-11-04: it answered every tenant's admin with the whole install's).
 
     Grouped by `model`, `provider`, `purpose` or `route`; `hours` limits the
     window. Token counts are estimated from character length — no backend here
@@ -177,7 +181,15 @@ async def llmops_metrics(
         if hours and hours > 0 else None
     )
     try:
-        return await llmops.metrics(session, since=since, group_by=group_by)
+        from case_service.tenancy.identity import (
+            caller_tenant_tokens, is_platform_operator, same_tenant_as_default,
+        )
+        if await is_platform_operator(session, _user):
+            return await llmops.metrics(session, since=since, group_by=group_by)
+        tokens = await caller_tenant_tokens(session, _user) or []
+        return await llmops.metrics(
+            session, since=since, group_by=group_by, tenants=[str(t) for t in tokens],
+            include_untenanted=await same_tenant_as_default(session, _user.tenant_id or "default"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -277,6 +289,7 @@ async def index_case_documents(
 
     storage = get_storage_backend()
     total_chunks = 0
+    not_embedded = 0
     results = []
 
     for doc in docs:
@@ -292,15 +305,22 @@ async def index_case_documents(
             data = await storage.get(ver.storage_key)
         except Exception:
             continue
+        report: dict = {}
         n = await index_document(
             session, doc.id, case_id, data,
-            doc.content_type, getattr(case, "tenant_id", None),
+            doc.content_type, getattr(case, "tenant_id", None), report=report,
         )
         total_chunks += n
+        not_embedded += report.get("not_embedded", 0)
         results.append({"document_id": str(doc.id), "filename": doc.filename, "chunks": n})
 
-    return {"case_id": str(case_id), "documents_indexed": len(results),
-            "total_chunks": total_chunks, "details": results}
+    from case_service.hxnexus.service import not_embedded_note
+    out = {"case_id": str(case_id), "documents_indexed": len(results),
+           "total_chunks": total_chunks, "details": results}
+    if note := not_embedded_note({"not_embedded": not_embedded,
+                                  "embedded": total_chunks - not_embedded}):
+        out["warning"] = note
+    return out
 
 
 @router.get("/cases/{case_id}/documents/index-jobs")
@@ -606,11 +626,17 @@ async def upload_and_index(
                 "note": ("Queued. Indexed by a `document_index` schedule; "
                          "without one, nothing drains the queue.")}
 
+    report: dict = {}
     n = await index_document(
-        session, doc_id, cid, data, content_type, tenant_id,
+        session, doc_id, cid, data, content_type, tenant_id, report=report,
     )
-    return {"document_id": str(doc_id), "filename": filename,
-            "content_type": content_type, "chunks_indexed": n}
+    from case_service.hxnexus.service import not_embedded_note
+    out = {"document_id": str(doc_id), "filename": filename,
+           "content_type": content_type, "chunks_indexed": n,
+           "chunks_embedded": report.get("embedded", 0)}
+    if note := not_embedded_note(report):
+        out["warning"] = note
+    return out
 
 
 # ─── Document Q&A ────────────────────────────────────────────────────
@@ -972,7 +998,7 @@ async def translate_concept(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Translate a BPM tool concept to its Helix equivalent."""
+    """Translate a BPM tool concept to its Velaris equivalent."""
     return await translate(body.tool, body.concept, session)
 
 
@@ -982,7 +1008,7 @@ async def analyze_fragment(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Analyse a raw BPM config fragment and map it to Helix constructs."""
+    """Analyse a raw BPM config fragment and map it to Velaris constructs."""
     return await analyze(body.tool, body.text, session)
 
 
@@ -992,7 +1018,7 @@ async def compare_approaches(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Compare how a BPM tool does something vs how Helix does it."""
+    """Compare how a BPM tool does something vs how Velaris does it."""
     return await compare(body.tool, body.question, session)
 
 

@@ -1,0 +1,122 @@
+{{- if include "helix.poolerOn" . }}
+{{- if not .Values.postgresql.enabled }}
+{{- fail "pooler.enabled needs postgresql.enabled: the bundled pooler fronts the bundled PostgreSQL. An external database brings its own pooler." }}
+{{- end }}
+{{/*
+R5d 6a — PgBouncer in front of the bundled PostgreSQL (transaction pooling).
+Same start script as the compose service `velaris-pooler`: the config is
+written at start into an emptyDir, so a read-only root filesystem works and no
+credential file is baked into the image or the chart.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helix.poolerName" . }}
+  labels: { app: pooler }
+spec:
+  replicas: {{ .Values.pooler.replicaCount }}
+  selector: { matchLabels: { app: pooler } }
+  template:
+    metadata: { labels: { app: pooler } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "helix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: pgbouncer
+          image: "{{ .Values.pooler.image.repository }}:{{ .Values.pooler.image.tag }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${DB_PASSWORD:-}" ]; then
+                echo "pooler: database password is empty - refusing to start." >&2; exit 1
+              fi
+              umask 077
+              # The server's SCRAM verifier when the role may read it; md5 between
+              # the workloads and the pooler otherwise (see docker-compose.yml).
+              # <db>_commerce / <db>_portal / <db>_user: commerce-, portal- and
+              # user-service's own server connections on the same database and
+              # role (R5e 7, 8, 10).
+              secret="$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -tAXc "SELECT rolpassword FROM pg_authid WHERE rolname = current_user" 2>/dev/null || true)"
+              case "$secret" in
+                SCRAM-SHA-256\$*) entry="$secret"; auth=scram-sha-256 ;;
+                *) entry="$DB_PASSWORD"; auth=md5
+                   echo "pooler: SCRAM verifier not readable - using md5 between the platform and the pooler." >&2 ;;
+              esac
+              printf '"%s" "%s"\n' "$DB_USER" "$(printf '%s' "$entry" | sed 's/"/""/g')" > /work/userlist.txt
+              cat > /work/pgbouncer.ini <<INI
+              [databases]
+              $DB_NAME = host=$DB_HOST port=5432 dbname=$DB_NAME
+              ${DB_NAME}_commerce = host=$DB_HOST port=5432 dbname=$DB_NAME pool_size=$COMMERCE_POOL_SIZE
+              ${DB_NAME}_portal = host=$DB_HOST port=5432 dbname=$DB_NAME pool_size=$PORTAL_POOL_SIZE
+              ${DB_NAME}_user = host=$DB_HOST port=5432 dbname=$DB_NAME pool_size=$USER_POOL_SIZE
+              [pgbouncer]
+              listen_addr = 0.0.0.0
+              listen_port = 6432
+              unix_socket_dir =
+              auth_type = $auth
+              auth_file = /work/userlist.txt
+              pool_mode = transaction
+              max_prepared_statements = 200
+              default_pool_size = $POOL_SIZE
+              max_client_conn = $MAX_CLIENT_CONN
+              ignore_startup_parameters = extra_float_digits
+              INI
+              exec /usr/bin/pgbouncer /work/pgbouncer.ini
+          env:
+            - name: DB_HOST
+              value: "{{ .Release.Name }}-postgresql"
+            - name: DB_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "helix.dbSecretName" . }}
+                  key: {{ .Values.databaseSecret.poolerPasswordKey | default "pooler-db-password" }}
+            - name: POOL_SIZE
+              value: {{ .Values.pooler.poolSize | quote }}
+            - name: MAX_CLIENT_CONN
+              value: {{ .Values.pooler.maxClientConn | quote }}
+            - name: COMMERCE_POOL_SIZE
+              value: {{ .Values.pooler.commercePoolSize | default 10 | quote }}
+            - name: PORTAL_POOL_SIZE
+              value: {{ .Values.pooler.portalPoolSize | default 10 | quote }}
+            - name: USER_POOL_SIZE
+              value: {{ .Values.pooler.userPoolSize | default 10 | quote }}
+          ports:
+            - containerPort: 6432
+          securityContext:
+            {{- include "helix.containerSecurityContext" . | nindent 12 }}
+            # The image names its user (`pgbouncer`) rather than a number, and
+            # runAsNonRoot cannot verify a name: without these the pod is
+            # refused with CreateContainerConfigError (found on kind, 2026-10-18).
+            runAsUser: {{ .Values.pooler.runAsUser | default 998 }}
+            runAsGroup: {{ .Values.pooler.runAsGroup | default 996 }}
+          volumeMounts:
+            - { name: work, mountPath: /work }
+          readinessProbe:
+            tcpSocket: { port: 6432 }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 6432 }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.pooler.resources | nindent 12 }}
+      volumes:
+        - name: work
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "helix.poolerName" . }}
+  labels: { app: pooler }
+spec:
+  selector: { app: pooler }
+  ports:
+    - port: 6432
+      targetPort: 6432
+{{- end }}

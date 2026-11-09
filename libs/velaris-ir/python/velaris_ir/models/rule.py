@@ -1,4 +1,4 @@
-"""HELIX IR: Rule definitions.
+"""Velaris IR: Rule definitions.
 
 Rules are the decision logic layer.  They evaluate conditions, compute
 values, route work, and enforce policies.  Executed by the rules-service

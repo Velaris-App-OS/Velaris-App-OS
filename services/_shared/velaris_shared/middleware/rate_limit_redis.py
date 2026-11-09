@@ -60,18 +60,27 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
         self.burst = burst
         self.exclude = set(exclude_paths or ["/health", "/ready", "/metrics"])
         self._script_sha: Optional[str] = None
+        # Used whenever the cache cannot answer, so a cache outage means a
+        # per-process limit, never no limit.
+        from velaris_shared.middleware.rate_limit import RateLimitMiddleware
+        self._fallback = RateLimitMiddleware(
+            app, requests_per_minute=requests_per_minute, burst=burst,
+            exclude_paths=list(self.exclude),
+        )
 
     async def _get_redis(self):
         from velaris_shared.redis_client import get_redis
         return await get_redis()
 
-    async def _consume(self, redis, ip: str) -> tuple[bool, int, int]:
+    async def _consume(self, redis, ip: str) -> Optional[tuple[bool, int, int]]:
+        """(allowed, remaining, retry_ms), or None when the cache could not
+        answer — the caller then uses the in-process limiter."""
         if self._script_sha is None:
             try:
                 self._script_sha = await redis.script_load(_LUA)
             except Exception as e:
                 log.debug("script_load failed: %s", e)
-                return True, self.burst, 0
+                return None
         now_ms = int(time.time() * 1000)
         try:
             res = await redis.evalsha(
@@ -82,26 +91,36 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
             allowed, remaining, retry_ms = res
             return bool(int(allowed)), int(remaining), int(retry_ms)
         except Exception as e:
+            # Most often NOSCRIPT after the cache restarted and lost its script
+            # cache. Forget the sha so the next request loads it again — keeping
+            # it made every later request fail here, i.e. no limit, for good.
             log.debug("rate limit eval failed: %s", e)
-            return True, self.burst, 0  # fail-open
+            self._script_sha = None
+            return None
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path in self.exclude:
             return await call_next(request)
+        # A sibling service's internal call (R5e step 7) — proven by its secret,
+        # never a user's request — is not subject to the per-address limit.
+        from velaris_shared.internal.auth import is_internal_caller
+        if is_internal_caller(request):
+            return await call_next(request)
 
         redis = await self._get_redis()
         if redis is None:
-            # Redis unavailable — fail-open (allow request)
-            return await call_next(request)
+            # Cache unreachable: fall back to the in-process limiter rather than
+            # no limit at all (this used to let every request through).
+            return await self._fallback.dispatch(request, call_next)
 
-        ip = "unknown"
-        if request.client:
-            ip = request.client.host
-        fwd = request.headers.get("X-Forwarded-For")
-        if fwd:
-            ip = fwd.split(",")[0].strip()
+        # uvicorn's resolved client address — never the raw X-Forwarded-For,
+        # whose left-most entry the client writes (see rate_limit.py).
+        ip = request.client.host if request.client else "unknown"
 
-        allowed, remaining, retry_ms = await self._consume(redis, ip)
+        result = await self._consume(redis, ip)
+        if result is None:
+            return await self._fallback.dispatch(request, call_next)
+        allowed, remaining, retry_ms = result
         if not allowed:
             retry_after = max(1, retry_ms // 1000)
             return JSONResponse(

@@ -388,3 +388,45 @@ def _isolate_settings():
     yield
     s.__dict__.clear()
     s.__dict__.update(saved)
+
+
+# ── The account check (velaris_shared.auth.dependencies._account_gate) ────────
+# Since 2026-10-23 a token is refused when its account row is missing, renamed
+# or inactive. The harness mints tokens for ids and names that have no row
+# (`_headers("alice", …)`), so the check is off here unless a test is marked
+# `account_gate` — those run it for real, against real rows.
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "account_gate: run the real account check (rows must exist)")
+
+
+@_pytest.fixture(autouse=True)
+def _account_gate_off(request):
+    # Set and restored by hand, NOT through `monkeypatch`: an autouse fixture
+    # that requests it moves its teardown after the database fixture's, so a
+    # test that patches `time.monotonic` left it patched while the async DB
+    # teardown ran — a leaked connection per test, every later setup slower.
+    from velaris_shared.auth import dependencies as _deps
+    real = _deps._account_gate
+    if request.node.get_closest_marker("account_gate") is None:
+        async def _off(user, session):
+            return None
+        _deps._account_gate = _off
+    yield
+    _deps._account_gate = real
+
+
+# The deletion ledger writes files (velaris_shared.identity.ledger): never into
+# this checkout's .deletions/ from a test.
+@_pytest.fixture(autouse=True)
+def _deletion_ledger_in_tmp(tmp_path):
+    # By hand, not `monkeypatch` — see _account_gate_off.
+    from velaris_shared.config import get_settings
+    from velaris_shared.identity import ledger as _ledger
+    s = get_settings()
+    real = s.deletion_ledger_dir
+    s.deletion_ledger_dir = str(tmp_path / "deletions")
+    _ledger.reset_cache_for_tests()
+    yield
+    s.deletion_ledger_dir = real
+    _ledger.reset_cache_for_tests()

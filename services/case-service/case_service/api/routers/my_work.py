@@ -55,34 +55,38 @@ async def self_assign(
     from sqlalchemy import select
     from velaris_shared.db.models import CaseAssignmentModel, CaseInstanceModel
 
-    # Resolve a real case to attach to (FK constraint — must exist)
+    # Resolve a real case to attach to (FK constraint — must exist). Only a
+    # case the caller can see (2026-10-28): "any case" used to mean any
+    # tenant's, and the response handed its id back.
+    from velaris_shared.tenancy.identity import case_visible_to, is_superadmin
+    from fastapi import HTTPException
+
+    async def _visible(row) -> bool:
+        return await case_visible_to(session, row.tenant_id, user.tenant_id,
+                                     is_superadmin_caller=is_superadmin(user))
+
     resolved_case_id: uuid.UUID | None = None
     if case_id:
         try:
-            resolved_case_id = uuid.UUID(case_id)
+            row = await session.get(CaseInstanceModel, uuid.UUID(case_id))
         except ValueError:
-            pass
+            row = None
+        if row is None or not await _visible(row):
+            raise HTTPException(status_code=404, detail="Case not found")
+        resolved_case_id = row.id
+    else:
+        for statuses in (["open", "new", "in_progress"], None):
+            q = select(CaseInstanceModel)
+            if statuses:
+                q = q.where(CaseInstanceModel.status.in_(statuses))
+            for row in (await session.execute(q.limit(200))).scalars():
+                if await _visible(row):
+                    resolved_case_id = row.id
+                    break
+            if resolved_case_id:
+                break
 
     if not resolved_case_id:
-        # Pick any existing case
-        result = await session.execute(
-            select(CaseInstanceModel)
-            .where(CaseInstanceModel.status.in_(["open", "new", "in_progress"]))
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-        if row:
-            resolved_case_id = row.id
-
-    if not resolved_case_id:
-        # No open cases — pick absolutely any case
-        result = await session.execute(select(CaseInstanceModel).limit(1))
-        row = result.scalar_one_or_none()
-        if row:
-            resolved_case_id = row.id
-
-    if not resolved_case_id:
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
             detail="No cases exist yet. Create a case first, then self-assign.",

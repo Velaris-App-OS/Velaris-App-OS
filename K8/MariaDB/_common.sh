@@ -90,7 +90,7 @@ require_cluster() {
 
 release_exists() { helm -n "$NAMESPACE" status "$RELEASE" >/dev/null 2>&1; }
 
-WORKLOADS=(case-service engine worker analytics-service hxgraph-service hxmigrate-service)
+WORKLOADS=(case-service engine worker analytics-service hxgraph-service hxmigrate-service commerce-service portal-service user-service jobs)
 deploy_name() { echo "${RELEASE}-helix-$1"; }
 db_pod()      { echo "${RELEASE}-${DB_ENGINE}-0"; }
 
@@ -130,17 +130,28 @@ remove_client_pod() {
 cleanup_client_pod() { db_is_external && remove_client_pod; return 0; }
 trap cleanup_client_pod EXIT
 
+# Run a client in a pod with the database password, never on a command line:
+# `kubectl exec -- env MYSQL_PWD=…` and `sh -c "MYSQL_PWD='…' …"` put it in the
+# process list on this machine and inside the pod (and the second broke on a
+# password with a quote in it). It goes in as the first line of stdin instead;
+# the pod's shell reads it into MYSQL_PWD and runs the client.
+_kx() {  # pod command args…
+  local pod="$1"; shift
+  printf '%s\n' "$(db_password)" | kubectl -n "$NAMESPACE" exec -i "$pod" -- \
+    sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
+}
+
 # sql_q <sql> -> one column, no headers
 sql_q() {
   if db_is_external; then
     ensure_client_pod || { err "could not start the database client pod"; return 1; }
-    kubectl -n "$NAMESPACE" exec "$CLIENT_POD" -- env MYSQL_PWD="$(db_password)" \
+    _kx "$CLIENT_POD" \
       mariadb -h "$(_dsn_part host)" -P "$(_dsn_part port)" -u "$(db_user)" \
       -N -B -e "$1" "$(db_name)" 2>/dev/null
     return
   fi
   db_bundled || die "no database reachable: neither a bundled pod nor VELARIS_K8S_EXTERNAL_URL"
-  kubectl -n "$NAMESPACE" exec "$(db_pod)" -- env MYSQL_PWD="$(db_password)" \
+  _kx "$(db_pod)" \
     "$DB_CLIENT" -u "$(db_user)" -N -B -e "$1" "$(db_name)" 2>/dev/null
 }
 
@@ -208,6 +219,12 @@ build_image_sets() {  # build_image_sets <registry> <tag>
     --set image.hxgraphService.tag="$tag"
     --set image.hxmigrateService.repository="$reg/hxmigrate-service"
     --set image.hxmigrateService.tag="$tag"
+    --set image.commerceService.repository="$reg/commerce-service"
+    --set image.commerceService.tag="$tag"
+    --set image.portalService.repository="$reg/portal-service"
+    --set image.portalService.tag="$tag"
+    --set image.userService.repository="$reg/user-service"
+    --set image.userService.tag="$tag"
   )
 }
 
@@ -231,7 +248,7 @@ run_migrations() {
   fi
   assert_velaris_database || return 1
 
-  kubectl -n "$NAMESPACE" exec "$target_pod" -- env MYSQL_PWD="$(db_password)" \
+  _kx "$target_pod" \
     mariadb $(db_is_external && echo "-h $(_dsn_part host) -P $(_dsn_part port)") \
     -u "$(db_user)" -e "CREATE TABLE IF NOT EXISTS schema_migrations (
       filename   VARCHAR(255) PRIMARY KEY,
@@ -252,7 +269,7 @@ run_migrations() {
     if [ "${VELARIS_K8S_ADOPT:-0}" = "1" ]; then
       warn "adopting an existing schema: recording all migrations as applied"
       for f in $(ls "$dir"/*.sql | sort -V); do
-        kubectl -n "$NAMESPACE" exec "$target_pod" -- env MYSQL_PWD="$(db_password)" \
+        _kx "$target_pod" \
           $DB_CLIENT $(db_is_external && echo "-h $(_dsn_part host) -P $(_dsn_part port)") -u "$(db_user)" -e \
           "INSERT IGNORE INTO schema_migrations(filename) VALUES('$(basename "$f")');" \
           "$(db_name)" >/dev/null 2>&1
@@ -279,10 +296,10 @@ run_migrations() {
     fi
     echo -n "    apply $name ... "
     HOSTFLAGS=""; db_is_external && HOSTFLAGS="-h $(_dsn_part host) -P $(_dsn_part port)"
-    if kubectl -n "$NAMESPACE" exec -i "$target_pod" -- sh -c \
-         "MYSQL_PWD='$(db_password)' mariadb $HOSTFLAGS -u '$(db_user)' '$(db_name)' < /tmp/velaris-mig/$name" \
+    if _kx "$target_pod" sh -c \
+         "exec $DB_CLIENT $HOSTFLAGS -u '$(db_user)' '$(db_name)' < /tmp/velaris-mig/$name" \
          >/tmp/velaris-mig-err.log 2>&1; then
-      kubectl -n "$NAMESPACE" exec "$target_pod" -- env MYSQL_PWD="$(db_password)" \
+      _kx "$target_pod" \
         $DB_CLIENT $(db_is_external && echo "-h $(_dsn_part host) -P $(_dsn_part port)") -u "$(db_user)" -e \
         "INSERT IGNORE INTO schema_migrations(filename) VALUES('$name');" "$(db_name)" >/dev/null 2>&1
       echo "${GREEN}✓${NC}"; applied=$((applied + 1))

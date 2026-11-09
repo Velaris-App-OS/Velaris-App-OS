@@ -159,6 +159,12 @@ async def _build_public_payload(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+from case_service.core.tenant_path_guard import platform_operator_only as _platform_operator_only
+
+# authz-parity, authz-role-collisions and internal describe the whole install
+# (2026-11-04: they answered every tenant's admin). Platform operator only.
+
+
 @router.get("/public")
 async def public_status(
     request: Request,
@@ -170,7 +176,7 @@ async def public_status(
     only fixed component names, a coarse status, and uptime percentages.
     """
     ip = (request.client.host if request.client else "unknown") or "unknown"
-    allowed, _retry = _status_rl.allow(ip)
+    allowed, _retry = await _status_rl.allow_async(ip)
     if not allowed:
         raise HTTPException(429, "Too many requests — please try again shortly")
 
@@ -186,6 +192,7 @@ async def public_status(
 @router.get("/authz-parity")
 async def authz_parity(
     _user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
+    __op: None = Depends(_platform_operator_only),
 ):
     """Privilege-authorization shadow counters (Phase 2).
 
@@ -222,6 +229,7 @@ async def authz_parity(
 async def authz_role_collisions(
     session: AsyncSession = Depends(get_replica_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
+    __op: None = Depends(_platform_operator_only),
 ):
     """Access roles whose NAME used to confer a platform role (Phase 4 step 1).
 
@@ -254,6 +262,7 @@ async def internal_status(
     days: int = 7,
     session: AsyncSession = Depends(get_replica_session),
     _user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
+    __op: None = Depends(_platform_operator_only),
 ):
     """Full status including diagnostic detail — admin only.
 
@@ -284,3 +293,17 @@ async def internal_status(
             "checked_at": r.checked_at.isoformat() if r.checked_at else None,
         } for r in recent],
     }
+
+
+@router.get("/readiness")
+async def readiness(
+    session: AsyncSession = Depends(get_replica_session),
+    user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
+):
+    """Every optional dependency — working, degraded or off, with a plain
+    reason (R4). Reasons name settings, never hosts or keys. The platform
+    operator sees every line; another tenant's administrator only what their
+    users depend on, with their own mailbox and connectors. See
+    `case_service/readiness.py`."""
+    from case_service import readiness as r
+    return await r.check_all(session, user)

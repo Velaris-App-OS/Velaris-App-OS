@@ -1,5 +1,6 @@
 """Document management API router."""
 from __future__ import annotations
+import logging
 import uuid
 from typing import Optional
 
@@ -23,12 +24,15 @@ from velaris_shared.core.error_codes import (
     DOC_PREVIEW_415,
     DOC_STORAGE_503,
     DOC_TENANT_403,
+    DOC_UNREADABLE_409,
     coded,
 )
 from velaris_shared.db.models import CaseInstanceModel
 from velaris_shared.db.session import get_session
 from case_service.documents import DocumentService, generate_preview
 from case_service.storage.backend import StorageError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -92,7 +96,11 @@ async def _optional_user(request: Request) -> AuthenticatedUser | None:
             request,
             HTTPAuthorizationCredentials(scheme="Bearer", credentials=header[7:]),
         )
-    except Exception:
+    except Exception as exc:
+        from velaris_shared.auth.dependencies import is_auth_check_busy
+
+        if is_auth_check_busy(exc):
+            raise              # "try again", not "anonymous" (Studio retries it)
         return None            # an invalid token is not an identity
 
 
@@ -266,10 +274,24 @@ async def download_document(
         data, filename, content_type = await service.download(session, document_id, version)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except StorageError as e:
+        raise _unreadable(document_id, e)
     return Response(
         content=data, media_type=content_type,
         headers={"content-disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _unreadable(document_id: uuid.UUID, exc: Exception):
+    """A stored document this install cannot decrypt: its key changed or is gone.
+
+    A bare 500 said nothing (R3 2026-11-01, after a storage key was removed). The
+    detail names the cause for the operator; the bytes are not served.
+    """
+    logger.error("document %s unreadable: %s", document_id, exc)
+    return coded(409, DOC_UNREADABLE_409,
+                 "This document cannot be read on this install: its encryption key is not the one it "
+                 "was stored with (VELARIS_CASE_STORAGE_MASTER_KEY changed or was removed).")
 
 
 @router.get("/{document_id}/preview")
@@ -283,6 +305,8 @@ async def preview_document(
         data, _, content_type = await service.download(session, document_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except StorageError as e:
+        raise _unreadable(document_id, e)
     png = generate_preview(data, content_type)
     if png is None:
         raise coded(415, DOC_PREVIEW_415, "Preview not available for this content type")

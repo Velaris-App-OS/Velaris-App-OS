@@ -1,4 +1,4 @@
-"""HELIX Case Service — FastAPI application.
+"""Velaris Case Service — FastAPI application.
 
 Copyright (c) 2024-2025 Velaris Contributors
 SPDX-License-Identifier: BSL-1.1
@@ -33,7 +33,6 @@ from case_service.api.observability import router as observability_router
 from case_service.api.routers.form_submissions import router as form_submissions_router
 from case_service.api.routers.webhooks import router as webhooks_router
 from case_service.api.routers.admin import router as admin_router
-from case_service.api.routers.auth import router as auth_router
 from case_service.api.routers.nlp import router as nlp_router
 from case_service.api.routers.tenants import router as tenants_router
 from case_service.api.routers.codegen import router as codegen_router
@@ -42,12 +41,10 @@ from case_service.api.routers.sitemap import router as sitemap_router
 from case_service.api.routers.realtime import router as realtime_router
 from case_service.api.routers.documents import router as documents_router
 from case_service.api.routers.escalation import router as escalation_router
-from case_service.api.routers.user_directory import router as user_directory_router
 from case_service.api.routers.compliance import router as compliance_router
 from case_service.api.routers.email import router as email_router
 from case_service.api.routers.push import router as push_router
 from case_service.api.routers.hxnexus import router as hxnexus_router
-from case_service.api.routers.portal import public_router as portal_router, admin_router as portal_admin_router
 from case_service.api.routers.access_groups import router as access_groups_router
 from case_service.api.routers.hxstream import router as hxstream_router
 from case_service.api.routers.status import router as status_router
@@ -59,10 +56,6 @@ from case_service.api.routers.audit_stream import router as audit_stream_router
 from case_service.api.routers.hxglobal import router as hxglobal_router
 from case_service.api.routers.hxshield import router as hxshield_router
 from case_service.api.routers.hxfusion import router as hxfusion_router
-from case_service.api.routers.payments import router as payments_router
-from case_service.api.routers.checkout import router as checkout_router  # HxCheckout (marketplace)
-from case_service.api.routers.storefront import router as storefront_router  # HxStorefront (marketplace)
-from case_service.api.routers.storefront_public import router as storefront_public_router  # HxStorefront public
 from case_service.api.routers.kyc import identity_router, esign_router
 from case_service.api.routers.crm import crm_router, invoice_router
 from case_service.api.routers.comms import router as comms_router
@@ -74,7 +67,6 @@ from case_service.api.routers.agents import router as agents_router          # F
 from case_service.api.routers.agents import workforce_router as agents_workforce_router  # F-05
 from case_service.api.routers.capture import router as capture_router  # F-06 ambient capture
 from case_service.api.routers.ai_ledger import router as ai_ledger_router    # F-01 AI decision ledger
-from case_service.api.routers.model_market import router as model_market_router  # F-07 sovereign model marketplace
 from case_service.api.routers.healing import router as healing_router  # F-08 self-healing processes
 from case_service.api.routers.handoff import router as handoff_router  # F-09 agent handoff
 from case_service.api.routers.field import router as field_router  # F-10 field operations
@@ -91,19 +83,13 @@ from case_service.api.routers.branches import router as branches_router   # P60 
 from case_service.api.routers.intake   import router as intake_router     # Process-Case integration
 from case_service.api.routers.commits   import router as commits_router    # P61 Commit pattern
 from case_service.api.routers.hxlogs   import router as hxlogs_router     # P63 HxLogs
-from case_service.api.routers.auth_real import router as auth_real_router  # P64 Real Auth
-from case_service.api.routers.auth_saml import router as auth_saml_router  # Enterprise identity P1
-from case_service.api.routers.scim import router as scim_router  # Enterprise identity P2
-from case_service.api.routers.identity_admin import router as identity_admin_router  # P3
 from case_service.api.routers.channels import router as channels_router  # Omnichannel inbound
 from case_service.api.routers.bots import router as bots_router  # RPA bot runner
 from case_service.api.routers.scheduler import router as scheduler_router  # timed actions
 from case_service.api.routers.permissions import router as permissions_router
-from case_service.api.routers.marketplace import router as marketplace_router  # Marketplace
 from case_service.api.routers.broker import router as broker_router  # Marketplace Layer-2 data broker
 from case_service.api.routers.platform_updates import router as platform_updates_router  # PUO Phase 1
 from case_service.api.routers.case_variables import router as case_variables_router  # Case Variables P1
-from case_service.api.routers.portal_customers import public_router as portal_customers_public_router, admin_router as portal_customers_admin_router  # P65
 from case_service.api.routers.releases import router as releases_router, release_cron  # P66
 from case_service.api.routers.hxdbmanager import router as hxdbmanager_router          # P67
 from case_service.api.routers.hxdbmigrate import router as hxdbmigrate_router          # HxDBMigrate
@@ -113,7 +99,6 @@ from case_service.api.routers.sentinel import router as sentinel_router         
 from case_service.api.routers.meet import router as meet_router                        # HxMeet P1
 from case_service.api.routers.stt import router as stt_router                          # Voice input P1
 from case_service.api.routers.voicefill import router as voicefill_router              # Voice input P3
-from case_service.api.routers.portal_voice import router as portal_voice_router        # Voice input P3b
 from case_service.api.routers.messages import router as messages_router                # Portal v2 P4
 from case_service.api.routers.hxdraft import router as hxdraft_router                  # HxDraft
 from case_service.api.routers.hxevolve import router as hxevolve_router                # HxEvolve
@@ -339,100 +324,10 @@ async def lifespan(app: FastAPI):
         _vault_resync_task = _asyncio.create_task(_vault_resync_loop())
         logger.info("HxVault DEK cache resync loop started (every %ds)", _vault_resync_interval)
 
-    # ── Migration 042: add v2 ownership columns to artifact_branches ─────────
-    try:
-        from velaris_shared.db.session import get_engine
-        from sqlalchemy import text as _sql_text
-
-        _DDL_042 = [
-            "ALTER TABLE artifact_branches ADD COLUMN IF NOT EXISTS owner_id TEXT",
-            "ALTER TABLE artifact_branches ADD COLUMN IF NOT EXISTS assigned_reviewer_id TEXT",
-            "ALTER TABLE artifact_branches ADD COLUMN IF NOT EXISTS access_group_id UUID",
-        ]
-        _eng = get_engine()
-        async with _eng.begin() as _conn:
-            for _stmt in _DDL_042:
-                await _conn.execute(_sql_text(_stmt))
-        logger.info("Migration 042 applied (artifact_branches v2 columns)")
-    except Exception as _m042_err:
-        logger.warning("Migration 042 non-fatal: %s", _m042_err)
-    # ── End migration 042 ────────────────────────────────────────────────────
-
-    # ── Migration 043: create branch_audit_events table ─────────────────────────
-    try:
-        from velaris_shared.db.session import get_engine
-        from sqlalchemy import text as _sql_text
-
-        _DDL_043 = """
-        CREATE TABLE IF NOT EXISTS branch_audit_events (
-            id UUID PRIMARY KEY,
-            branch_id UUID NOT NULL,
-            event_type VARCHAR(60) NOT NULL,
-            actor_id TEXT,
-            actor_name TEXT,
-            metadata JSONB NOT NULL DEFAULT '{}',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-        _IDX_043 = [
-            "CREATE INDEX IF NOT EXISTS ix_bae_branch  ON branch_audit_events (branch_id)",
-            "CREATE INDEX IF NOT EXISTS ix_bae_created ON branch_audit_events (created_at)",
-        ]
-        _eng = get_engine()
-        async with _eng.begin() as _conn:
-            await _conn.execute(_sql_text(_DDL_043))
-            for _idx in _IDX_043:
-                await _conn.execute(_sql_text(_idx))
-        logger.info("Migration 043 applied (branch_audit_events table)")
-    except Exception as _m043_err:
-        logger.warning("Migration 043 non-fatal: %s", _m043_err)
-    # ── End migration 043 ────────────────────────────────────────────────────
-
-    # ── Migration 044: intake trigger fields on case_types + intake_events table ─
-    try:
-        from velaris_shared.db.session import get_engine
-        from sqlalchemy import text as _sql_text
-
-        _DDL_044_CT = [
-            "ALTER TABLE case_types ADD COLUMN IF NOT EXISTS intake_trigger VARCHAR(20) NOT NULL DEFAULT 'manual'",
-            "ALTER TABLE case_types ADD COLUMN IF NOT EXISTS trigger_connector_id UUID",
-            "ALTER TABLE case_types ADD COLUMN IF NOT EXISTS filter_conditions JSONB NOT NULL DEFAULT '{}'",
-            "ALTER TABLE case_types ADD COLUMN IF NOT EXISTS field_mapping JSONB NOT NULL DEFAULT '{}'",
-            "ALTER TABLE case_types ADD COLUMN IF NOT EXISTS process_definition_id UUID",
-        ]
-        _DDL_044_IE = """
-        CREATE TABLE IF NOT EXISTS intake_events (
-            id UUID PRIMARY KEY,
-            case_type_id UUID REFERENCES case_types(id) ON DELETE SET NULL,
-            connector_id UUID,
-            source_ip VARCHAR(50),
-            raw_payload JSONB NOT NULL DEFAULT '{}',
-            status VARCHAR(20) NOT NULL DEFAULT 'received',
-            filter_result JSONB NOT NULL DEFAULT '{}',
-            created_case_id UUID,
-            process_instance_id UUID,
-            error TEXT,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            processed_at TIMESTAMPTZ
-        )
-        """
-        _DDL_044_IDX = [
-            "CREATE INDEX IF NOT EXISTS ix_intake_case_type ON intake_events (case_type_id)",
-            "CREATE INDEX IF NOT EXISTS ix_intake_status    ON intake_events (status)",
-            "CREATE INDEX IF NOT EXISTS ix_intake_received  ON intake_events (received_at)",
-            "CREATE INDEX IF NOT EXISTS ix_intake_case      ON intake_events (created_case_id)",
-        ]
-        _eng = get_engine()
-        async with _eng.begin() as _conn:
-            for _stmt in _DDL_044_CT:
-                await _conn.execute(_sql_text(_stmt))
-            await _conn.execute(_sql_text(_DDL_044_IE))
-            for _idx in _DDL_044_IDX:
-                await _conn.execute(_sql_text(_idx))
-        logger.info("Migration 044 applied (intake trigger fields + intake_events)")
-    except Exception as _m044_err:
-        logger.warning("Migration 044 non-fatal: %s", _m044_err)
-    # ── End migration 044 ────────────────────────────────────────────────────
+    # The old start-up DDL ("Migration 042/043/044") now lives in
+    # migrations/postgresql/229. Never run DDL here: `ADD COLUMN IF NOT EXISTS`
+    # takes an exclusive lock before checking, and queued behind long queries it
+    # held every later read of the table (R6 soak S9, 2026-11-03).
 
     # Start Temporal worker (embedded, for development)
     temporal_worker = None
@@ -481,15 +376,20 @@ async def lifespan(app: FastAPI):
         logger.warning("Redis realtime bridge unavailable: %s", _e)
     # <<< P32 realtime Redis bridge
 
-    # >>> P25 email poll loop
-    email_loop = None
-    try:
-        from case_service.mail.worker import get_poll_loop
-        email_loop = get_poll_loop()
-        await email_loop.start()
-    except Exception as _e:
-        import logging; logging.getLogger(__name__).warning("Email poll loop unavailable: %s", _e)
-    # <<< P25 email poll loop
+    # >>> R5e step 9: the background jobs — case_service/jobs.py. Each singleton
+    # runs under a job lease, so however many processes start them (workers,
+    # replicas, the worker service) one runs each. VELARIS_CASE_RUN_JOBS=false
+    # leaves them to the worker service; unset = here, exactly as before.
+    _jobs = None
+    if get_settings().run_jobs:
+        try:
+            from case_service.jobs import start_jobs
+            _jobs = await start_jobs()
+        except Exception as _e:
+            logger.error("Background jobs unavailable: %s", _e)
+    else:
+        logger.info("Background jobs: off here (VELARIS_CASE_RUN_JOBS=false) — the worker service runs them")
+    # <<< R5e step 9
 
     # >>> Background schedulers
     # One try/except EACH, deliberately. These tasks are unrelated, and grouping
@@ -501,13 +401,6 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
 
     try:
-        from case_service.security.credential_monitor import credential_expiry_monitor
-        _asyncio.create_task(credential_expiry_monitor())
-        logger.info("Credential expiry monitor started")
-    except Exception as _e:
-        logger.warning("Credential expiry monitor unavailable: %s", _e)
-
-    try:
         _asyncio.create_task(release_cron())
         logger.info("Release/feature-flag cron scheduled")
     except Exception as _e:
@@ -515,39 +408,7 @@ async def lifespan(app: FastAPI):
         logger.error("Release cron unavailable — ALL feature flags will read as "
                      "disabled: %s", _e)
 
-    try:
-        from case_service.hxevolve.pipeline import hxevolve_cron
-        _asyncio.create_task(hxevolve_cron())
-        logger.info("HxEvolve cron scheduled")
-    except Exception as _e:
-        logger.warning("HxEvolve cron unavailable: %s", _e)
     # <<< Background schedulers
-
-    # >>> SAML IdP metadata refresh
-    # Own try/except, same reason as the rest. If it never starts, providers keep
-    # the certificates they already have and sign-in is unaffected — the sweep
-    # only ever *adds* a rollover certificate early, so its absence costs an
-    # outage at the next rollover, not now.
-    try:
-        from case_service.identity.saml_metadata import saml_metadata_cron
-        _asyncio.create_task(saml_metadata_cron())
-        logger.info("SAML metadata refresh scheduled")
-    except Exception as _e:
-        logger.warning("SAML metadata refresh unavailable, certificates will not "
-                       "auto-renew: %s", _e)
-    # <<< SAML IdP metadata refresh
-
-    # >>> HxSentinel periodic signal extraction (P1)
-    # Deliberately its own try/except rather than joining the block above: these
-    # tasks are unrelated, and a failed import in one must not silently cancel
-    # the scheduling of another.
-    try:
-        from case_service.sentinel.extraction import signal_extraction_cron
-        _asyncio.create_task(signal_extraction_cron())
-        logger.info("HxSentinel signal extraction sweep scheduled")
-    except Exception as _e:
-        logger.warning("HxSentinel signal extraction unavailable: %s", _e)
-    # <<< HxSentinel periodic signal extraction
 
     # >>> Phase 6: role → privilege store cache
     # Own try/except, same reason as above. If this never starts, the cache stays
@@ -575,6 +436,26 @@ async def lifespan(app: FastAPI):
         logger.warning("Authz generation poll unavailable: %s", _e)
     # <<< Phase C
 
+    # >>> R5e step 5: HxStream traces from the other services (and other copies
+    # of this one) reach the /hxstream/ws subscribers here. Cache on only.
+    try:
+        if get_settings().redis_enabled:
+            from velaris_shared.hxstream.emitter import relay_from_other_processes
+            _asyncio.create_task(relay_from_other_processes())
+            logger.info("HxStream cross-process relay started")
+    except Exception as _e:
+        logger.warning("HxStream cross-process relay unavailable: %s", _e)
+
+    # >>> R5e step 5: the same signal for every other shared cache (feature
+    # flags, revoked sessions, data keys, tenant lookups — velaris_shared/generations.py).
+    try:
+        from velaris_shared.generations import generations_cron
+        _asyncio.create_task(generations_cron())
+        logger.info("Platform generations poll scheduled")
+    except Exception as _e:
+        logger.warning("Platform generations poll unavailable: %s", _e)
+    # <<< R5e step 5
+
     # >>> HxShield detection (roadmap #25)
     # The engine's eight patterns had never run against real traffic: it had one
     # caller, the explicit /hxshield/score endpoint. Registering here wires it to
@@ -593,222 +474,6 @@ async def lifespan(app: FastAPI):
         logger.warning("HxShield detector unavailable: %s", _e)
     # <<< HxShield
 
-    # >>> Group I: daily RFC-3161 anchoring of the audit chain
-    try:
-        if get_settings().audit_anchor_enabled:
-            from case_service.compliance.audit_anchor import audit_anchor_loop
-            _asyncio.create_task(audit_anchor_loop())
-            logger.info("Audit anchor loop started (TSA: %s)", get_settings().audit_tsa_url)
-    except Exception as _e:
-        logger.warning("Audit anchor loop unavailable: %s", _e)
-    # <<< Group I audit anchoring
-
-    # >>> HxArbiter: seal the decision log so it is evidence, not just rows.
-    # Unconditional, and safe to be so: the sealer only reads decisions and
-    # writes chain rows. On an install where nothing has ever called the engine
-    # it seals nothing and costs one query a minute. A sealer that dies takes
-    # the evidence with it and not the platform — decisions keep being written
-    # and are sealed late when it comes back, because seal_once resumes from
-    # the chain tip rather than from now.
-    try:
-        from case_service.hxarbiter.chain import sealer_loop
-        _asyncio.create_task(sealer_loop())
-        logger.info("HxArbiter decision sealer started")
-    except Exception as _e:
-        logger.warning("HxArbiter decision sealer unavailable: %s", _e)
-    # <<< HxArbiter sealer
-
-    # >>> F-01: seal the AI decision ledger, for the same reasons and with the
-    # same guarantees. Separate loop rather than folded into the one above: the
-    # two chains cover different tables and a failure sealing one must not stop
-    # the other, since each is the evidence for a different claim.
-    try:
-        from case_service.ledger.chain import sealer_loop as _ledger_sealer
-        _asyncio.create_task(_ledger_sealer())
-        logger.info("AI ledger sealer started")
-    except Exception as _e:
-        logger.warning("AI ledger sealer unavailable: %s", _e)
-    # <<< AI ledger sealer
-
-    # >>> F-05: the nightly agent scorecard sweep.
-    # Its own switch, default off, and the task is created either way — the
-    # loop itself reports "OFF" and returns, so an operator reading the startup
-    # log sees the feature exists and how to enable it, rather than seeing
-    # nothing and concluding it was never built.
-    try:
-        from case_service.agents.workforce import scorecard_cron as _scorecard_cron
-        _asyncio.create_task(_scorecard_cron())
-    except Exception as _e:
-        logger.warning("Agent scorecard sweep unavailable: %s", _e)
-    # <<< F-05 scorecard sweep
-
-    # >>> F-06: the ambient capture sweep.
-    # Off by default and gated twice — this box's switch and each tenant's own.
-    # The loop reports "OFF" and returns rather than not existing, so the
-    # startup log says the feature is here and how to switch it on.
-    try:
-        from case_service.capture.service import auto_cron as _capture_cron
-        _asyncio.create_task(_capture_cron())
-    except Exception as _e:
-        logger.warning("Ambient capture sweep unavailable: %s", _e)
-    # <<< F-06 capture sweep
-
-    # >>> F-08: the self-healing watch sweep.
-    # Off by default and gated twice, exactly like F-06. This one decides
-    # whether an applied change is called HEALED or is rolled back, so a sweep
-    # that silently was not running would leave changes watched forever — the
-    # loop logs which state it is in.
-    try:
-        from case_service.healing.service import watch_cron as _healing_cron
-        _asyncio.create_task(_healing_cron())
-    except Exception as _e:
-        logger.warning("Self-healing watch sweep unavailable: %s", _e)
-    # <<< F-08 healing sweep
-
-    # >>> Oct 18a: the content rollout sweep (guard, ramp, shadow). It acts only
-    # on rollouts an operator gave a policy, so with none it finds nothing;
-    # VELARIS_ROLLOUT_SWEEP=off stops it outright.
-    try:
-        from case_service.rollouts.sweep import cron as _rollout_cron
-        _asyncio.create_task(_rollout_cron())
-    except Exception as _e:
-        logger.warning("Rollout sweep unavailable: %s", _e)
-    # <<< Oct 18a rollout sweep
-
-    # >>> RPA bot runner
-    # Default OFF: this loop starts containers on the host, so it is opt-in per
-    # deployment. Its own `start()` checks the flag and logs when disabled, so a
-    # deployment that has not enabled it says so rather than being silent.
-    _bot_runner = None
-    try:
-        from case_service.bots.runner import runner as _bot_runner
-        _bot_runner.start()
-    except Exception as _e:
-        logger.warning("Bot runner unavailable: %s", _e)
-    # <<< RPA bot runner
-
-    # >>> Scheduler (timed actions)
-    # ON by default, unlike the bot runner: it writes rows and sends mail rather
-    # than starting containers, and everything it can fire is already bounded by
-    # the approval gate — with nothing approved, an enabled loop does nothing.
-    _scheduler_loop = None
-    try:
-        from case_service.scheduler.runner import loop as _scheduler_loop
-        _scheduler_loop.start()
-    except Exception as _e:
-        logger.warning("Scheduler unavailable: %s", _e)
-    # <<< Scheduler
-
-    # >>> C1 outbox relay
-    _outbox_relay = None
-    try:
-        from case_service.integrations.outbox_relay import OutboxRelay
-        from velaris_shared.db.session import get_session_factory as _gsf
-        _outbox_relay = OutboxRelay(_gsf())
-        _outbox_relay.start()
-    except Exception as _e:
-        logger.warning("OutboxRelay unavailable: %s", _e)
-    # <<< C1 outbox relay
-
-    # >>> §8.8 health sampler — the producer HxStatus needs
-    # `health_check_results` was an empty schema: its only writer lived inside
-    # GET /health/deep, which nothing calls on a schedule. Uptime over a window
-    # is not measurable without a history, so this writes one.
-    _health_sampler = None
-    try:
-        from velaris_shared.db.session import get_session_factory as _gsf3
-        from case_service.integrations.health_sampler import HealthSampler
-        _hs = get_settings()
-        if _hs.health_sampler_enabled:
-            _health_sampler = HealthSampler(
-                _gsf3(),
-                interval_seconds=_hs.health_sampler_interval_seconds,
-                retention_days=_hs.health_sampler_retention_days,
-            )
-            _health_sampler.start()
-    except Exception as _e:
-        logger.warning("HealthSampler unavailable: %s", _e)
-    # <<< §8.8 health sampler
-
-    # >>> §8.10 scheduled PII scan
-    # The HxPrivacy inventory was only as current as the last time a human
-    # remembered to run it — and a stale inventory still looks authoritative,
-    # so a field added last month is simply missing from it. The scan is
-    # idempotent and never overwrites a reviewer's verdict, which is what makes
-    # running it unattended safe.
-    _pii_scanner = None
-    try:
-        from velaris_shared.db.session import get_session_factory as _gsf4
-        from case_service.integrations.pii_scanner import PIIScanner
-        _ps = get_settings()
-        if _ps.pii_scanner_enabled:
-            _pii_scanner = PIIScanner(
-                _gsf4(), interval_seconds=_ps.pii_scanner_interval_seconds,
-            )
-            _pii_scanner.start()
-    except Exception as _e:
-        logger.warning("PIIScanner unavailable: %s", _e)
-    # <<< §8.10 scheduled PII scan
-
-    # >>> retention scheduler (opt-in twice — it deletes)
-    _retention_runner = None
-    try:
-        from velaris_shared.db.session import get_session_factory as _gsf5
-        from case_service.integrations.retention_runner import RetentionRunner
-        _rs = get_settings()
-        if _rs.retention_scheduler_enabled:
-            _retention_runner = RetentionRunner(
-                _gsf5(),
-                interval_seconds=_rs.retention_scheduler_interval_seconds,
-                apply=_rs.retention_scheduler_apply,
-            )
-            _retention_runner.start()
-    except Exception as _e:
-        logger.warning("RetentionRunner unavailable: %s", _e)
-    # <<< retention scheduler
-
-    # >>> §2.1 durable event log (opt-in)
-    # A SECOND, independent sink on the same outbox rows. The webhook relay
-    # above is untouched: the bus has its own publish cursor, so turning this
-    # on or off cannot affect delivery. Off by default — the outbox is already
-    # durable on disk, so this adds distribution, not safety.
-    _event_bus_relay = None
-    try:
-        _s = get_settings()
-        if _s.event_bus_enabled:
-            from velaris_shared.db.session import get_session_factory as _gsf2
-            from case_service.integrations.event_bus import EventBusRelay
-            _event_bus_relay = EventBusRelay(
-                _gsf2(), brokers=_s.event_bus_brokers,
-                topic_prefix=_s.event_bus_topic_prefix,
-            )
-            _event_bus_relay.start()
-    except Exception as _e:
-        logger.warning("EventBusRelay unavailable: %s", _e)
-    # <<< §2.1 durable event log
-
-    # >>> PUO Phase 2: platform update watcher (admin notifications)
-    _puo_watcher = None
-    try:
-        from case_service.integrations.platform_update_watcher import PlatformUpdateWatcher
-        from velaris_shared.db.session import get_analytics_session_factory as _gasf
-        _puo_watcher = PlatformUpdateWatcher(_gasf())
-        _puo_watcher.start()
-    except Exception as _e:
-        logger.warning("PlatformUpdateWatcher unavailable: %s", _e)
-    # <<< PUO Phase 2
-
-    # >>> PUO Phase 3: rollout plan engine (rings, soak, supersede)
-    _puo_engine = None
-    try:
-        from case_service.integrations.platform_update_plan_engine import PlatformUpdatePlanEngine
-        from velaris_shared.db.session import get_analytics_session_factory as _gasf2
-        _puo_engine = PlatformUpdatePlanEngine(_gasf2())
-        _puo_engine.start()
-    except Exception as _e:
-        logger.warning("PlatformUpdatePlanEngine unavailable: %s", _e)
-    # <<< PUO Phase 3
-
     yield
 
     # >>> HxVault resync loop stop
@@ -820,43 +485,10 @@ async def lifespan(app: FastAPI):
             pass
     # <<< HxVault resync loop stop
 
-    # >>> C1 outbox relay stop
-    if _outbox_relay is not None:
-        _outbox_relay.stop()
-    if _event_bus_relay is not None:
-        await _event_bus_relay.stop()
-    if _health_sampler is not None:
-        _health_sampler.stop()
-    if _pii_scanner is not None:
-        _pii_scanner.stop()
-    if _retention_runner is not None:
-        _retention_runner.stop()
-    if _bot_runner is not None:
-        # Awaited, unlike the others: a bot job that is mid-flight holds a
-        # credential lease and a running container, and both need the teardown
-        # path rather than a cancelled task.
-        await _bot_runner.stop()
-    if _scheduler_loop is not None:
-        await _scheduler_loop.stop()
-    # <<< C1 outbox relay stop
-
-    # >>> PUO Phase 2 stop
-    if _puo_watcher is not None:
-        _puo_watcher.stop()
-    # <<< PUO Phase 2 stop
-
-    # >>> PUO Phase 3 stop
-    if _puo_engine is not None:
-        _puo_engine.stop()
-    # <<< PUO Phase 3 stop
-
-    # >>> P25 email poll loop stop
-    if email_loop is not None:
-        try:
-            await email_loop.stop()
-        except Exception:
-            pass
-    # <<< P25 email poll loop stop
+    # >>> R5e step 9: background jobs stop (releases their leases)
+    if _jobs is not None:
+        await _jobs.stop()
+    # <<< R5e step 9
 
     # Shutdown
     if temporal_worker is not None:
@@ -912,7 +544,6 @@ def create_app() -> FastAPI:
 
     from case_service.hxvault import DekNotLoadedError
     from case_service.hxvault.keyring import KeyShreddedError
-    from case_service.identity.scim import ScimError
 
     # VEL-DOC-UUID-422: FastAPI rejects a malformed path UUID before any
     # handler runs, so the code cannot be raised from a route — it has to be
@@ -952,23 +583,7 @@ def create_app() -> FastAPI:
             headers=getattr(exc, "headers", None),
         )
 
-    # SCIM speaks its own error shape (RFC 7644 §3.12) and its clients parse it:
-    # Entra and Okta surface `detail` and `scimType` to the administrator and
-    # branch on `status`. A refusal raised deep in the SCIM dependency chain —
-    # the bearer-token check especially — must arrive in that shape rather than
-    # as the platform's generic error body, or the IdP shows its operator a
-    # blank failure.
-    @app.exception_handler(ScimError)
-    async def _scim_error_handler(request, exc: ScimError):  # noqa: ANN001
-        logging.getLogger("case_service.errors").warning(
-            "%s %s -> scim %s %s", request.method, request.url.path,
-            exc.status, exc.scim_type or "",
-        )
-        return JSONResponse(
-            status_code=exc.status,
-            content=exc.body(),
-            media_type="application/scim+json",
-        )
+    # SCIM's own error shape is user-service's now (R5e step 10).
 
     # HxVault and database faults reached the client as bare 500s: both are
     # raised deep in library code (crypto, the driver) and no router catches
@@ -1079,6 +694,30 @@ def create_app() -> FastAPI:
             ),
         )
 
+    # A lost connection that a route's `except Exception` swallowed surfaces on
+    # the next query as PendingRollbackError (R6 failure test 2026-11-03:
+    # PostgreSQL killed mid-create answered 500). Nothing was committed, so it is
+    # "database unavailable". Any other pending rollback is a real bug: 500.
+    from sqlalchemy.exc import PendingRollbackError as _PendingRollback
+
+    @app.exception_handler(_PendingRollback)
+    async def _pending_rollback_handler(request, exc):  # noqa: ANN001
+        if "Can't reconnect until invalid transaction is rolled back" in str(exc):
+            return await _db_unavailable_handler(request, exc)
+        return await _unhandled_handler(request, exc)
+
+    # A connection dropped mid-query (pooler or database killed under load)
+    # can arrive as a plain DBAPIError, e.g. asyncpg ConnectionDoesNotExistError
+    # (R6 failure test 2026-11-03: GET /cases answered 500). SQLAlchemy marks it
+    # `connection_invalidated` → 503. Any other DBAPIError stays a 500.
+    from sqlalchemy.exc import DBAPIError as _DBAPIError
+
+    @app.exception_handler(_DBAPIError)
+    async def _dbapi_handler(request, exc):  # noqa: ANN001
+        if getattr(exc, "connection_invalidated", False):
+            return await _db_unavailable_handler(request, exc)
+        return await _unhandled_handler(request, exc)
+
     # >>> P23 observability wiring
     configure_logging()
     app.add_middleware(ObservabilityMiddleware)
@@ -1102,11 +741,20 @@ def create_app() -> FastAPI:
     app.include_router(my_work.router, prefix=prefix)
     app.include_router(rules.router, prefix=prefix)
     app.include_router(forms.router, prefix=prefix)
+    from case_service.api.routers import reference_tables as _reference_tables
+    app.include_router(_reference_tables.router, prefix=prefix)   # Form Builder v2 step 3
+    from case_service.api.routers import csp_reports as _csp_reports
+    app.include_router(_csp_reports.router, prefix=prefix)        # Studio CSP reports (anonymous, capped)
+    from case_service.api.routers import form_sections as _form_sections
+    app.include_router(_form_sections.router, prefix=prefix)      # Form Builder §5 step 6
     app.include_router(data_models.router, prefix=prefix)
     app.include_router(form_submissions_router, prefix=prefix)
     app.include_router(webhooks_router, prefix=prefix)
     app.include_router(admin_router, prefix=prefix)
-    app.include_router(auth_router, prefix=prefix)
+    # /auth, /auth/real, /auth/saml, /scim, /identity/provisioning and
+    # /user-directory moved to user-service (R5e step 10). POST
+    # /auth/switch-context (access_groups.py) stays here; the gateway sends
+    # that one path back.
     # /analytics and /process-mining are served by analytics-service since 13c.
     # The gateway routes both prefixes there; nothing is mounted here, so a
     # direct hit on case-service 404s rather than silently answering with a
@@ -1119,15 +767,10 @@ def create_app() -> FastAPI:
     app.include_router(realtime_router, prefix=prefix)
     app.include_router(documents_router, prefix=prefix)
     app.include_router(escalation_router, prefix=prefix)
-    app.include_router(user_directory_router, prefix=prefix)
     app.include_router(compliance_router, prefix=prefix)
     app.include_router(email_router, prefix=prefix)
     app.include_router(push_router, prefix=prefix)
     app.include_router(hxnexus_router, prefix=prefix)
-    app.include_router(portal_router, prefix=prefix)
-    app.include_router(portal_admin_router, prefix=prefix)
-    app.include_router(portal_customers_public_router, prefix=prefix)
-    app.include_router(portal_customers_admin_router, prefix=prefix)
     app.include_router(releases_router, prefix=prefix)
     app.include_router(hxdbmanager_router, prefix=prefix)
     app.include_router(access_groups_router, prefix=prefix)
@@ -1148,7 +791,6 @@ def create_app() -> FastAPI:
     app.include_router(hxglobal_router, prefix=prefix)
     app.include_router(hxshield_router, prefix=prefix)
     app.include_router(hxfusion_router, prefix=prefix)
-    app.include_router(payments_router, prefix=prefix)   # P48
     app.include_router(identity_router, prefix=prefix)   # P49
     app.include_router(esign_router,    prefix=prefix)   # P49
     app.include_router(crm_router,      prefix=prefix)   # P50
@@ -1164,7 +806,6 @@ def create_app() -> FastAPI:
     app.include_router(agents_router, prefix=prefix)    # F-00 agent identity
     app.include_router(capture_router, prefix=prefix)   # F-06 ambient capture
     app.include_router(ai_ledger_router, prefix=prefix) # F-01 AI decision ledger
-    app.include_router(model_market_router, prefix=prefix)  # F-07 sovereign model marketplace
     app.include_router(healing_router, prefix=prefix)       # F-08 self-healing processes
     app.include_router(handoff_router, prefix=prefix)       # F-09 agent handoff
     app.include_router(field_router, prefix=prefix)         # F-10 field operations
@@ -1181,7 +822,7 @@ def create_app() -> FastAPI:
     app.include_router(meet_router, prefix=prefix)           # HxMeet P1
     app.include_router(stt_router, prefix=prefix)             # Voice input P1 (local STT)
     app.include_router(voicefill_router, prefix=prefix)       # Voice input P3 (form-fill)
-    app.include_router(portal_voice_router, prefix=prefix)    # Voice input P3b (portal)
+    # /portal and /portal-admin moved to portal-service (R5e step 8).
     app.include_router(messages_router, prefix=prefix)       # Portal v2 P4 case messages
     app.include_router(hxdraft_router, prefix=prefix)         # HxDraft
     app.include_router(hxevolve_router, prefix=prefix)        # HxEvolve
@@ -1193,19 +834,11 @@ def create_app() -> FastAPI:
     app.include_router(commits_router,   prefix=prefix)   # P61 Commit pattern
     app.include_router(intake_router,    prefix=prefix)   # Process-Case integration
     app.include_router(hxlogs_router,   prefix=prefix)   # P63 HxLogs
-    app.include_router(auth_real_router, prefix=prefix)  # P64 Real Auth
-    app.include_router(auth_saml_router, prefix=prefix)  # Enterprise identity P1 (SAML SP)
-    app.include_router(scim_router, prefix=prefix)       # Enterprise identity P2 (SCIM 2.0)
-    app.include_router(identity_admin_router, prefix=prefix)  # P3 (mappings + log)
     app.include_router(channels_router, prefix=prefix)        # Omnichannel inbound
     app.include_router(bots_router, prefix=prefix)            # RPA bot runner
     app.include_router(scheduler_router, prefix=prefix)       # timed actions
     app.include_router(permissions_router, prefix=prefix)
-    app.include_router(marketplace_router, prefix=prefix)  # Marketplace
     app.include_router(broker_router, prefix=prefix)  # Layer-2 scoped data broker (container-only surface)
-    app.include_router(checkout_router, prefix=prefix)  # HxCheckout (marketplace app)
-    app.include_router(storefront_router, prefix=prefix)  # HxStorefront (marketplace app)
-    app.include_router(storefront_public_router, prefix=prefix)  # HxStorefront public storefront
     app.include_router(platform_updates_router, prefix=prefix)  # PUO Phase 1
     app.include_router(case_variables_router, prefix=prefix)  # Case Variables P1
     from case_service.api.routers import testsuite as _testsuite
@@ -1217,21 +850,25 @@ def create_app() -> FastAPI:
     # Middleware (order matters — last added = first executed)
     app.add_middleware(SuperadminGateMiddleware)  # boot gate — must be outermost
     app.add_middleware(AuditMiddleware)            # system-wide action audit
+    # R5d 11b: read-your-own-writes mark + where an opted-in read ran.
+    from velaris_shared.middleware.read_routing import ReadRoutingMiddleware
+    app.add_middleware(ReadRoutingMiddleware)
     app.add_middleware(RequestTrackingMiddleware)
     import os
     if not settings.debug and "PYTEST_CURRENT_TEST" not in os.environ:
         # >>> P32 scaling: backend selector
+        # Per client address, matched to the gateway — see velaris_shared/app.py (R6, 2026-10-30).
         if getattr(settings, "rate_limit_backend", "memory") == "redis" and getattr(settings, "redis_enabled", False):
             from velaris_shared.middleware.rate_limit_redis import RedisRateLimitMiddleware
             app.add_middleware(
                 RedisRateLimitMiddleware,
-                requests_per_minute=120, burst=30,
+                requests_per_minute=1200, burst=40,
                 exclude_paths=["/health", "/ready", "/metrics"],
             )
         else:
             app.add_middleware(
                 RateLimitMiddleware,
-                requests_per_minute=120, burst=30,
+                requests_per_minute=1200, burst=40,
                 exclude_paths=["/health", "/ready"],
             )
         # <<< P32 scaling
@@ -1266,6 +903,13 @@ def create_app() -> FastAPI:
 
     # Health endpoints (no prefix — /health and /ready at root)
     app.include_router(health_router)
+    # R5e step 7 (the commerce split): /api/v1/{checkout,payments,storefront,
+    # marketplace,model-market} are served by commerce-service now, behind the
+    # same gateway URLs. What it asks case-service to do arrives here. Not under
+    # /api/v1 — the gateway never forwards /internal; the routes refuse any call
+    # without the install's internal service secret.
+    from case_service.internal_api.router import router as _internal_router
+    app.include_router(_internal_router)
 
     return app
 

@@ -40,6 +40,32 @@ set -uo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VELARIS_DIR="$(cd "$SRC_DIR/../.." && pwd)"
+# R5c: a server linked as a STANDBY runs only its two replica databases
+# (standby-velaris.sh). Starting the platform here would start a second
+# PostgreSQL on the replicas' own data. standby.json exists only while linked.
+if [ -f "$VELARIS_DIR/.standby/standby.json" ]; then
+  echo "✗ This server is linked as a Velaris standby ($VELARIS_DIR/.standby/standby.json)." >&2
+  echo "  The platform must not run here while it is one. To use it on its own, unlink it" >&2
+  echo "  first: ./standby-velaris.sh unlink   (on the main server)" >&2
+  exit 1
+fi
+# An old main whose standby was promoted: running it again means two servers
+# taking writes. demoted.json stays until it is linked as the new main's standby.
+if [ -f "$VELARIS_DIR/.standby/demoted.json" ]; then
+  echo "✗ This server was replaced by its standby ($VELARIS_DIR/.standby/demoted.json)." >&2
+  echo "  Starting it would make two main servers. To bring it back as a standby:" >&2
+  echo "  ./standby-velaris.sh retire   then link it from the new main." >&2
+  exit 1
+fi
+# Step 12 (automatic failover): this main stopped itself after losing both the
+# witness and its standby — the standby may have taken over. Its agent lifts
+# this by itself once the witness confirms this server still holds the lease.
+if [ -f "$VELARIS_DIR/.standby/fenced.json" ]; then
+  echo "✗ This server stopped itself: it lost both the failover witness and its standby" >&2
+  echo "  ($VELARIS_DIR/.standby/fenced.json). The standby may have taken over." >&2
+  echo "  Check: ./standby-velaris.sh failover status   (it restarts by itself if it still holds the lease)" >&2
+  exit 1
+fi
 UNIT_DIR="${VELARIS_UNIT_DIR:-/etc/systemd/system}"
 # Scratch files and error logs go to a directory only this user can write. A
 # fixed name under /tmp can be pre-created, or pointed somewhere else, by any
@@ -49,7 +75,8 @@ if ! { mkdir -p "$VELARIS_SCRATCH" && chmod 700 "$VELARIS_SCRATCH" && [ -w "$VEL
   VELARIS_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/velaris.XXXXXX")"
 fi
 UNITS=(velaris-engine velaris-case-service velaris-analytics-service
-       velaris-hxgraph-service velaris-hxmigrate-service velaris-studio)
+       velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service
+       velaris-portal-service velaris-user-service velaris-worker-service velaris-studio)
 
 INTERACTIVE=true
 DO_RESTART=true
@@ -84,11 +111,77 @@ DB_BACKEND="$(grep -E '^\s+database:' "$VELARIS_DIR/velaris.yaml" 2>/dev/null | 
 DB_CONTAINER="${DB_CONTAINER:-docker-compose-velaris-db-1}"
 DB_USER="${DB_USER:-velaris}"
 DB_NAME="${DB_NAME:-velaris}"
+type velaris_psql >/dev/null 2>&1 \
+  || velaris_psql() { docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"; }
+# ── Infrastructure containers ─────────────────────────────────────
+# Under systemd nothing else brings the compose stack to the new release: the
+# update recreates only the database container, and start-velaris.sh (which
+# runs `compose up`) exits at once here. Until 2026-10-16 a systemd install kept
+# its previous containers after every update — pinned images never applied,
+# and the November changes (OpenBao on raft, Redpanda replaced by Kafka) would
+# not have happened. The same steps start-velaris.sh takes, in its order.
+COMPOSE_FILE="$VELARIS_DIR/deploy/docker-compose/docker-compose.yml"
+_compose() { docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" "$@"; }
+echo "▶ Infrastructure containers..."
+# shellcheck source=/dev/null
+[ -f "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh" ] \
+  && VELARIS_DIR="$VELARIS_DIR" . "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh"
+if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
+  "$VELARIS_DIR/scripts/openbao-storage-migrate.sh" \
+    || yellow "  ⚠ OpenBao storage migration failed — see above (docs/recovery-runbook.md §6)"
+fi
+type velaris_retire_redpanda >/dev/null 2>&1 && velaris_retire_redpanda
+type velaris_ensure_event_bus_password >/dev/null 2>&1 && velaris_ensure_event_bus_password
+type velaris_ensure_cache_password >/dev/null 2>&1 && velaris_ensure_cache_password
+# Parts on other servers (VELARIS_EXTERNAL_SERVICES): refused when unsecured;
+# their bundled containers are stopped, not started. Nothing external = `up -d`.
+if type velaris_external_check >/dev/null 2>&1 && ! velaris_external_check; then
+  exit 1
+fi
+# deploy/tls/certs before Docker can create it as root (the gateway mounts it).
+# shellcheck source=deploy/tls/certs-dir.sh
+[ -f "$VELARIS_DIR/deploy/tls/certs-dir.sh" ] && . "$VELARIS_DIR/deploy/tls/certs-dir.sh" && velaris_tls_certs_dir "$VELARIS_DIR"
+_UP_SVCS=""
+if type velaris_compose_up_services >/dev/null 2>&1; then
+  velaris_retire_external_containers "$COMPOSE_FILE" "$VELARIS_DIR/.env"
+  _UP_SVCS="$(velaris_compose_up_services "$COMPOSE_FILE" "$VELARIS_DIR/.env")" || exit 1
+fi
+# shellcheck disable=SC2086
+if _compose up -d $_UP_SVCS >"$VELARIS_SCRATCH/velaris-compose-up.log" 2>&1; then
+  green "  ✓ containers on this release's images"
+else
+  yellow "  ⚠ compose up had errors:"; tail -5 "$VELARIS_SCRATCH/velaris-compose-up.log"
+fi
+if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
+  # A recreated OpenBao comes back sealed; the platform runs on the rendered
+  # .env either way, but day-2 secret writes need it open.
+  for _i in $(seq 1 20); do
+    _h=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" || true)
+    [ "$_h" != "000" ] && break; sleep 1
+  done
+  if "$VELARIS_DIR/scripts/secrets-unseal.sh" >/dev/null 2>&1; then green "  ✓ OpenBao unsealed"
+  else yellow "  ⚠ OpenBao still sealed — ./scripts/secrets-unseal.sh"; fi
+fi
+# The internal service secret and the backup key are generated by update-velaris.sh
+# Step 6b — but an update FROM a release older than them runs that release's
+# updater, which knows neither; this script is the only part of the new tree it
+# runs. Found 2026-10-20 updating v3.1.2: both missing, so commerce-service's
+# calls to /internal/v1 were refused. Both are no-ops when already set.
+# After the unseal above, not before: each also writes the new value into
+# OpenBao when the vault holds the secrets, and a sealed (or not yet recreated)
+# vault refused both — R3 2026-11-01: "Could not store it in OpenBao", and the
+# next render then refused to drop the two keys .env had and the vault lacked.
+type velaris_ensure_internal_secret >/dev/null 2>&1 && velaris_ensure_internal_secret
+if [[ -x "$VELARIS_DIR/.venv/bin/python" && -f "$VELARIS_DIR/scripts/backup/velaris_backup.py" ]]; then
+  "$VELARIS_DIR/.venv/bin/python" "$VELARIS_DIR/scripts/backup/velaris_backup.py" ensure-key \
+    || yellow "  ⚠ Backup key not set — run ./backup-velaris.sh --ensure-key"
+fi
+
 echo "▶ Release manifest..."
 case "${DB_BACKEND:-postgresql}" in
   postgresql)
     if [ -f "$VELARIS_DIR/releases/manifest.sql" ]; then
-      if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+      if velaris_psql -q \
            < "$VELARIS_DIR/releases/manifest.sql" 2>"$VELARIS_SCRATCH/velaris-manifest-err.log" \
          && ! grep -q "ERROR" "$VELARIS_SCRATCH/velaris-manifest-err.log"; then
         green "  ✓ release manifest applied"
@@ -97,10 +190,20 @@ case "${DB_BACKEND:-postgresql}" in
         head -5 "$VELARIS_SCRATCH/velaris-manifest-err.log"
       fi
     fi ;;
+  mysql|mariadb)
+    # Through deploy/external-services.sh's client (loaded with compose-profiles.sh).
+    if [ -f "$VELARIS_DIR/releases/manifest.mysql.sql" ] && type velaris_mysql >/dev/null 2>&1; then
+      if velaris_mysql < "$VELARIS_DIR/releases/manifest.mysql.sql" 2>"$VELARIS_SCRATCH/velaris-manifest-err.log"; then
+        green "  ✓ release manifest applied"
+      else
+        yellow "  ⚠ release manifest had errors — feature versions may be stale:"
+        grep -v "Using a password" "$VELARIS_SCRATCH/velaris-manifest-err.log" | head -5
+      fi
+    elif [ -f "$VELARIS_DIR/releases/manifest.mysql.sql" ]; then
+      yellow "  ⚠ database is ${DB_BACKEND}: apply releases/manifest.mysql.sql by hand"
+    fi ;;
   *)
-    # The MySQL/MariaDB manifest needs the client wrapper start-velaris.sh
-    # builds from .env. Named rather than half-done.
-    yellow "  ⚠ database is ${DB_BACKEND}: apply releases/manifest.mysql.sql by hand" ;;
+    yellow "  ⚠ database is ${DB_BACKEND}: no release manifest for it" ;;
 esac
 
 # ── 2. Studio ─────────────────────────────────────────────────────

@@ -47,7 +47,7 @@ from velaris_shared.db.models import (
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 VIEWER = _headers("vic", ["viewer"])
 DEV_ADMIN = _headers("devadmin", ["admin"])
@@ -91,7 +91,8 @@ def _deep(fn, depth: int = 3, seen: set | None = None) -> str:
         g = getattr(mod, name, None)
         if inspect.isfunction(g) and g.__module__.startswith(
                 ("case_service", "analytics_service", "hxgraph_service",
-                 "hxmigrate_service", "velaris_shared")):
+                 "hxmigrate_service", "commerce_service", "portal_service",
+                 "user_service", "velaris_shared")):
             text += _deep(g, depth - 1, seen)
     return text
 
@@ -108,9 +109,14 @@ def login_only_routes() -> set[tuple[str, str]]:
     from analytics_service.main import app as analytics_app
     from hxgraph_service.main import app as hxgraph_app
     from hxmigrate_service.main import app as hxmigrate_app
+    # The R5e splits (steps 7, 8, 10) — routes that left case-service stay swept.
+    # `app` is the test gateway; its `.routes` are case-service's alone.
+    from commerce_service.main import app as commerce_app
+    from portal_service.main import app as portal_app
+    from user_service.main import app as user_app
 
     out: set[tuple[str, str]] = set()
-    for a in (app, analytics_app, hxgraph_app, hxmigrate_app):
+    for a in (app, analytics_app, hxgraph_app, hxmigrate_app, commerce_app, portal_app, user_app):
         for r in a.routes:
             if not isinstance(r, APIRoute):
                 continue
@@ -148,7 +154,7 @@ ACCEPTED_LOGIN_ONLY: set[tuple[str, str]] = set()
 # notification devices, MCP tokens and conversations with HxNexus. Every one is
 # filtered to `user.user_id` in the handler.
 ACCEPTED_LOGIN_ONLY |= _paths(V,
-    "GET /auth/me", "POST /auth/switch-context",
+    "POST /auth/switch-context",   # GET /auth/me: reads the operator flag since 2026-11-04
     "POST /auth/real/change-password", "GET /auth/real/devices",
     "DELETE /auth/real/devices/{device_id}", "GET /auth/real/me/profile",
     "PATCH /auth/real/me/profile", "POST /auth/real/mfa/disable",
@@ -157,7 +163,7 @@ ACCEPTED_LOGIN_ONLY |= _paths(V,
     "DELETE /auth/real/webauthn/credentials/{credential_id}",
     "POST /auth/real/webauthn/register/options", "POST /auth/real/webauthn/register/verify",
     "POST /auth/real/webauthn/stepup/options", "POST /auth/saml/{tenant}/logout",
-    "GET /my/assignments", "POST /my/self-assign", "GET /my/workload",
+    "GET /my/assignments", "GET /my/workload",
     "GET /push/devices", "DELETE /push/devices/{device_id}",
     "GET /push/preferences", "PUT /push/preferences/{event_type}", "GET /push/vapid-public-key",
     "GET /mcp/tokens", "POST /mcp/tokens/{grant_id}/revoke",
@@ -175,11 +181,6 @@ ACCEPTED_LOGIN_ONLY |= _paths(V,
 # a form submission on the assignment it names.
 ACCEPTED_LOGIN_ONLY |= _paths(V,
     "POST /cases", "POST /cases/bulk",
-    "DELETE /assignments/{assignment_id}", "POST /assignments/{assignment_id}/claim",
-    "POST /assignments/{assignment_id}/complete", "POST /assignments/{assignment_id}/reassign",
-    "POST /assignments/{assignment_id}/release",
-    "POST /form-submissions/{assignment_id}", "GET /form-submissions/{assignment_id}/form",
-    "POST /hxbridge/connectors/{connector_id}/form-lookup",   # a form field at run time
     "GET /queues/{queue_id}", "GET /queues/{queue_id}/items",
     "GET /queues/{queue_id}/items/count", "GET /queues/{queue_id}/stats",
     "POST /mcp/proposals/{proposal_id}/confirm",   # executes AS the confirmer, case re-checked
@@ -190,6 +191,9 @@ ACCEPTED_LOGIN_ONLY |= _paths(V,
 # rules it evaluates, the escalation tree, the case type. Writes are gated.
 ACCEPTED_LOGIN_ONLY |= _paths(V,
     "GET /forms", "GET /forms/{form_id}", "GET /rules", "GET /rules/lint",
+    # 2026-10-29: the caller's own tenant's approved embed sites — every form
+    # renderer checks an embed against them; changing them is admin-only.
+    "GET /forms/embed-settings",
     # (8e 2026-10-01: the by-id rule reads gained a tenant check, so the scan
     # now counts GET /rules/{rule_id}, its /dmn, /evaluate and evaluate/batch
     # as gated; they left this list.)
@@ -257,10 +261,11 @@ ACCEPTED_LOGIN_ONLY |= _paths(V,
     "GET /graph/report", "GET /graph/similar", "GET /graph/visualize",
     "GET /analytics/metrics/funnel/{case_type_id}", "GET /analytics/metrics/sla-performance",
     "GET /analytics/metrics/snapshot", "GET /analytics/metrics/time-series",
-    "GET /analytics/odata", "POST /analytics/query", "GET /analytics/reports",
-    "POST /analytics/reports", "DELETE /analytics/reports/{report_id}",
-    "GET /analytics/reports/{report_id}", "GET /analytics/reports/{report_id}/export",
-    "GET /analytics/reports/{report_id}/run",
+    "GET /analytics/odata", "POST /analytics/query",
+    "POST /analytics/reports",
+    # 2026-11-04: list / get / run / export / delete of saved reports are no
+    # longer login-only — a report is read in its own tenant, by its creator or
+    # by everyone when public; deleted by its creator (analytics._rpt_visible).
 )
 
 
@@ -281,6 +286,13 @@ def test_the_accepted_list_does_not_rot():
 
 
 # ── the fixtures for shapes 1–3 ──────────────────────────────────────────────
+
+@pytest_asyncio.fixture(autouse=True)
+async def _case_creators(setup_db):
+    """Creating a case needs an access group granting it (2026-10-18)."""
+    from tests.conftest import grant_case_create
+    await grant_case_create('op')
+
 
 @pytest_asyncio.fixture
 async def api():

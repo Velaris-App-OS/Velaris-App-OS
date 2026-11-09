@@ -1,1 +1,1 @@
-"""HELIX connect-service."""
+"""Velaris connect-service."""

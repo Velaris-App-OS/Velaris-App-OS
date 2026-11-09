@@ -72,12 +72,26 @@ class MembershipResponse(BaseModel):
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$")
 
 
+async def _platform_operator_only(session: AsyncSession, user: AuthenticatedUser) -> None:
+    """Creating, changing, archiving and deleting tenants is the install's
+    operator's (superadmin, or the default tenant) — 2026-10-30. The router's
+    privilege is held by every tenant's `admin`, and nothing else was asked: a
+    tenant admin could create tenants, raise their own `max_cases`/`max_users`,
+    and archive or permanently delete their own tenant with all its data. A
+    tenant admin still reads their own tenant and manages its members."""
+    from case_service.tenancy.identity import is_platform_operator
+    if not await is_platform_operator(session, user):
+        raise HTTPException(403, "Only the platform operator can create, change or delete tenants.")
+
+
 @router.post("", response_model=TenantResponse, status_code=201)
 async def create_tenant(
     body: TenantCreate,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Create a new tenant."""
+    await _platform_operator_only(session, user)
     if not SLUG_RE.match(body.slug):
         raise HTTPException(400, "Slug must be lowercase alphanumeric with optional hyphens")
 
@@ -141,7 +155,9 @@ async def update_tenant(
     tenant_id: uuid.UUID,
     body: TenantUpdate,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
+    await _platform_operator_only(session, user)
     tenant = await tenant_repo.get_tenant(session, tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -159,8 +175,10 @@ async def update_tenant(
 async def delete_tenant(
     tenant_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Soft-delete by archiving."""
+    await _platform_operator_only(session, user)
     tenant = await tenant_repo.get_tenant(session, tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -175,8 +193,10 @@ async def delete_tenant(
 async def permanently_delete_tenant(
     tenant_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Hard delete — permanently removes the tenant and all its data."""
+    await _platform_operator_only(session, user)
     tenant = await tenant_repo.get_tenant(session, tenant_id)
     if not tenant:
         raise HTTPException(404, "Tenant not found")

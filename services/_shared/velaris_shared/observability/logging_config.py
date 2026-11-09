@@ -27,7 +27,7 @@ _VALUE_PATTERNS = [
     # password=..., token: "...", api_key='...' etc. in free-text messages
     (re.compile(
         r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|"
-        r"refresh_token|access_token|otp|client_secret)\b(["
+        r"refresh_token|access_token|otp|client_secret|grant)\b(["
         r"'\"]?\s*[:=]\s*)\S+"),
      r"\1\2[REDACTED]"),
     # Bearer tokens
@@ -75,6 +75,30 @@ class RedactFilter(logging.Filter):
         return True
 
 
+class TenantTagFilter(logging.Filter):
+    """Prefix a line written during a signed-in request with `[t=<tenant>]` —
+    the TRUSTED tenant sign-in sets (2026-11-04), so HxLogs can show a tenant's
+    admin the lines of its own requests. Lines with no request tenant (startup,
+    jobs, access logs) stay untagged: the platform operator's alone."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if getattr(record, "_velaris_tagged", False):
+                return True
+            from .context import tenant_id_var
+            t = tenant_id_var.get()
+            if t:
+                # One line per record: a newline in a message (text a tenant
+                # sent) cannot start a forged line tagged for another tenant.
+                msg = record.getMessage().replace("\r", " ").replace("\n", " \u23ce ")
+                record.msg = f"[t={t}] {msg}"
+                record.args = ()
+            record._velaris_tagged = True
+        except Exception:
+            pass
+        return True
+
+
 def configure_logging() -> None:
     log_format = os.getenv("VELARIS_LOG_FORMAT", "console").lower()
     level = getattr(logging, os.getenv("VELARIS_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -108,8 +132,19 @@ def configure_logging() -> None:
     )
     # D3: scrub secrets from every stdlib log line (incl. uvicorn access logs)
     redact_filter = RedactFilter()
+    tenant_filter = TenantTagFilter()
     for handler in logging.getLogger().handlers:
+        handler.addFilter(tenant_filter)
         handler.addFilter(redact_filter)
+    # uvicorn's loggers have their own handlers and do not reach the root's, so
+    # the filter above never saw them: a socket's `?token=<JWT>` was written in
+    # full to the service log ("WebSocket /api/v1/hxstream/ws?token=…", found
+    # 2026-10-19). On the loggers themselves, it covers every record they make.
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.addFilter(redact_filter)
+        for handler in uv_logger.handlers:
+            handler.addFilter(redact_filter)
 
 
 def get_logger(name: str | None = None):

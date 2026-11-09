@@ -77,6 +77,16 @@ def _database_url_from_env() -> str:
     url = os.environ.get("VELARIS_CASE_DATABASE_URL")
     if not url:
         return DEFAULT_DATABASE_URL
+    # R5d 6a: through the pooler when one is set and the database is PostgreSQL
+    # (PgBouncer only speaks PostgreSQL). Empty = direct, as before.
+    pooler = (os.environ.get("VELARIS_CASE_DATABASE_POOLER_URL") or "").strip()
+    if pooler and url.split("://", 1)[0].split("+", 1)[0].lower() in ("postgresql", "postgres"):
+        url = pooler
+        # Through PgBouncer's UNIX socket when the install says so (same rule
+        # as the platform: velaris_shared.db.backends.pooler_socket_url).
+        if (os.environ.get("VELARIS_CASE_DATABASE_POOLER_SOCKET") or "").strip().lower() in ("1", "true", "yes", "on"):
+            from velaris_shared.db.backends import pooler_socket_url
+            url = pooler_socket_url(url)
     scheme = url.split("://", 1)[0]
     if "+" in scheme:
         return url
@@ -101,12 +111,17 @@ async def init_db(database_url: str | None = None) -> AsyncEngine:
 
     logger.info("database_connecting", url=_mask_password(url))
 
+    # TLS keys in the URL (a database on another server) become driver
+    # arguments; a URL without them is used unchanged.
+    from velaris_shared.db.tls import split_tls
+    url, tls_args = split_tls(url)
     _engine = create_async_engine(
         url,
         echo=False,           # Set True for SQL debugging
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,   # Verify connections before use
+        **({"connect_args": tls_args} if tls_args else {}),
     )
 
     _session_factory = async_sessionmaker(

@@ -1,4 +1,4 @@
-// HELIX P33 — Customer Portal Admin
+// Velaris P33 — Customer Portal Admin
 import React, { useEffect, useState, useCallback } from "react";
 import { useFeatureFlags } from "@/app/FeatureFlagsContext";
 import { getAccessToken } from "@/auth/tokenManager";

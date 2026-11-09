@@ -1,9 +1,9 @@
 # ═══════════════════════════════════════════════════════════════════
-# HELIX Case Service — Production Dockerfile
+# Velaris Case Service — Production Dockerfile
 # Multi-stage build for minimal image size
 # ═══════════════════════════════════════════════════════════════════
 
-FROM python:3.12-slim AS base
+FROM python:3.12.15-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

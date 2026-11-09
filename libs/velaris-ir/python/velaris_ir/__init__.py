@@ -1,8 +1,8 @@
 """
-Helix IR — BPMN 2.0 Intermediate Representation
+Velaris IR — BPMN 2.0 Intermediate Representation
 =================================================
 
-The shared data model for all Helix components.
+The shared data model for all Velaris components.
 
 Usage::
 

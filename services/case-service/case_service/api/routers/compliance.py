@@ -21,17 +21,37 @@ from case_service.compliance import (
 )
 from velaris_shared.db.models import ComplianceReportModel
 from velaris_shared.db.session import get_analytics_session as get_session
+# This router's `get_session` is the analytics pool (above): its routed paths
+# take the analytics variants, which keep that pool when there is no replica.
+from velaris_shared.db.read_routing import (
+    get_analytics_cutoff_session as get_cutoff_session,
+    get_analytics_read_session as get_read_session,
+)
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
+
+
+async def _install_chain_operator(session: AsyncSession, user: AuthenticatedUser) -> None:
+    """The audit chain is ONE chain for the whole install: its row counts, its
+    breaks (other tenants' audit-row ids), a seal, a full verification (61 s at
+    1.6M links, vx-load 2026-11-06) and an outside timestamp call are the
+    platform operator's, not every tenant admin's (demo sign-ups are tenant
+    admins). A tenant reads its own chain result in its evidence pack, which
+    already leaves the install's counts and break ids out."""
+    from case_service.tenancy.identity import is_platform_operator
+
+    if not await is_platform_operator(session, user):
+        raise HTTPException(403, "The install's audit chain is the platform operator's.")
 
 
 # ── Audit chain ──────────────────────────────────────────────────────
 
 @router.get("/audit/status")
 async def get_audit_status(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.audit.read")),
 ):
+    await _install_chain_operator(session, user)
     return await chain_status(session)
 
 
@@ -41,15 +61,17 @@ async def seal_chain(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.audit.seal")),
 ):
+    await _install_chain_operator(session, user)
     return await seal_new_entries(session, max_rows=max_rows)
 
 
 @router.get("/audit/verify")
 async def verify_audit_chain(
     limit: Optional[int] = Query(None, ge=1, le=1_000_000),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.audit.read")),
 ):
+    await _install_chain_operator(session, user)
     return await verify_chain(session, limit=limit)
 
 
@@ -58,9 +80,10 @@ async def verify_audit_chain(
 @router.get("/audit/anchors")
 async def get_audit_anchors(
     limit: int = Query(50, ge=1, le=500),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.audit.read")),
 ):
+    await _install_chain_operator(session, user)
     return await list_anchors(session, limit=limit)
 
 
@@ -70,6 +93,7 @@ async def trigger_audit_anchor(
     session: AsyncSession = Depends(get_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.audit.seal")),
 ):
+    await _install_chain_operator(session, user)
     try:
         return await anchor_chain_tip(session, force=force)
     except Exception as e:
@@ -165,7 +189,7 @@ async def generate_report(
 async def list_reports(
     framework: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.reports.read")),
 ):
     q = select(ComplianceReportModel).order_by(ComplianceReportModel.generated_at.desc()).limit(limit)
@@ -202,7 +226,7 @@ async def list_reports(
 async def download_report(
     report_id: uuid.UUID,
     fmt: str = Query("json", pattern=r"^(json|pdf)$"),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.reports.read")),
 ):
     report = await session.get(ComplianceReportModel, report_id)
@@ -246,7 +270,7 @@ async def download_report(
 async def get_lineage(
     case_id: uuid.UUID,
     limit: int = Query(500, ge=1, le=5000),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     # Was authentication only until 2026-09-29: another tenant's case now 404s.
@@ -377,7 +401,7 @@ async def run_pii_scan(
 async def list_pii_findings(
     status: str | None = None,
     limit: int = 200,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_read_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.privacy.read")),
 ):
     """Findings awaiting or past review.
@@ -563,7 +587,7 @@ async def reverse_ledger_transaction(
 
 @router.get("/ledger/trial-balance")
 async def get_trial_balance(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_cutoff_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.ledger.read")),
 ):
     """Per-account totals plus the whole-ledger balance check.
@@ -580,7 +604,7 @@ async def get_trial_balance(
 
 @router.get("/ledger/reconcile")
 async def reconcile_ledger(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_cutoff_session),
     user: AuthenticatedUser = Depends(hxguard.guard("compliance.ledger.read")),
 ):
     """Captured payments vs what the ledger recorded.
@@ -762,9 +786,25 @@ async def get_dr_posture(
     that their backups never worked.
     """
     from case_service.compliance import dr
+    from case_service.compliance.dr_status import backup_status
 
-    return await dr.posture(
+    out = await dr.posture(
         session,
         rpo_hours=max(1, min(int(rpo_hours), 24 * 30)),
         rto_hours=max(1, min(int(rto_hours), 24 * 30)),
     )
+    # What the backup tooling on this host last did — encryption, off-box copy,
+    # timer, proven restore, a private key left on the server. Additive key:
+    # existing clients of this response are unaffected.
+    out["backup_operations"] = backup_status()
+    # The standby server (R5c): link state, lag, last copies, and its history.
+    # Additive key, like backup_operations.
+    from case_service.compliance.dr_status import standby_status
+    standby = standby_status()
+    try:
+        async with session.begin_nested():
+            standby["events"] = await dr.recent_standby_events(session)
+    except Exception:   # an install that has not applied migration 222 yet
+        standby["events"] = []
+    out["standby"] = standby
+    return out

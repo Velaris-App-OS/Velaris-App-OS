@@ -141,7 +141,13 @@ def create_superadmin_sync(username: str, password: str, email: str) -> None:
     defaults are Python-side) does not — so every NOT NULL column is supplied
     explicitly here, which is correct on both backends.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    # The platform's own database TLS (VELARIS_CASE_DATABASE_URL), so a database
+    # on another server is reached as the platform reaches it. Nothing named =
+    # no TLS arguments, exactly the connection made before.
+    plat = urlparse(os.environ.get("VELARIS_CASE_DATABASE_URL", ""))
+    tq = {k: v[-1] for k, v in parse_qs(plat.query).items()}
 
     # Strip the SQLAlchemy +driver suffix; dispatch on the dialect.
     db_url = (
@@ -158,8 +164,14 @@ def create_superadmin_sync(username: str, password: str, email: str) -> None:
             host=parsed.hostname or "localhost",
             port=parsed.port or 3306,
             database=parsed.path.lstrip("/"),
-            user=parsed.username,
-            password=parsed.password or os.environ.get("VELARIS_DB_PASSWORD", ""),
+            user=unquote(parsed.username or ""),
+            password=unquote(parsed.password or "") or os.environ.get("VELARIS_DB_PASSWORD", ""),
+            **({"ssl_ca": tq["ssl_ca"], "ssl_verify_cert": True,
+                "ssl_verify_identity": tq.get("ssl_check_hostname", "true").lower()
+                not in {"0", "false", "no", "off"},
+                **({"ssl_cert": tq["ssl_cert"]} if tq.get("ssl_cert") else {}),
+                **({"ssl_key": tq["ssl_key"]} if tq.get("ssl_key") else {})}
+               if tq.get("ssl_ca") else {}),
         )
     else:
         import psycopg2
@@ -167,8 +179,17 @@ def create_superadmin_sync(username: str, password: str, email: str) -> None:
             host=parsed.hostname or "localhost",
             port=parsed.port or 5432,
             dbname=parsed.path.lstrip("/"),
-            user=parsed.username,
-            password=parsed.password,
+            user=unquote(parsed.username or ""),
+            password=unquote(parsed.password or ""),
+            # libpq takes these by their own names; "ssl" is asyncpg's spelling.
+            **{k: v for k, v in {
+                "sslmode": tq.get("sslmode") or tq.get("ssl"),
+                # verify-full with no CA file = a publicly trusted server
+                # certificate; libpq is told to use the system's CAs.
+                "sslrootcert": tq.get("sslrootcert") or (
+                    "system" if (tq.get("sslmode") or tq.get("ssl")) == "verify-full" else None),
+                "sslcert": tq.get("sslcert"),
+                "sslkey": tq.get("sslkey")}.items() if v},
         )
     cur = conn.cursor()
 

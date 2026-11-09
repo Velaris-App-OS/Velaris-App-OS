@@ -1,1 +1,1 @@
-"""HELIX notification-service."""
+"""Velaris notification-service."""

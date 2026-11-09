@@ -4,9 +4,10 @@
   single-replica deployment makes `kubectl drain` block forever, which turns a
   routine node upgrade into an outage. Enable it once replicas > 1.
 */}}
-{{- range $svc := list "case-service" "engine" "worker" "analytics-service" "hxgraph-service" "hxmigrate-service" }}
+{{- range $svc := list "case-service" "engine" "worker" "analytics-service" "hxgraph-service" "hxmigrate-service" "commerce-service" "portal-service" "user-service" "jobs" }}
 {{- $enabled := true }}
 {{- if and (eq $svc "worker") (hasKey $.Values "worker") }}{{ $enabled = $.Values.worker.enabled }}{{ end }}
+{{- if eq $svc "jobs" }}{{ $enabled = $.Values.jobs.enabled }}{{ end }}
 {{- if $enabled }}
 ---
 apiVersion: policy/v1

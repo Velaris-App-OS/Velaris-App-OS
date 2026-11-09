@@ -21,6 +21,32 @@
 set -euo pipefail
 
 VELARIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# R5c: a server linked as a STANDBY runs only its two replica databases
+# (standby-velaris.sh). Starting the platform here would start a second
+# PostgreSQL on the replicas' own data. standby.json exists only while linked.
+if [ -f "$VELARIS_DIR/.standby/standby.json" ]; then
+  echo "✗ This server is linked as a Velaris standby ($VELARIS_DIR/.standby/standby.json)." >&2
+  echo "  The platform must not run here while it is one. To use it on its own, unlink it" >&2
+  echo "  first: ./standby-velaris.sh unlink   (on the main server)" >&2
+  exit 1
+fi
+# An old main whose standby was promoted: running it again means two servers
+# taking writes. demoted.json stays until it is linked as the new main's standby.
+if [ -f "$VELARIS_DIR/.standby/demoted.json" ]; then
+  echo "✗ This server was replaced by its standby ($VELARIS_DIR/.standby/demoted.json)." >&2
+  echo "  Starting it would make two main servers. To bring it back as a standby:" >&2
+  echo "  ./standby-velaris.sh retire   then link it from the new main." >&2
+  exit 1
+fi
+# Step 12 (automatic failover): this main stopped itself after losing both the
+# witness and its standby — the standby may have taken over. Its agent lifts
+# this by itself once the witness confirms this server still holds the lease.
+if [ -f "$VELARIS_DIR/.standby/fenced.json" ]; then
+  echo "✗ This server stopped itself: it lost both the failover witness and its standby" >&2
+  echo "  ($VELARIS_DIR/.standby/fenced.json). The standby may have taken over." >&2
+  echo "  Check: ./standby-velaris.sh failover status   (it restarts by itself if it still holds the lease)" >&2
+  exit 1
+fi
 # Scratch files and error logs go to a directory only this user can write. A
 # fixed name under /tmp can be pre-created, or pointed somewhere else, by any
 # other local user before this script writes to it.
@@ -45,6 +71,9 @@ esac
 DB_BACKEND_ARG=""; DB_HOST_ARG=""; DB_PORT_ARG=""; DB_NAME_ARG=""; DB_USER_ARG=""; DB_PASSWORD_ARG=""; NONINTERACTIVE=0
 # --docker-data-root <path|default>  answer Step 2b without prompting
 DOCKER_DATA_ROOT_ARG="${VELARIS_DOCKER_DATA_ROOT:-}"
+# --backup-recipient <age1…>  encrypt backups to this public key; no key pair is
+#                             generated and nothing private is written (unattended installs)
+BACKUP_RECIPIENT_ARG=""
 # The parse loop below consumes $@, so keep a copy: it is needed for the
 # docker-group re-exec and for the --with-key check near the end.
 ORIG_ARGS=("$@")
@@ -65,6 +94,8 @@ while [ $# -gt 0 ]; do
     --non-interactive) NONINTERACTIVE=1; shift ;;
     --docker-data-root)   DOCKER_DATA_ROOT_ARG="${2:-}"; shift 2 ;;
     --docker-data-root=*) DOCKER_DATA_ROOT_ARG="${1#*=}"; shift ;;
+    --backup-recipient)   BACKUP_RECIPIENT_ARG="${2:-}"; shift 2 ;;
+    --backup-recipient=*) BACKUP_RECIPIENT_ARG="${1#*=}"; shift ;;
     *) shift ;;
   esac
 done
@@ -408,10 +439,14 @@ step "Generating infrastructure credentials..."
 
 ENV_FILE="$VELARIS_DIR/.env"
 
-# Create .env from .env.example if it doesn't exist yet
+# Create .env from .env.example if it doesn't exist yet. Creating it is what
+# marks a NEW install: only then may setup switch features on (CLAUDE.md —
+# "turning something ON is an operator's decision, never an update's").
+NEW_ENV=false
 if [ ! -f "$ENV_FILE" ]; then
   cp "$VELARIS_DIR/.env.example" "$ENV_FILE"
   ok "Created .env from .env.example"
+  NEW_ENV=true
 fi
 
 # ── Database backend selection (DB SDK; set-once at install) ─────────────────
@@ -540,6 +575,23 @@ _write_if_missing VELARIS_CASE_PORT                "$VELARIS_CASE_PORT"
 _write_if_missing VELARIS_ANALYTICS_PORT           "$VELARIS_ANALYTICS_PORT"
 _write_if_missing VELARIS_HXGRAPH_PORT             "$VELARIS_HXGRAPH_PORT"
 _write_if_missing VELARIS_HXMIGRATE_PORT           "$VELARIS_HXMIGRATE_PORT"
+_write_if_missing VELARIS_COMMERCE_PORT            "${VELARIS_COMMERCE_PORT:-8207}"
+_write_if_missing VELARIS_PORTAL_PORT              "${VELARIS_PORTAL_PORT:-8205}"
+_write_if_missing VELARIS_USER_PORT                "${VELARIS_USER_PORT:-8206}"
+_write_if_missing VELARIS_WORKER_PORT              "${VELARIS_WORKER_PORT:-8208}"
+# R5e step 9: a new install runs its background jobs in the worker service only.
+# (An existing install never gets this line from an update: unset = case-service
+# keeps running them, as before, and the job leases keep the two from doubling.)
+# Not on a re-run over an existing systemd install without the worker's unit:
+# setup installs units only when case-service's is missing, so there the line
+# would leave NO process running the jobs — the scheduler, mail poll and sealers
+# silently stopped. Everywhere else the worker does run: start-velaris.sh starts
+# it, and a units install below includes its unit.
+_velaris_units="${VELARIS_UNIT_DIR:-/etc/systemd/system}"
+if [ ! -f "$_velaris_units/velaris-case-service.service" ] \
+   || [ -f "$_velaris_units/velaris-worker-service.service" ]; then
+  _write_if_missing VELARIS_CASE_RUN_JOBS          "false"
+fi
 _write_if_missing VELARIS_STUDIO_PORT              "$VELARIS_STUDIO_PORT"
 
 # Workload identity (#18): the gateway injects this and every service refuses a
@@ -548,6 +600,23 @@ _write_if_missing VELARIS_STUDIO_PORT              "$VELARIS_STUDIO_PORT"
 # install with the variable absent simply has the check off, which is why the
 # services treat an empty value as "not configured" rather than failing closed.
 _write_if_missing VELARIS_GATEWAY_IDENTITY_SECRET  "$(openssl rand -hex 32)"
+# The internal service secret (R5e step 7): commerce-service calls case-service's
+# /internal/v1 routes with it, and they refuse without it. Every install has one.
+_write_if_missing VELARIS_INTERNAL_SERVICE_SECRET  "$(openssl rand -hex 32)"
+# The event broker's password. Generated whether or not the event bus is on, so
+# turning the bus on later needs no secret step; the bundled Kafka refuses to
+# start without it (docker-compose.yml, `events`).
+_write_if_missing VELARIS_CASE_EVENT_BUS_PASSWORD  "$(openssl rand -hex 24)"
+# The shared cache (Valkey) — ON for a NEW install, with a password: rate limits
+# shared by every service process, and live updates across processes. A re-run
+# of setup on an existing install changes nothing here (cache stays as it was,
+# with no password); start-velaris.sh adds the password if an operator turns
+# the cache on later.
+if [ "$NEW_ENV" = true ]; then
+  _write_if_missing VELARIS_CASE_REDIS_PASSWORD     "$(openssl rand -hex 24)"
+  _write_if_missing VELARIS_CASE_REDIS_ENABLED      "true"
+  _write_if_missing VELARIS_CASE_RATE_LIMIT_BACKEND "redis"
+fi
 # Internal mTLS stays OFF (see deploy/tls/README.md): everything talks over host
 # loopback behind a loopback-only gateway, so it would encrypt traffic nothing
 # can reach in exchange for a certificate authority to operate.
@@ -633,6 +702,42 @@ else
   sed -i "/^VELARIS_CASE_DATABASE_URL=/d" "$ENV_FILE"
   echo "VELARIS_CASE_DATABASE_URL=postgresql+asyncpg://velaris:${DB_PASS}@localhost:5432/velaris" >> "$ENV_FILE"
   ok "DATABASE_URL set with generated password"
+  # R5d 6a: a NEW install with the bundled PostgreSQL connects through PgBouncer
+  # from day one (the `pooler` compose profile follows this setting). A line
+  # already present — even empty, an operator's "no" — is left as it is. The
+  # direct URL above stays for migrations, backups and admin scripts.
+  if ! grep -q "^VELARIS_CASE_DATABASE_POOLER_URL=" "$ENV_FILE" 2>/dev/null; then
+    echo "VELARIS_CASE_DATABASE_POOLER_URL=postgresql+asyncpg://velaris:${DB_PASS}@localhost:6432/velaris" >> "$ENV_FILE"
+    ok "Connection pooler on (PgBouncer, 127.0.0.1:6432)"
+    # R5e step 7: commerce-service gets its own pool on the same pooler, only
+    # alongside the line above — never on an install that said no to pooling.
+    if ! grep -q "^VELARIS_CASE_COMMERCE_DATABASE_POOLER_URL=" "$ENV_FILE" 2>/dev/null; then
+      echo "VELARIS_CASE_COMMERCE_DATABASE_POOLER_URL=postgresql+asyncpg://velaris:${DB_PASS}@localhost:6432/velaris_commerce" >> "$ENV_FILE"
+    fi
+    # R5e step 8: and portal-service its own, the same way.
+    if ! grep -q "^VELARIS_CASE_PORTAL_DATABASE_POOLER_URL=" "$ENV_FILE" 2>/dev/null; then
+      echo "VELARIS_CASE_PORTAL_DATABASE_POOLER_URL=postgresql+asyncpg://velaris:${DB_PASS}@localhost:6432/velaris_portal" >> "$ENV_FILE"
+    fi
+    # R5e step 10: and user-service its own, the same way.
+    if ! grep -q "^VELARIS_CASE_USER_DATABASE_POOLER_URL=" "$ENV_FILE" 2>/dev/null; then
+      echo "VELARIS_CASE_USER_DATABASE_POOLER_URL=postgresql+asyncpg://velaris:${DB_PASS}@localhost:6432/velaris_user" >> "$ENV_FILE"
+    fi
+    # The platform reaches the pooler over its UNIX socket (deploy/docker-compose/
+    # pooler-socket, the owner's only), not 127.0.0.1:6432: a loopback port is
+    # free while the pooler restarts, and whoever bound it then could ask for the
+    # database password in clear. NEW installs only; an update never sets it.
+    if ! grep -q "^VELARIS_CASE_DATABASE_POOLER_SOCKET=" "$ENV_FILE" 2>/dev/null; then
+      echo "VELARIS_CASE_DATABASE_POOLER_SOCKET=true" >> "$ENV_FILE"
+      ok "The platform reaches the pooler through its socket (owner only)"
+    fi
+  fi
+  # Query statistics (pg_stat_statements) for HxDBManager's slow queries and
+  # index advisor. NEW installs only; an update never sets it, and a line
+  # already present — even empty — is left as it is (scripts/db-query-stats.sh).
+  if ! grep -q "^VELARIS_DB_QUERY_STATS=" "$ENV_FILE" 2>/dev/null; then
+    echo "VELARIS_DB_QUERY_STATS=true" >> "$ENV_FILE"
+    ok "Query statistics on (pg_stat_statements)"
+  fi
 fi
 
 # Document storage lives inside the install dir (no root, no /var/lib perms needed).
@@ -659,6 +764,15 @@ set -o allexport; source "$ENV_FILE"; set +o allexport
 # only where it already exists) — see the file for the rule.
 # shellcheck source=/dev/null
 [ -f "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh" ] && . "$VELARIS_DIR/deploy/docker-compose/compose-profiles.sh"
+# Database calls go through deploy/external-services.sh (sourced above with the
+# compose profiles). Without that file — a partial copy — the bundled calls this
+# script always made.
+if ! type velaris_psql >/dev/null 2>&1; then
+  velaris_is_external() { return 1; }
+  velaris_psql()        { docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"; }
+  velaris_pg_isready()  { docker exec "$DB_CONTAINER" pg_isready -h 127.0.0.1 -U "$DB_USER" -q; }
+  velaris_pg_url()      { printf '%s' "${VELARIS_CASE_DATABASE_URL:-}"; }
+fi
 
 # ── Step 2: Docker group ──────────────────────────────────────────
 step "Step 2/9 — Checking Docker group membership..."
@@ -763,7 +877,35 @@ fi
 # ── Step 3: uv workspace sync ─────────────────────────────────────
 step "Step 3/9 — Syncing uv workspace..."
 cd "$VELARIS_DIR"
-quiet "uv sync" uv sync --all-packages || uv sync --all-packages 2>&1 | tail -5
+# Re-running setup on an existing box must not prune extras it already uses
+# (`uv sync` is exact). The event bus client is kept whenever the bus is on
+# (compose-profiles.sh, sourced above) or the library is already present.
+_SETUP_EXTRAS=""
+uv run python -c "import faster_whisper" >/dev/null 2>&1 && _SETUP_EXTRAS="$_SETUP_EXTRAS --extra intelligence"
+uv run python -c "import av" >/dev/null 2>&1 && _SETUP_EXTRAS="$_SETUP_EXTRAS --extra kyc"
+# The MySQL/MariaDB driver (aiomysql + pymysql) is an extra: without it a
+# MySQL/MariaDB install cannot reach its own database, and `uv sync` (exact)
+# would remove one installed by hand. Fixed 2026-10-16 — it was never installed.
+[ "${DB_FAMILY:-postgresql}" = "mysql" ] && _SETUP_EXTRAS="$_SETUP_EXTRAS --extra mysql"
+if [ "${VELARIS_EVENT_BROKER_ACTIVE:-false}" = true ] \
+   || uv run python -c "import aiokafka" >/dev/null 2>&1; then
+  _SETUP_EXTRAS="$_SETUP_EXTRAS --extra events"
+fi
+# shellcheck disable=SC2086
+quiet "uv sync" uv sync --all-packages $_SETUP_EXTRAS || uv sync --all-packages $_SETUP_EXTRAS 2>&1 | tail -5
+
+# Backup key (docs/Future/Done/backup-restore-design.md §9). Every install gets one.
+# Only the PUBLIC key goes to .env (pushed to OpenBao with the rest in Step 5b);
+# a generated PRIVATE key goes only into velaris-install-report.md (0600), with
+# instructions to copy it off this server and then run
+# ./backup-velaris.sh --forget-private-key. --backup-recipient skips the pair.
+_bk_args=(ensure-key --no-push)
+[ -n "$BACKUP_RECIPIENT_ARG" ] && _bk_args+=(--recipient "$BACKUP_RECIPIENT_ARG")
+if "$VELARIS_DIR/.venv/bin/python" "$VELARIS_DIR/scripts/backup/velaris_backup.py" "${_bk_args[@]}"; then
+  ok "Backup key ready"
+else
+  warn "Backup key not set — backups stay database-only and unencrypted until: ./backup-velaris.sh --ensure-key"
+fi
 ok "uv workspace synced"
 
 # ── Step 4: Studio npm install ────────────────────────────────────
@@ -799,7 +941,13 @@ fi
 step "Step 5/9 — Pulling Docker images..."
 COMPOSE_FILE="$VELARIS_DIR/deploy/docker-compose/docker-compose.yml"
 if docker info &>/dev/null 2>&1; then
-  docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" pull 2>&1 | grep -E "Pull|pull|already|Digest" || true
+  # The bundled MinIO (a re-run on a host that already has it) is left out: its
+  # images are gone from Docker Hub and one failed image cancels the whole pull.
+  # Unreadable service list = pull everything, as before.
+  _pull_services=()
+  while IFS= read -r _svc; do if [ -n "$_svc" ]; then _pull_services+=("$_svc"); fi; done < <(
+    docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" config --services 2>/dev/null | grep -vxE 'minio|minio-init' || true)
+  docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" pull ${_pull_services[@]+"${_pull_services[@]}"} 2>&1 | grep -E "Pull|pull|already|Digest" || true
   ok "Docker images up to date"
 else
   warn "Docker not accessible — skipping image pull."
@@ -815,6 +963,24 @@ if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
   step "Step 5b — Bootstrapping OpenBao secrets..."
   INIT_FILE="$VELARIS_DIR/deploy/openbao/.bao-init.json"
 
+  # Every secrets-*.sh needs jq, and nothing installed it: on a machine without
+  # it the init failed and setup went on with no vault (R5b drill, 2026-10-30).
+  # Installed only here — OpenBao is optional, so jq is not in deploy/deps
+  # (the updater halts on anything missing from that list).
+  if ! command -v jq >/dev/null 2>&1; then
+    sudo apt-get "${APT_PROGRESS[@]}" install -y jq || warn "Could not install jq — OpenBao's scripts need it"
+  fi
+
+  # One-time move of file storage to raft (OpenBao 2.7 has no file backend),
+  # before OpenBao starts. If it fails, OpenBao comes up EMPTY — so a failed
+  # migration must never be followed by an init, which would mint a second,
+  # unrelated vault over the real one's place.
+  _bao_migrate_ok=1
+  if ! "$VELARIS_DIR/scripts/openbao-storage-migrate.sh"; then
+    _bao_migrate_ok=0
+    warn "OpenBao storage migration failed — OpenBao will not be initialised by this run"
+  fi
+
   docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d openbao 2>/dev/null \
     || warn "Could not start the OpenBao container"
 
@@ -822,12 +988,12 @@ if [ -f "$VELARIS_DIR/deploy/openbao/enabled" ]; then
   BAO_HEALTH="000"
   for i in $(seq 1 15); do
     BAO_HEALTH=$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
-      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" 2>/dev/null || echo "000")
+      "http://127.0.0.1:8350/v1/sys/health?sealedcode=472&uninitcode=471" 2>/dev/null || true)
     [ "$BAO_HEALTH" != "000" ] && break
     sleep 1
   done
 
-  if [ ! -f "$INIT_FILE" ] && [ "$BAO_HEALTH" = "471" ]; then
+  if [ ! -f "$INIT_FILE" ] && [ "$BAO_HEALTH" = "471" ] && [ "$_bao_migrate_ok" = 1 ]; then
     # Fresh OpenBao — one-time init: writes the keyfile, unseals, enables KV + AppRole.
     if "$VELARIS_DIR/scripts/secrets-init.sh"; then ok "OpenBao initialised"; else warn "OpenBao init failed — continuing"; fi
   else
@@ -859,9 +1025,15 @@ if [ "$DB_FAMILY" = "mysql" ]; then
   MY_USER="${SEL_DB_USER:-$(_yaml_get db_user)}"; MY_USER="${MY_USER:-velaris}"
   MY_PASS=$(grep "^VELARIS_DB_PASSWORD=" "$ENV_FILE" | cut -d= -f2)
   # The mysql:8 client speaks to both MySQL 8 and MariaDB 10.6+/11 servers.
+  # TLS when VELARIS_CASE_DATABASE_URL names ?ssl_ca= (deploy/external-services.sh).
+  _MY_TLS_MOUNTS=(); _MY_TLS_FLAGS=()
+  if type velaris_mysql_tls_mounts >/dev/null 2>&1; then
+    mapfile -t _MY_TLS_MOUNTS < <(velaris_mysql_tls_mounts)
+    mapfile -t _MY_TLS_FLAGS < <(velaris_mysql_tls_flags)
+  fi
   mysql_client() {
-    docker run --rm -i --network host -e MYSQL_PWD="$MY_PASS" mysql:8 \
-      mysql --connect-timeout=10 -h "$MY_HOST" -P "$MY_PORT" -u "$MY_USER" "$@"
+    MYSQL_PWD="$MY_PASS" docker run --rm -i --network host -e MYSQL_PWD "${_MY_TLS_MOUNTS[@]}" mysql:8.4.11 \
+      mysql --connect-timeout=10 -h "$MY_HOST" -P "$MY_PORT" -u "$MY_USER" "${_MY_TLS_FLAGS[@]}" "$@"
   }
 
   step "Step 7/9 — Connecting to MySQL ($MY_HOST:$MY_PORT)..."
@@ -909,14 +1081,21 @@ DB_NAME="velaris"
 
 # Do NOT silence these — a failure here is the whole reason the next loop
 # times out, and hiding it leaves the operator with "not ready" and no cause.
+# deploy/tls/certs before Docker can create it as root (the gateway mounts it).
+# shellcheck source=deploy/tls/certs-dir.sh
+[ -f "$VELARIS_DIR/deploy/tls/certs-dir.sh" ] && . "$VELARIS_DIR/deploy/tls/certs-dir.sh" && velaris_tls_certs_dir "$VELARIS_DIR"
 DB_UP_LOG=$(mktemp)
-if ! docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d velaris-db > "$DB_UP_LOG" 2>&1; then
+# A database on another server (VELARIS_EXTERNAL_SERVICES=database) is not ours
+# to start, and must be secured: refused here, before anything is written to it.
+if velaris_is_external database; then
+  velaris_external_check || exit 1
+elif ! docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d velaris-db > "$DB_UP_LOG" 2>&1; then
   docker compose -f "$COMPOSE_FILE" --env-file "$VELARIS_DIR/.env" up -d >> "$DB_UP_LOG" 2>&1 || true
 fi
 
 echo "  Waiting for PostgreSQL..."
 for i in $(seq 1 20); do
-  if docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -q 2>/dev/null; then
+  if velaris_pg_isready 2>/dev/null; then
     ok "PostgreSQL ready"; break
   fi
   if [ "$i" -eq 20 ]; then
@@ -937,17 +1116,23 @@ for i in $(seq 1 20); do
   fi
   sleep 1
 done
+# Query statistics: loads pg_stat_statements when VELARIS_DB_QUERY_STATS says
+# so (one database restart, now, before anything uses it). Unset = untouched.
+"$VELARIS_DIR/scripts/db-query-stats.sh" || warn "Query statistics not applied — run ./scripts/db-query-stats.sh later"
 rm -f "$DB_UP_LOG"
 
-# Sync DB user password to match .env (prevents auth failures on TCP connections)
+# Sync DB user password to match .env (prevents auth failures on TCP connections).
+# Bundled database only: an external server's credentials are its owner's.
+if ! velaris_is_external database; then
 docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
   -c "ALTER USER ${DB_USER} PASSWORD '${VELARIS_DB_PASSWORD}';" 2>/dev/null \
   && ok "DB user password synced" || warn "Could not sync DB password — continuing"
+fi
 
 # ── Step 8: Run migrations (including 071_superadmin) ─────────────
 step "Step 8/9 — Running database migrations..."
 
-docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q <<'SQL'
+velaris_psql -q <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename   TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -955,11 +1140,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 SQL
 
 APPLIED=0; SKIPPED=0
+RELEASE_SEED_NEW=false   # set when THIS run created 076's release rows (Step 8c)
 
+# What is already applied, read ONCE: one query, not one per file — against a
+# database on another server each query is a client container (~1 s).
+_APPLIED_MIGRATIONS="$(velaris_psql -tAq -c "SELECT filename FROM schema_migrations;" </dev/null 2>/dev/null || true)"
 for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -name "*.sql" | sort); do
   filename="$(basename "$migration_file")"
-  EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-    -c "SELECT 1 FROM schema_migrations WHERE filename='$filename';" 2>/dev/null || echo "")
+  EXISTS=""; grep -qxF "$filename" <<<"$_APPLIED_MIGRATIONS" && EXISTS=1
   if [ "$EXISTS" = "1" ]; then
     SKIPPED=$((SKIPPED + 1)); continue
   fi
@@ -968,10 +1156,11 @@ for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -n
   # remaining statements, exits 0, and the file below is recorded as applied —
   # so a migration whose statements were rejected is marked done and never
   # runs again. Migration 080 did exactly that on every fresh install.
-  if docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
+  if velaris_psql -q \
       -v ON_ERROR_STOP=1 < "$migration_file" 2>"$VELARIS_SCRATCH/migration_err.log"; then
-    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q \
-      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;"
+    velaris_psql -q \
+      -c "INSERT INTO schema_migrations(filename) VALUES('$filename') ON CONFLICT DO NOTHING;" </dev/null
+    if [ "$filename" = "076_scheduled_releases.sql" ]; then RELEASE_SEED_NEW=true; fi
     green "✓"; APPLIED=$((APPLIED + 1))
   else
     red "FAILED"; cat "$VELARIS_SCRATCH/migration_err.log"
@@ -981,6 +1170,34 @@ for migration_file in $(find "$VELARIS_DIR/migrations/postgresql" -maxdepth 1 -n
   fi
 done
 green "  ✓ Migrations: $APPLIED applied, $SKIPPED skipped"
+
+# ── Step 8c: Marketplace + Customer Accounts on for a NEW database ─
+# Migration 076 seeds both as an unpublished draft, and the release manifest
+# never switches on a row that exists and is off — so on every fresh PostgreSQL
+# install Marketplace stayed hidden until a superadmin called the publish API,
+# which no Studio screen offers. (MySQL/MariaDB have no seed row; their manifest
+# inserts both released.)
+#
+# Only when THIS run applied 076: the rows are this install's own, created
+# seconds ago. A re-run of setup, and every update, finds 076 already recorded
+# and changes nothing — an existing install that never published keeps both
+# off, exactly as before. The WHERE clause also requires the untouched seed
+# state (draft, never released), so a row anyone has touched is left alone.
+# The manifest then advances `enabled` to the shipped version on first start.
+if [ "$RELEASE_SEED_NEW" = true ]; then
+  if velaris_psql -q -v ON_ERROR_STOP=1 </dev/null -c "
+      UPDATE scheduled_releases
+         SET enabled = COALESCE(version, 'v1.0.0'), status = 'released',
+             released_at = NOW(), updated_at = NOW()
+       WHERE feature_key IN ('marketplace', 'customer_accounts')
+         AND status = 'draft' AND enabled IS NULL AND released_at IS NULL;" \
+      2>"$VELARIS_SCRATCH/release_seed_err.log"; then
+    ok "Marketplace and Customer Accounts released for this new install"
+  else
+    warn "Could not release Marketplace/Customer Accounts — a superadmin can: POST /api/v1/releases/{id}/publish"
+    head -3 "$VELARIS_SCRATCH/release_seed_err.log"
+  fi
+fi
 fi
 
 # ── Step 8b: AI provider ──────────────────────────────────────────
@@ -1129,8 +1346,8 @@ if [ "$DB_FAMILY" = "mysql" ]; then
   SUPERADMIN_EXISTS=$(mysql_client "$MY_NAME" -N \
     -e "SELECT COUNT(*) FROM velaris_users WHERE is_superadmin = TRUE;" 2>/dev/null || echo "0")
 else
-  SUPERADMIN_EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAq \
-    -c "SELECT COUNT(*) FROM velaris_users WHERE is_superadmin = TRUE;" 2>/dev/null || echo "0")
+  SUPERADMIN_EXISTS=$(velaris_psql -tAq \
+    -c "SELECT COUNT(*) FROM velaris_users WHERE is_superadmin = TRUE;" </dev/null 2>/dev/null || echo "0")
 fi
 
 if [ "$SUPERADMIN_EXISTS" = "1" ]; then
@@ -1147,8 +1364,11 @@ else
     # Install script dependencies
     quiet "uv pip install" uv pip install bcrypt httpx psycopg2-binary cryptography --quiet
 
-    # Run the interactive Python setup
-    DATABASE_URL="postgresql://velaris:${VELARIS_DB_PASSWORD:-velaris}@localhost:5432/velaris" \
+    # Run the interactive Python setup. A database on another server: the
+    # platform's own URL (TLS read from VELARIS_CASE_DATABASE_URL by the script).
+    _SA_URL="postgresql://velaris:${VELARIS_DB_PASSWORD:-velaris}@localhost:5432/velaris"
+    velaris_is_external database && _SA_URL="$(velaris_pg_url)"
+    DATABASE_URL="$_SA_URL" \
     uv run python "$VELARIS_DIR/scripts/setup_superadmin.py" $SUPERADMIN_KEY_MODE
   fi
 fi
@@ -1223,7 +1443,39 @@ else
       # too, otherwise the platform is "installed and enabled" but down until
       # the next reboot — and the operator reaches for start-velaris.sh, which
       # would then double-bind the ports at the next boot.
-      sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio 2>/dev/null || true
+      # The units run the services, not the containers: until now only the
+      # database had been started (Step 7), so the gateway, cache and pooler
+      # never came up and every unit waited on them (found on a clean box,
+      # 2026-10-19). Bring the stack up as start-velaris.sh does; after this,
+      # `restart: unless-stopped` brings it back at every boot.
+      # A list that cannot be read starts nothing (never "everything", which
+      # would bring back containers of parts that run on other servers).
+      _UP_SVCS="" _UP_OK=1
+      if type velaris_compose_up_services >/dev/null 2>&1; then
+        _UP_SVCS="$(velaris_compose_up_services "$COMPOSE_FILE" "$ENV_FILE")" || _UP_OK=0
+      fi
+      # Up to three tries: an image pull that drops mid-download (a slow or
+      # flaky network) usually completes on the next. And if it still fails,
+      # the command printed must be the one that works — with the profiles and
+      # the services: without `--profile pooler` the pooler never starts and
+      # every unit waits on it for ever (found on a clean box, 2026-10-22). Not
+      # start-velaris.sh: the units are already installed and would collide.
+      _UP_DONE=0
+      if [ "$_UP_OK" = 1 ]; then
+        for _try in 1 2 3; do
+          # shellcheck disable=SC2086
+          if docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d $_UP_SVCS >/dev/null 2>&1; then
+            _UP_DONE=1; break
+          fi
+          [ "$_try" -lt 3 ] && { warn "Starting the containers failed (try $_try of 3) — retrying in 10s"; sleep 10; }
+        done
+      fi
+      if [ "$_UP_DONE" != 1 ]; then
+        warn "Containers not all started. Fix the cause (often the network), then run:"
+        echo "      COMPOSE_PROFILES=\"${COMPOSE_PROFILES:-}\" docker compose -f $COMPOSE_FILE --env-file $ENV_FILE up -d $_UP_SVCS"
+        echo "    The services start by themselves once the containers are up."
+      fi
+      sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio 2>/dev/null || true
       SYSTEMD_MANAGED=1
       _UNITS_INSTALLED_NOW=1
       ok "systemd units installed, enabled and started"
@@ -1264,6 +1516,23 @@ else
     else
       echo "    Skipped. Updates approved in Studio will wait until you run"
       echo "    ./update-velaris.sh --auto, or install the agent with --install-timer."
+    fi
+    echo ""
+  fi
+
+  # The daily backup timer (docs/Future/Done/backup-restore-design.md §5). Offered on
+  # a NEW install (.env created by this run) or to a person at a terminal —
+  # never on an unattended re-run over an existing install, and never by an
+  # update: a schedule is the operator's decision.
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] \
+     && [ ! -f /etc/systemd/system/velaris-backup.timer ] \
+     && { [ "${NEW_ENV:-false}" = true ] || { [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ]; }; }; then
+    if ask "Back up this install every day at 02:00 (encrypted; see velaris-install-report.md)?"; then
+      sudo "$VELARIS_DIR/deploy/systemd/install-backup-timer.sh" \
+        || warn "Backup timer not installed — later: sudo ./deploy/systemd/install-backup-timer.sh"
+    else
+      echo "    Skipped. Back up by hand with ./backup-velaris.sh, or install the timer later:"
+      echo "    sudo ./deploy/systemd/install-backup-timer.sh"
     fi
     echo ""
   fi

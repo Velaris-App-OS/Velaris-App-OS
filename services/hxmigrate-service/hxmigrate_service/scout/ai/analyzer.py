@@ -107,7 +107,7 @@ async def generate_helix_code(
     model: str = "",
     ollama_url: str = "",
 ) -> str:
-    """Generate HELIX-equivalent Python code using the unified AI backend."""
+    """Generate Velaris-equivalent Python code using the unified AI backend."""
     if not await check_ai_available():
         logger.info("AI backend unavailable — using heuristic code generation")
         return _heuristic_generate_code(analysis, artifact_type)

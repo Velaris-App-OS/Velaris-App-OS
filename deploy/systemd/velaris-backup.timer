@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Velaris backup (02:00, ±15 min)
+Documentation=file://__VELARIS_DIR__/docs/Future/Done/backup-restore-design.md
+
+[Timer]
+# Daily. At most 24 h of data lost (Nov_TODO R5: the November target).
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=15m
+# A box that was off at 02:00 takes the missed backup when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

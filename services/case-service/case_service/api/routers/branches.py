@@ -1,6 +1,6 @@
 """P60 HxBranch v2 — Artifact Version Control & Live Environment Sync.
 
-Branches let developers pull Helix artifacts (case types, forms,
+Branches let developers pull Velaris artifacts (case types, forms,
 integrations) or full app packages from any registered environment
 (staging, UAT, etc.) back to dev for review and merge into main.
 
@@ -248,7 +248,7 @@ def _detect_conflict(base_snapshot: dict, current_main: dict) -> bool:
     return chk(base_snapshot) != chk(current_main)
 
 async def _fetch_remote(env: EnvironmentRegistryModel, path: str) -> Any:
-    """Make an authenticated GET to a remote Helix environment."""
+    """Make an authenticated GET to a remote Velaris environment."""
     if not env.url:
         raise coded(400, BRANCH_ENV_400, f"Environment '{env.label}' has no URL configured.")
     token = _decrypt_token(env)
@@ -321,6 +321,11 @@ async def _apply_artifact_to_main(session: AsyncSession, artifact_type: str, art
         if not f:
             raise coded(404, BRANCH_ARTIFACT_404, f"Form {artifact_id} not found in dev — cannot merge.")
         if "definition_json" in content:
+            # Embeds from approved sites only, as an ordinary save (2026-11-04).
+            from velaris_shared.forms.embed import form_embed_problem
+            problem = await form_embed_problem(session, f.tenant_id, content["definition_json"])
+            if problem:
+                raise HTTPException(422, f"Form {f.name}: {problem}")
             f.definition_json = content["definition_json"]
         f.updated_at = now
         return
@@ -342,6 +347,12 @@ async def _apply_artifact_to_main(session: AsyncSession, artifact_type: str, art
             raise coded(404, BRANCH_ARTIFACT_404, f"Connector {artifact_id} not found in dev — cannot merge.")
         # NEVER write credentials — that would wipe encrypted live secrets
         if "config" in content:
+            # The same checks as the connector API (2026-11-04).
+            from velaris_shared.hxbridge.security import check_connector_config
+            try:
+                await check_connector_config(session, c.connector_type, c.tenant_id, content["config"])
+            except ValueError as exc:
+                raise HTTPException(400, f"Connector {c.name}: {exc}")
             c.config = content["config"]
         if "name" in content:
             c.name = content["name"]
@@ -997,7 +1008,7 @@ async def test_env_connection(
     session: AsyncSession = Depends(get_session),
     _:       AuthenticatedUser = Depends(hxguard.guard("deploy.environments.read")),
 ):
-    """Live-test the connection to a remote Helix environment."""
+    """Live-test the connection to a remote Velaris environment."""
     env = await _get_env_or_404(session, env_id)
     if not env.url:
         raise coded(400, BRANCH_ENV_400, "Environment has no URL configured.")
@@ -1023,6 +1034,6 @@ async def test_env_connection(
             "message": "Connected" if resp.is_success else f"HTTP {resp.status_code}",
         }
     except httpx.ConnectError:
-        return {"ok": False, "latency_ms": 0, "message": "Connection refused — is the remote Helix running?"}
+        return {"ok": False, "latency_ms": 0, "message": "Connection refused — is the remote Velaris running?"}
     except httpx.TimeoutException:
         return {"ok": False, "latency_ms": 10000, "message": "Timed out after 10s"}

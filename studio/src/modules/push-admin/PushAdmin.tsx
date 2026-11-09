@@ -1,4 +1,4 @@
-// HELIX P27 — Push Notifications Admin
+// Velaris P27 — Push Notifications Admin
 import React, { useEffect, useState } from "react";
 import { getAccessToken } from "@/auth/tokenManager";
 import { Tabs } from "@shared/components";

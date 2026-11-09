@@ -90,10 +90,14 @@ def _tenant_user_ids(scope: _Scope):
 # ── Collectors ───────────────────────────────────────────────────────
 
 async def _collect_audit_integrity(session: AsyncSession, scope: _Scope | None = None) -> dict:
-    verify = await verify_chain(session)
     if scope is not None:
         # One chain per install. A tenant is told whether it verifies; the
         # install's row counts and the broken rows' ids are not its to read.
+        # A shared result at most 5 min old (2026-11-06): any tenant admin can
+        # generate packs, and a full verification reads the whole install.
+        from case_service.compliance.audit_chain import verify_chain_recent
+
+        verify = await verify_chain_recent(session)
         return {
             "control": "Audit log integrity",
             "verification": {
@@ -101,8 +105,10 @@ async def _collect_audit_integrity(session: AsyncSession, scope: _Scope | None =
                 "chain_length": verify["chain_length"],
                 "breaks_count": len(verify["breaks"]),
                 "pruned_by_retention": verify.get("pruned", 0),
+                "verified_at": verify.get("verified_at"),
             },
         }
+    verify = await verify_chain(session)
     status = await chain_status(session)
     return {
         "control": "Audit log integrity",
@@ -137,17 +143,20 @@ async def _collect_security_events(
         in_period.append(SecurityEventModel.user_id.in_(
             select(UserDirectoryModel.user_id).where(_tenant_user_ids(scope))))
 
-    q_total = select(func.count()).select_from(SecurityEventModel).where(*in_period)
+    # SUM(repeat_count), not COUNT(*): one row can stand for many refused
+    # repeats (migration 231). Every older row is 1.
+    n = func.coalesce(func.sum(SecurityEventModel.repeat_count), 0)
+    q_total = select(n).select_from(SecurityEventModel).where(*in_period)
     total = (await session.execute(q_total)).scalar_one()
 
-    q_failed = select(func.count()).select_from(SecurityEventModel).where(
+    q_failed = select(n).select_from(SecurityEventModel).where(
         *in_period,
         SecurityEventModel.outcome.in_(["denied", "error", "failure"]),
     )
     failed = (await session.execute(q_failed)).scalar_one()
 
     q_by_type = select(
-        SecurityEventModel.event_type, func.count().label("c"),
+        SecurityEventModel.event_type, n.label("c"),
     ).where(*in_period).group_by(SecurityEventModel.event_type)
     by_type = {r.event_type: int(r.c) for r in (await session.execute(q_by_type)).all()}
 

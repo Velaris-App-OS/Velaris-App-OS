@@ -118,8 +118,8 @@ async def resolve_connector(
     q = select(ConnectorRegistryModel).where(
         ConnectorRegistryModel.connector_type.in_(MEETING_CONNECTOR_TYPES),
         ConnectorRegistryModel.enabled == True,  # noqa: E712
-        # NULL tenant = platform-shared connector (hxbridge registers them
-        # without a tenant); a tenant-scoped row still only matches its tenant.
+        # NULL tenant = the operator's connector — kept below for the default
+        # tenant only (2026-11-04); a tenant-scoped row only matches its tenant.
         or_(ConnectorRegistryModel.tenant_id == tenant_id,
             ConnectorRegistryModel.tenant_id.is_(None)),
     )
@@ -138,9 +138,15 @@ async def resolve_connector(
         elif cfg.get("provider"):
             return await resolve_connector(session, tenant_id, provider=cfg["provider"])
 
-    rows = (await session.execute(q.limit(2))).scalars().all()
+    rows = (await session.execute(q.limit(5))).scalars().all()
+    # 2026-11-04: a platform-shared (no tenant) meeting connector carries the
+    # operator's own meeting account — the default tenant's alone, as every
+    # operator connector; and a tenant's may reach only public targets.
+    from velaris_shared.hxbridge.security import check_connector_targets, usable_by
+    rows = [r for r in rows if await usable_by(session, r, tenant_id)]
     if not rows:
         raise ValueError("No enabled meeting connector configured for this tenant")
+    await check_connector_targets(session, rows[0].tenant_id, rows[0].config)
     return rows[0]
 
 
@@ -946,6 +952,8 @@ async def list_providers(session: AsyncSession, tenant_id: str) -> list[dict]:
                 ConnectorRegistryModel.tenant_id.is_(None)),
         )
     )).scalars().all()
+    from velaris_shared.hxbridge.security import usable_by
+    rows = [r for r in rows if await usable_by(session, r, tenant_id)]   # as resolve_connector
     cfg_default = (await tenant_meet_settings(session, tenant_id)).get("provider")
     return [
         {

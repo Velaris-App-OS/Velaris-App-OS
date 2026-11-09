@@ -11,9 +11,14 @@ async def poll_one_account(account, session_factory, service) -> int:
     if not account.imap_host or not account.imap_username:
         return 0
     from .imap_client import fetch_new_messages
+    from .egress import connect_host
     try:
+        # imaplib does not verify the server's certificate, so a tenant's
+        # mailbox is always connected by its checked address (2026-11-04).
+        imap_host = await connect_host(account.imap_host, account.tenant_id,
+                                       verified_tls=False, session_factory=session_factory)
         raws = await fetch_new_messages(
-            host=account.imap_host, port=account.imap_port,
+            host=imap_host, port=account.imap_port,
             username=account.imap_username, password=account.imap_password or "",
             folder=account.imap_folder, use_ssl=account.imap_use_ssl,
         )
@@ -82,6 +87,10 @@ class EmailPollLoop:
                         EmailAccountModel.is_active.is_(True),
                     )
                     accounts = (await session.execute(q)).scalars().all()
+                    # An archived (offboarded) tenant's mailboxes are not read (R7).
+                    from velaris_shared.tenancy.identity import tenant_closed
+                    accounts = [a for a in accounts
+                                if not await tenant_closed(session, a.tenant_id)]
                 for account in accounts:
                     if self._stop.is_set():
                         break
@@ -103,6 +112,7 @@ _loop: EmailPollLoop | None = None
 def get_poll_loop() -> EmailPollLoop:
     global _loop
     if _loop is None:
-        interval = int(os.environ.get("VELARIS_CASE_EMAIL_POLL_INTERVAL", "15"))
+        from velaris_shared.config import env_int
+        interval = env_int("VELARIS_CASE_EMAIL_POLL_INTERVAL", 15)
         _loop = EmailPollLoop(default_interval=interval)
     return _loop

@@ -1,4 +1,4 @@
-// HELIX P36 — Compliance Dashboard
+// Velaris P36 — Compliance Dashboard
 //
 // Five surfaces behind one `/api/v1/compliance` router: the original audit
 // chain + evidence packs, plus the §8 modules (HxConsent, HxPrivacy,
@@ -11,6 +11,7 @@ import LedgerPanel from "./LedgerPanel";
 import LegalHoldsPanel from "@/modules/case-manager/LegalHold";
 import PrivacyPanel from "./PrivacyPanel";
 import { getAccessToken } from "@/auth/tokenManager";
+import { usePermissions } from "@/auth/PermissionsContext";
 import { Tabs } from "@shared/components";
 
 const TABS = [
@@ -69,6 +70,9 @@ async function apiJSON<T>(url: string, opts: RequestInit = {}): Promise<T> {
 }
 
 export default function ComplianceDashboard() {
+  // The audit chain is one chain for the whole install: its panel is the
+  // platform operator's (the server refuses a tenant admin since 2026-11-06).
+  const { isOperator } = usePermissions();
   const [status, setStatus] = useState<ChainStatus | null>(null);
   const [verify, setVerify] = useState<VerifyResult | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
@@ -84,7 +88,7 @@ export default function ComplianceDashboard() {
     setErr(null);
     try {
       const [st, rep] = await Promise.all([
-        apiJSON<ChainStatus>("/api/v1/compliance/audit/status"),
+        isOperator ? apiJSON<ChainStatus>("/api/v1/compliance/audit/status") : Promise.resolve(null),
         apiJSON<Report[]>("/api/v1/compliance/reports?limit=20"),
       ]);
       setStatus(st);
@@ -93,7 +97,7 @@ export default function ComplianceDashboard() {
   }
 
   // Only the audit tab's data is fetched on mount; each panel loads its own.
-  useEffect(() => { if (tab === "audit") loadAll(); }, [tab]);
+  useEffect(() => { if (tab === "audit") loadAll(); }, [tab, isOperator]);
 
   async function seal() {
     setBusy("seal"); setErr(null);
@@ -162,15 +166,22 @@ export default function ComplianceDashboard() {
       <section style={card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <h2 style={h2}>Audit Chain Integrity</h2>
-          <div style={{ display: "flex", gap: 6 }}>
+          {isOperator && <div style={{ display: "flex", gap: 6 }}>
             <button onClick={seal} disabled={!!busy} style={btn()}>
               {busy === "seal" ? "Sealing…" : "Seal new entries"}
             </button>
             <button onClick={runVerify} disabled={!!busy} style={{ ...btn(), background: "var(--accent)", color: "white" }}>
               {busy === "verify" ? "Verifying…" : "Verify chain"}
             </button>
-          </div>
+          </div>}
         </div>
+
+        {!isOperator && (
+          <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+            The audit chain covers the whole installation and is checked by the platform operator.
+            Your evidence packs below report whether it verifies.
+          </div>
+        )}
 
         {status && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>

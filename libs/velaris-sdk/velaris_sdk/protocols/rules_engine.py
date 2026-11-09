@@ -1,4 +1,4 @@
-"""HELIX SDK Protocol: Rules Engine.
+"""Velaris SDK Protocol: Rules Engine.
 
 Defines the contract for evaluating business rules against case
 context.  The default implementation lives in ``rules-service``.

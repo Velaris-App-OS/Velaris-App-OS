@@ -5,7 +5,7 @@ Endpoints:
   GET  /importer/jobs              list all import jobs
   GET  /importer/jobs/{id}         job status + progress
   GET  /importer/jobs/{id}/report  full import report JSON
-  GET  /importer/jobs/{id}/result  generated Helix objects (case_types, forms, SQL)
+  GET  /importer/jobs/{id}/result  generated Velaris objects (case_types, forms, SQL)
   DELETE /importer/jobs/{id}       delete a job record
 """
 from __future__ import annotations
@@ -143,7 +143,7 @@ async def get_report(
     return job.report or {}
 
 
-# ── Generated Helix objects ───────────────────────────────────────────────────
+# ── Generated Velaris objects ───────────────────────────────────────────────────
 
 @router.get("/jobs/{job_id}/result")
 async def get_result(
@@ -151,7 +151,7 @@ async def get_result(
     session: AsyncSession = Depends(get_session),
     _: AuthenticatedUser = Depends(hxguard.guard("platform.migration.read")),
 ):
-    """Return the generated Helix objects (case_types, forms, migration SQL)."""
+    """Return the generated Velaris objects (case_types, forms, migration SQL)."""
     job = await _get_or_404(session, job_id)
     if job.status != "complete":
         raise HTTPException(409, f"Job not complete (status: {job.status})")

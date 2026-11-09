@@ -40,19 +40,23 @@ def _platform_routes() -> list[APIRoute]:
     """Every APIRoute the PLATFORM serves, not just this service's.
 
     13c-e moved 80 routes into analytics-service, hxgraph-service and
-    hxmigrate-service. A sweep that kept reading `case_service.main` alone
+    hxmigrate-service; R5e step 7 moved 146 into commerce-service, step 8 52 into portal-service, step 10 75 into user-service. A sweep that kept reading `case_service.main` alone
     would have gone on passing while the routes it was built to watch left its
     field of view — the same shape as the documents hole this file exists for.
-    The gateway serves all four apps behind one prefix, so the sweep covers all
-    four. Importing them is deliberately not wrapped in a try: a service that
+    The gateway serves all seven apps behind one prefix, so the sweep covers all
+    seven. Importing them is deliberately not wrapped in a try: a service that
     cannot be imported must break this test, not shrink it.
     """
     from analytics_service.main import app as analytics_app
+    from commerce_service.main import app as commerce_app
     from hxgraph_service.main import app as hxgraph_app
     from hxmigrate_service.main import app as hxmigrate_app
+    from portal_service.main import app as portal_app      # R5e step 8
+    from user_service.main import app as user_app          # R5e step 10
 
     routes: list[APIRoute] = []
-    for a in (app, analytics_app, hxgraph_app, hxmigrate_app):
+    for a in (app, analytics_app, hxgraph_app, hxmigrate_app, commerce_app, portal_app,
+              user_app):
         routes.extend(r for r in a.routes if isinstance(r, APIRoute))
     return routes
 
@@ -65,6 +69,9 @@ PUBLIC_BY_DESIGN = (
     "/api/v1/status/public",
     "/api/v1/releases/flags",
     "/api/v1/mcp",
+    # 2026-10-29: Studio's Content-Security-Policy reports — browsers send them
+    # with no credentials; capped body and rate, logs no query strings.
+    "/api/v1/csp-reports",
 )
 
 #: Dependency names that establish *some* identity.
@@ -77,6 +84,17 @@ AUTH_DEPS = {
     # every failure, and carries the tenant — so a SCIM route is gated, just not
     # by `get_current_user`.
     "scim_principal",
+    # R5e step 7: case-service's /internal/v1 routes — sibling services only.
+    # Refuses without the install's internal service secret, refuses anything
+    # that came through a proxy, and the gateway never forwards /internal
+    # (tests/test_internal_api.py proves all three).
+    "require_internal_caller",
+    # 2026-11-04: user-service's /internal/v1/demo routes — the website's
+    # registration service only. Refuses without VELARIS_DEMO_PROVISION_SECRET
+    # (valid on these routes and nothing else), refuses anything that came
+    # through a proxy; the gateway never forwards /internal
+    # (user-service/tests/test_demo_tenants.py proves all three).
+    "require_demo_caller",
 }
 
 #: Ungated on purpose, each with the reason it is not a hole. Shrinking this set

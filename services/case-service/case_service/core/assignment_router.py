@@ -116,11 +116,59 @@ async def _resolve_specific_user(
     """
     target = rule.get("target", "unassigned")
     if target and target != "unassigned":
+        # A named person who has been DELETED is not "somebody's decision" any
+        # more: new work would sit on an account nobody can sign in to. It goes
+        # to the rule's fallback (or the default queue), and the rule is flagged
+        # for an administrator to fix (Nov_TODO "User deletion v2", 8).
+        if await _target_deleted(session, str(target)):
+            logger.warning("specific_user: %s was deleted — routing to the fallback", target)
+            await _flag_dead_target(session, str(target), context)
+            if rule.get("fallback_strategy"):
+                return "user", "unassigned"            # resolve_assignment runs the fallback
+            return "queue", rule.get("fallback_target") or "default-queue"
         cover = await _cover_for(session, str(target), context)
+        if cover and await _target_deleted(session, str(cover)):
+            cover = None                               # a deleted cover covers nothing
         if cover:
             logger.info("specific_user: %s is away, assigning cover %s", target, cover)
             return "user", cover
     return "user", target
+
+
+async def _target_deleted(session: AsyncSession, target: str) -> bool:
+    """The named account is deleted (in its grace period) or purged (the
+    deletion ledger names it). An unknown name that was never an account is
+    not "deleted" — it is routed as before."""
+    from sqlalchemy import or_, select as _select
+
+    from velaris_shared.db.models import HelixUserModel
+    from velaris_shared.identity import ledger
+    try:
+        tid = uuid.UUID(target)
+    except ValueError:
+        tid = None
+    conds = [HelixUserModel.username == target]
+    if tid is not None:
+        conds.append(HelixUserModel.id == tid)
+    row = (await session.execute(_select(HelixUserModel.deleted_at).where(or_(*conds)))).first()
+    if row is not None:
+        return row[0] is not None
+    if target in await ledger.purged_ids(session):
+        return True
+    return ledger.name_hash(target) in await ledger.purged_name_hashes(session)
+
+
+async def _flag_dead_target(session: AsyncSession, target: str, context: dict[str, Any]) -> None:
+    try:
+        from velaris_shared.db.security_events import log_security_event
+        await log_security_event(
+            session, event_type="routing_target_deleted", severity="medium",
+            resource_type="assignment_rule", resource_id=str(context.get("case_type_id") or ""),
+            action="route", outcome="fallback",
+            details={"target": target, "case_id": str(context.get("case_id") or ""),
+                     "fix": "this rule names a deleted user — change its target"})
+    except Exception:  # noqa: BLE001 — never fail an assignment over a flag
+        logger.warning("could not flag a rule naming deleted user %s", target, exc_info=True)
 
 
 async def _resolve_role_based(

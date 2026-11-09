@@ -597,7 +597,7 @@ async def require_case(
             # own 404 is more specific, and several routes create on this path.
             raise HTTPException(404, "Case not found")
 
-    mode = (get_settings().hxguard_case_enforcement or "shadow").lower()
+    mode = (get_settings().hxguard_case_enforcement or "enforce").lower()
     if mode == "off":
         return
     subject = subject_from_user(user)
@@ -688,6 +688,19 @@ def guard(action: str):
     return _dep
 
 
+#: Denial records being written (see _log_security_event). Kept so a task is
+#: not collected mid-flight, and so tests and shutdown can wait for them.
+_PENDING_DENY_WRITES: set = set()
+
+
+async def drain_denial_writes() -> None:
+    """Wait for every denial record started so far (tests, shutdown)."""
+    import asyncio
+
+    while _PENDING_DENY_WRITES:
+        await asyncio.gather(*list(_PENDING_DENY_WRITES), return_exceptions=True)
+
+
 async def _log_security_event(
     session: AsyncSession, subject: Subject, action: str,
     resource: dict | None, decision: Decision, event_type: str,
@@ -697,7 +710,25 @@ async def _log_security_event(
 
     Uses its OWN session + commit: a deny raised as HTTP 403 rolls back the
     request transaction, and the audit record must survive that rollback
-    (otherwise HTTP denials would never reach HxShield)."""
+    (otherwise HTTP denials would never reach HxShield).
+
+    Written in the background, not awaited (2026-10-19): the request's own
+    session usually holds a connection in an open transaction by now (the
+    sign-in check reads through it), and waiting here for a SECOND connection
+    is the pattern that deadlocked the pool under load — a flood of refused
+    requests would have done it on purpose."""
+    import asyncio
+
+    task = asyncio.ensure_future(
+        _write_security_event(subject, action, resource, decision, event_type))
+    _PENDING_DENY_WRITES.add(task)
+    task.add_done_callback(_PENDING_DENY_WRITES.discard)
+
+
+async def _write_security_event(
+    subject: Subject, action: str, resource: dict | None,
+    decision: Decision, event_type: str,
+) -> None:
     try:
         from velaris_shared.db.session import get_session_factory
         from velaris_shared.db.security_events import log_security_event

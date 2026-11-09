@@ -1,0 +1,59 @@
+# Velaris default alert set (R7, 2026-10-30). Thresholds and the response to
+# each are in docs/monitoring.md — change both together.
+groups:
+  - name: velaris
+    rules:
+      - alert: VelarisDown
+        expr: up{job="helix-case-service"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "The platform API is not answering"
+          runbook: "docs/monitoring.md#velarisdown"
+
+      - alert: VelarisDependencyDegraded
+        expr: max by (dependency) (velaris_dependency_degraded) == 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.dependency }} is degraded — Studio > Status says why"
+          runbook: "docs/monitoring.md#velarisdependencydegraded"
+
+      - alert: VelarisDatabaseDegraded
+        expr: max(velaris_dependency_degraded{dependency="database"}) == 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "The database is not answering"
+          runbook: "docs/monitoring.md#velarisdatabasedegraded"
+
+      - alert: VelarisServerErrors
+        expr: |
+          sum(rate(helix_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(helix_http_requests_total[5m])), 1e-9) > 0.02
+          and sum(rate(helix_http_requests_total[5m])) > 0.2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 2% of requests are failing with a server error"
+          runbook: "docs/monitoring.md#velarisservererrors"
+
+      - alert: VelarisSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(helix_http_request_duration_seconds_bucket[5m]))) > 1
+          and sum(rate(helix_http_requests_total[5m])) > 0.2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "95% of requests take longer than 1 second"
+          runbook: "docs/monitoring.md#velarisslow"
+
+      - alert: VelarisRateLimited
+        expr: |
+          sum(rate(helix_http_requests_total{status="429"}[5m]))
+            / clamp_min(sum(rate(helix_http_requests_total[5m])), 1e-9) > 0.05
+        for: 10m
+        labels: { severity: info }
+        annotations:
+          summary: "More than 5% of requests are being rate-limited"
+          runbook: "docs/monitoring.md#velarisratelimited"

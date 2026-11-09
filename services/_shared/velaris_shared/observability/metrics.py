@@ -12,12 +12,21 @@ http_requests_total = Counter(
 )
 http_request_duration_seconds = Histogram(
     "helix_http_request_duration_seconds", "HTTP request latency (seconds)",
-    ["method", "path"], registry=registry,
+    # tenant_id (2026-11-04): the signed-in caller's, so a tenant's admin can be
+    # shown its own latencies. A new label; summing over it gives the old series.
+    ["method", "path", "tenant_id"], registry=registry,
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 cases_created_total = Counter(
     "helix_cases_created_total", "Cases created",
     ["tenant_id", "case_type"], registry=registry,
+)
+# R4/R7: 1 while an optional dependency is meant to be on and is not working
+# (case_service/readiness.py), 0 otherwise — off by choice is 0, never an alert.
+# Refreshed by /metrics itself, so every process answers it.
+dependency_degraded = Gauge(
+    "velaris_dependency_degraded", "1 = this dependency is degraded (see Studio > Status)",
+    ["dependency"], registry=registry,
 )
 sla_breaches_total = Counter(
     "helix_sla_breaches_total", "SLA breaches",
@@ -65,6 +74,14 @@ arbiter_legacy_disagreements_total = Counter(
 arbiter_unsealed_decisions = Gauge(
     "helix_arbiter_unsealed_decisions", "Decisions not yet sealed into the chain",
     registry=registry,
+)
+
+# R5d 11b — where opted-in reads ran: replica | main_no_replica | main_own_writes
+# | main_replica_down | main_barrier. A replica that keeps being skipped shows here.
+db_reads_total = Counter(
+    "velaris_db_reads_total",
+    "Opted-in reads by where they ran (R5d read/write split)",
+    ["route"],
 )
 
 active_cases_gauge = Gauge(

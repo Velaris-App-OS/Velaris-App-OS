@@ -1,7 +1,7 @@
 {
   "_comment": "Vendor release channel manifest. 'stable' is what every client install follows — the only channel clients ever use. 'beta' is the vendor's own playground (home server canary); releases soak there first, then the stable pointer moves. Client-side dev/staging/prod rollout is handled by PUO plans (rings), not by channels. Served raw from the repo's manifest_branch.",
-  "stable": "3.1.2",
-  "beta": "3.1.2",
+  "stable": "3.2.0",
+  "beta": "3.2.0",
   "releases": {
     "2.0.0": {
       "notes_url": "https://github.com/Velaris-App-OS/Velaris-App-OS/blob/main/releases/notes/v2.0.0.md",
@@ -52,6 +52,11 @@
       "notes_url": "https://github.com/Velaris-App-OS/Velaris-App-OS/blob/main/releases/notes/v3.1.2.md",
       "security": true,
       "min_upgrade_from": "3.0.0"
+    },
+    "3.2.0": {
+      "notes_url": "https://github.com/Velaris-App-OS/Velaris-App-OS/blob/main/releases/notes/v3.2.0.md",
+      "security": true,
+      "min_upgrade_from": "3.1.2"
     }
   }
 }

@@ -1,6 +1,6 @@
 """Case actions and the configured status set (migration 198).
 
-Design: docs/Future/CASE-ACTIONS-STATUS-DESIGN.md
+Design: docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md
 
 What these tests are actually pinning, beyond "the happy path works":
 

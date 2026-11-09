@@ -23,7 +23,7 @@ from velaris_shared.db.models import HelixUserModel, TenantModel, UserDirectoryM
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 
 @pytest_asyncio.fixture

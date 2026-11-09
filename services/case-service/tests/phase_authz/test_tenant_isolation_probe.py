@@ -35,7 +35,17 @@ from velaris_shared.db.models import Base
 from case_service.main import app
 from case_service.tenancy import identity as tenancy
 from tests.conftest import TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers  # noqa: E402
+from velaris_shared.auth.jwt_handler import create_dev_token
+from velaris_shared.config import get_settings
+
+# (was imported from test_payments_authz.py, which moved to commerce-service)
+def _headers(user_id: str, roles: list[str]) -> dict[str, str]:
+    s = get_settings()
+    token = create_dev_token(user_id=user_id, username=user_id, roles=roles,
+                             secret=s.auth_secret,
+                             private_key=s.auth_rsa_private_key or "")
+    return {"Authorization": f"Bearer {token}"}
+
 
 ACME = uuid.UUID("00000000-0000-0000-0000-00000000acbe")
 EVIL = uuid.UUID("00000000-0000-0000-0000-0000000000e1")
@@ -206,20 +216,51 @@ async def api():
         yield c
 
 
+#: (method, route) in the other services that may answer evil's admin, and why.
+#: Both were in case-service until the commerce split (R5e step 7), where the
+#: main probe's rules already let them pass; this sweep is stricter.
+OTHER_APPS_ALLOWED = {
+    # Install-level, no tenant column: the install's package sources. Adding one
+    # is operator-only (8e); any admin reads the list (tokens are never shown).
+    ("GET", "/api/v1/marketplace/sources"),
+    # The probe offers every table whose name fits `access_group_id`, including
+    # `operator_access_groups` — whose id is not an access group, so resetting a
+    # rule for it is a no-op 200. With another tenant's REAL access group the
+    # path guard answers 404 — pinned in commerce-service's
+    # test_marketplace_access_rules_tenant.py.
+    ("DELETE", "/api/v1/marketplace/access-rules/{access_group_id}"),
+    # user-service (R5e step 10). The login page's list of SSO buttons is
+    # anonymous by design (also allowed in test_probe_lists). The two deletes
+    # answer 204 to ids the probe takes from OTHER tables (checkout / push
+    # tokens, sync field mappings) — a no-op; acme's real SCIM token and group
+    # mapping are answered 404 by the path guard and left untouched. Both routes
+    # are in the main probe too (USER_ROUTES), which checks the row itself.
+    ("GET", "/api/v1/auth/real/sso/providers"),
+    ("DELETE", "/api/v1/scim/tokens/{token_id}"),
+    ("DELETE", "/api/v1/identity/provisioning/group-mappings/{mapping_id}"),
+}
+
+
 def _other_apps():
     from analytics_service.main import app as a2
     from hxgraph_service.main import app as a3
     from hxmigrate_service.main import app as a4
+    from commerce_service.main import app as a5   # R5e step 7
+    from portal_service.main import app as a6     # R5e step 8
+    from user_service.main import app as a7       # R5e step 10
     from velaris_shared.db import session as sess
     from tests.conftest import override_get_session  # type: ignore[attr-defined]
-    for a in (a2, a3, a4):
+    for a in (a2, a3, a4, a5):
         # Only the session. Another test's leftover fake-user override would
         # impersonate `evil` as whoever it faked, and the probe would test that.
         a.dependency_overrides.clear()
         a.dependency_overrides[sess.get_session] = override_get_session
         if hasattr(sess, "get_analytics_session"):
             a.dependency_overrides[sess.get_analytics_session] = override_get_session
-    return [a2, a3, a4]
+    # portal-service and user-service share case-service's override dict
+    # (conftest's gateway): clearing it would clear case-service's too, and its
+    # session is already set.
+    return [a2, a3, a4, a5, a6, a7]
 
 
 async def test_probe_other_apps():
@@ -232,6 +273,11 @@ async def test_probe_other_apps():
         async with AsyncClient(transport=ASGITransport(app=other), base_url="http://test") as c:
             for r in other.routes:
                 if not isinstance(r, APIRoute):
+                    continue
+                # The public portal is anonymous by design (its own session
+                # model) — skipped here as the main probe skips it; the
+                # portal-admin routes are probed.
+                if r.path.startswith("/api/v1/portal/"):
                     continue
                 params = re.findall(r"\{([^}:]+)(?::path)?\}", r.path)
                 if params:
@@ -268,7 +314,7 @@ async def test_probe_other_apps():
     untenanted = ("/api/v1/importer/", "/api/v1/scout", "/api/v1/orchestrator/")
     # `/metrics` counts requests by path — including the ids this probe sent.
     hits = [o for o in out if o[0] == "HIT" and not o[2].startswith(untenanted)
-            and o[2] != "/metrics"]
+            and o[2] != "/metrics" and (o[1], o[2]) not in OTHER_APPS_ALLOWED]
     assert hits == [], hits
 
 
@@ -278,7 +324,10 @@ async def test_probe(api):
     owned = _owned(seeded)
     h = _headers("mallory", ["admin"])
     results, unmapped = [], []
-    routes = [r for r in app.routes if isinstance(r, APIRoute)
+    # user-service's routes too (R5e step 10): they were in this probe while
+    # case-service served them, and `api` reaches them through the test gateway.
+    from user_service.main import app as user_app
+    routes = [r for r in [*app.routes, *user_app.routes] if isinstance(r, APIRoute)
               and re.search(r"\{", r.path)
               and not r.path.startswith(("/api/v1/portal/", "/api/v1/broker/"))]
     order = {"GET": 0, "POST": 1, "PUT": 1, "PATCH": 1, "DELETE": 2}
@@ -349,7 +398,8 @@ async def test_probe_lists(api):
                 markers.add(v)
     h = _headers("mallory", ["admin"])
     hits = []
-    for r in app.routes:
+    from user_service.main import app as user_app      # R5e step 10, as above
+    for r in [*app.routes, *user_app.routes]:
         if not isinstance(r, APIRoute) or "{" in r.path or "GET" not in r.methods:
             continue
         if r.path.startswith(("/api/v1/portal/", "/api/v1/broker/", "/api/v1/storefront/public")):
@@ -371,6 +421,15 @@ async def test_probe_lists(api):
         "/api/v1/auth/real/sso/providers",
         # Platform namespaces (`tenant_key` = platform) are everyone's by design.
         "/api/v1/variables/namespaces",
+        # The operator's Prometheus scrape (per-tenant business metrics). No
+        # tenant reaches it: the gateway answers 404 to any request that came
+        # through a front (2026-11-04), and the service to any forwarded from
+        # outside; this probe calls the app in-process, as a local scraper.
+        "/metrics",
+        # The caller's OWN request spans (2026-11-04: a tenant's admin sees only
+        # spans stamped with its trusted tenant). The ids in them are the ones
+        # this probe made the caller put in its own URLs (test_probe_paths).
+        "/api/v1/observability/traces/recent",
     }
     leaks = [h_ for h_ in hits if h_[2] != ["acme-"] and h_[0] not in ok
              and not h_[0].startswith(UNTENANTED)]
@@ -391,7 +450,7 @@ async def test_no_write_route_accepts_another_tenants_id_in_its_body(api):
     type id, a connector id, an access group, or plainly `"tenant_id": "acme"`
     in the body. Every write route whose body model has such a field is sent
     acme's value by evil's admin, and must refuse."""
-    from case_service.core.tenant_path_guard import CASE, FIELD_RULES, TENANT, USER
+    from velaris_shared.tenancy.path_guard import CASE, FIELD_RULES, TENANT, USER
 
     tenancy.clear_cache()
     seeded = await _seed()
@@ -402,7 +461,18 @@ async def test_no_write_route_accepts_another_tenants_id_in_its_body(api):
     }
     h = _headers("mallory", ["admin"])
     missed, tried = [], 0
-    for r in app.routes:
+    # commerce-service's write routes too (R5e step 7), portal-service's
+    # (R5e step 8 — portal-admin) and user-service's (step 10): all carry the
+    # same guard.
+    others = _other_apps()
+    commerce, portal, user = others[3], others[4], others[5]
+    commerce_client = AsyncClient(transport=ASGITransport(app=commerce), base_url="http://test")
+    portal_client = AsyncClient(transport=ASGITransport(app=portal), base_url="http://test")
+    user_client = AsyncClient(transport=ASGITransport(app=user), base_url="http://test")
+    targets = ([(r, api) for r in app.routes] + [(r, commerce_client) for r in commerce.routes]
+               + [(r, portal_client) for r in portal.routes]
+               + [(r, user_client) for r in user.routes])
+    for r, client in targets:
         if not isinstance(r, APIRoute) or not (r.methods & {"POST", "PUT", "PATCH"}):
             continue
         if r.path.startswith(("/api/v1/portal/", "/api/v1/broker/", "/api/v1/storefront/public")):
@@ -426,16 +496,19 @@ async def test_no_write_route_accepts_another_tenants_id_in_its_body(api):
             method = sorted(r.methods & {"POST", "PUT", "PATCH"})[0]
             if (method, r.path, key) in BODY_ALLOWED:
                 continue
-            from case_service.core.tenant_path_guard import FIELD_EXEMPT
+            from velaris_shared.tenancy.path_guard import FIELD_EXEMPT
             if (r.path, key) in FIELD_EXEMPT:
                 continue
             path = re.sub(r"\{[^}:]+(:path)?\}", str(uuid.uuid4()), r.path)
             is_list = "list" in str(fields[key].annotation).lower()
-            resp = await api.request(method, path, headers=h,
-                                     json={key: [value] if is_list else value})
+            resp = await client.request(method, path, headers=h,
+                                        json={key: [value] if is_list else value})
             tried += 1
             if resp.status_code < 300 or resp.status_code >= 500:
                 missed.append((method, r.path, key, resp.status_code))
+    await commerce_client.aclose()
+    await portal_client.aclose()
+    await user_client.aclose()
     assert tried > 50, tried
     assert missed == [], missed
 

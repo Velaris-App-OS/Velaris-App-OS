@@ -1,4 +1,4 @@
-// HELIX P27 — Web Push service worker
+// Velaris P27 — Web Push service worker
 // Receives push events from the browser's push service and shows notifications.
 
 self.addEventListener("push", (event) => {
@@ -6,10 +6,10 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data ? event.data.json() : {};
   } catch {
-    data = { title: "HELIX", body: event.data ? event.data.text() : "" };
+    data = { title: "Velaris", body: event.data ? event.data.text() : "" };
   }
 
-  const title = data.title || "HELIX Notification";
+  const title = data.title || "Velaris Notification";
   const options = {
     body: data.body || "",
     icon: data.icon || "/logo.png",

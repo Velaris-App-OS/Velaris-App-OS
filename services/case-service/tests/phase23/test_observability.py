@@ -1,4 +1,4 @@
-"""HELIX P23 — Observability & Telemetry tests."""
+"""Velaris P23 — Observability & Telemetry tests."""
 from __future__ import annotations
 
 import asyncio
@@ -85,11 +85,14 @@ async def test_02_correlation_id_propagated_when_present(client):
 
 
 @pytest.mark.asyncio
-async def test_03_tenant_id_propagates_to_context(client):
+async def test_03_a_client_header_does_not_set_the_tenant(client):
+    """2026-11-04: the tenant on logs, metrics and traces is the signed-in
+    caller's, set at sign-in (auth/dependencies.py) — never the client's own
+    X-Tenant-Id header, which anyone could set to any tenant."""
     r = await client.get("/ctx", headers={"x-tenant-id": "acme"})
     assert r.status_code == 200
     body = r.json()
-    assert body["tenant_id"] == "acme"
+    assert body["tenant_id"] is None
     assert body["request_id"] is not None
 
 

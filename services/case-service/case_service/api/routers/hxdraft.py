@@ -373,7 +373,7 @@ async def _apply_user(draft: dict, session: AsyncSession, user: AuthenticatedUse
         raise coded(409, DRAFT_EXISTS_409, "Username or email already in use.")
 
     import secrets
-    from case_service.api.routers.auth_real import _hash_password
+    from velaris_shared.auth.passwords import hash_password as _hash_password
     temp_password = secrets.token_urlsafe(12)
     new_user = HelixUserModel(
         username=clean["username"],
@@ -385,7 +385,7 @@ async def _apply_user(draft: dict, session: AsyncSession, user: AuthenticatedUse
     )
     session.add(new_user)
     await session.flush()
-    from case_service.api.routers.auth_real import place_in_callers_tenant
+    from velaris_shared.tenancy.placement import place_in_callers_tenant
     await place_in_callers_tenant(session, user, new_user)
     await session.commit()
     await session.refresh(new_user)
@@ -760,11 +760,17 @@ async def _apply_form_modify(draft: dict, session: AsyncSession):
         raise coded(400, DRAFT_VALIDATION_400,
                     "Draft failed validation: " + "; ".join(errors))
 
-    # replace the fields, preserve every other definition key (layout etc.)
+    # Merge into the sections: fields the draft keeps keep their settings and
+    # place; every other definition key (settings, display fields) is preserved.
     from datetime import datetime, timezone
-    definition = dict(form.definition_json or {})
-    definition["fields"] = clean["definition_json"]["fields"]
-    form.definition_json = definition
+    merged = form_builder.merge_draft_into_sections(
+        form.definition_json or {}, clean["definition_json"]["fields"])
+    # Embeds from approved sites only, as an ordinary save (2026-11-04).
+    from velaris_shared.forms.embed import form_embed_problem
+    problem = await form_embed_problem(session, form.tenant_id, merged)
+    if problem:
+        raise coded(400, DRAFT_VALIDATION_400, f"Draft failed validation: {problem}")
+    form.definition_json = merged
     form.updated_at = datetime.now(timezone.utc)
     await session.commit()
     return {"kind": "form", "mode": "modify", "id": str(form.id), "name": form.name}
@@ -789,6 +795,13 @@ async def _apply_connector_modify(draft: dict, background_tasks: BackgroundTasks
     if errors:
         raise coded(400, DRAFT_VALIDATION_400,
                     "Draft failed validation: " + "; ".join(errors))
+
+    # The same checks as the connector API (2026-11-04).
+    from velaris_shared.hxbridge.security import check_connector_config
+    try:
+        await check_connector_config(session, connector.connector_type, connector.tenant_id, config)
+    except ValueError as exc:
+        raise coded(400, DRAFT_VALIDATION_400, f"Draft failed validation: {exc}")
 
     # config ONLY — name/enabled/credentials are never touched by a draft
     from datetime import datetime, timezone
@@ -969,10 +982,15 @@ async def _apply_form(draft: dict, session: AsyncSession, user):
     if errors:
         raise coded(400, DRAFT_VALIDATION_400,
                     "Draft failed validation: " + "; ".join(errors))
+    # Stored as Form Builder sections — the shape the builder, the renderer and
+    # the server's form check read (a flat `fields` list was read by none).
+    definition = {"sections": form_builder.draft_to_sections(clean["definition_json"]["fields"]),
+                  **({"description": clean["definition_json"]["description"]}
+                     if clean["definition_json"].get("description") else {})}
     form = await repo.create_form(session, data={
         "tenant_id": await _draft_owner(session, user),
         "name": clean["name"], "version": clean["version"],
-        "definition_json": clean["definition_json"],
+        "definition_json": definition,
     })
     await session.commit()
     return {"kind": "form", "id": str(form.id), "name": form.name}

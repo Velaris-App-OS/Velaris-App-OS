@@ -9,7 +9,20 @@ Three units replacing the `nohup … &` launches in `start-velaris.sh`:
 | `velaris-analytics-service.service` | Step 7b | `127.0.0.1:8202` (nginx fronts it on 8200) |
 | `velaris-hxgraph-service.service` | Step 7c | `127.0.0.1:8203` (nginx fronts it on 8200) |
 | `velaris-hxmigrate-service.service` | Step 7d | `127.0.0.1:8204` (nginx fronts it on 8200) |
+| `velaris-commerce-service.service` | Step 7e | `127.0.0.1:8207` (nginx fronts it on 8200) |
+| `velaris-portal-service.service` | Step 7f | `127.0.0.1:8205` (nginx fronts it on 8200) |
+| `velaris-user-service.service` | Step 7h | `127.0.0.1:8206` (nginx fronts it on 8200) |
+| `velaris-worker-service.service` | Step 7g | `127.0.0.1:8208` (health only — the background jobs) |
 | `velaris-studio.service` | Step 8 | `0.0.0.0:5173` |
+
+**commerce-service, portal-service and user-service before their units are
+installed (R5e steps 7, 8, 10).** An update cannot install a unit, so on a box without
+`velaris-commerce-service.service` / `velaris-portal-service.service` /
+`velaris-user-service.service`,
+`velaris-exec.sh` runs that service inside case-service's unit (it stops and
+restarts with case-service). Running `sudo ./install.sh` installs the units,
+restarts case-service once to hand them over, and starts each new unit
+(before 2026-10-20 it only enabled it, so commerce stayed down until a reboot).
 
 ## Why
 
@@ -33,7 +46,7 @@ On the server, from the Velaris directory:
 ```bash
 sudo ./deploy/systemd/install.sh
 ./stop-velaris.sh          # clear the old nohup'd processes
-sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio
+sudo systemctl start velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio
 ```
 
 `install.sh` substitutes the invoking user, the checkout path, and the absolute
@@ -91,8 +104,8 @@ start anything; until you `start` or reboot, the system behaves exactly as now.
 To undo completely:
 
 ```bash
-sudo systemctl disable --now velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-studio
-sudo rm /etc/systemd/system/velaris-{engine,case-service,studio}.service
+sudo systemctl disable --now velaris-engine velaris-case-service velaris-analytics-service velaris-hxgraph-service velaris-hxmigrate-service velaris-commerce-service velaris-portal-service velaris-user-service velaris-worker-service velaris-studio
+sudo rm /etc/systemd/system/velaris-{engine,case-service,analytics-service,hxgraph-service,hxmigrate-service,commerce-service,portal-service,user-service,worker-service,studio}.service
 sudo systemctl daemon-reload
 ```
 
@@ -109,6 +122,9 @@ sudo systemctl daemon-reload
    the command, and the update is reported as `restart_required`, not `updated`.
    Before v3.1.0 an update on a systemd install did none of the three — if you
    pulled code by hand, run `deploy/systemd/refresh-after-update.sh` once.
+   It is also the only part of the NEW release that an OLDER release's updater
+   runs, so anything an update must generate (the internal service secret, the
+   backup key) is generated here too, not only in `update-velaris.sh`.
 2. **The database is waited for, not merely ordered after.** `After=docker.service`
    orders startup but only guarantees the *daemon* — not that Postgres inside a
    container has bound its port. The engine and case-service units therefore run
@@ -138,3 +154,19 @@ sudo systemctl daemon-reload
 other** — running both leaves two of each process fighting for the same port.
 Once the units are in, use `systemctl` and keep the script for the database,
 migrations, and dependency steps it also performs.
+
+## Standby server (optional, R5c)
+
+On a server that is to become a standby — once, before `./standby-velaris.sh link` on the
+main: `sudo ./deploy/systemd/install-standby-tunnel.sh` (`--remove` to undo). It installs
+`velaris-standby-tunnel.{service,path}` and `velaris-standby-sync.{service,timer}` (documents,
+settings, vault — every 60 s); nothing runs until a link writes `.standby/tunnel.env`.
+
+**Automatic failover (optional, R5c step 12).** After `./standby-velaris.sh failover enable
+--witness [user@]host` on the main, on BOTH servers: `sudo ./deploy/systemd/install-failover.sh`
+(`--remove` to undo). It installs `velaris-failover-agent.{service,path}` (renews the lease at the
+witness every 5 s) and `velaris-failover-fence.{service,timer}` (every 5 s: a main that has
+confirmed neither its lease nor its standby for half the lease stops itself — gateway killed,
+databases stopped, `.standby/fenced.json` written, which every start path refuses). The installer
+waits for the agent's first renewal before it arms the fence check. Nothing runs where
+`.standby/failover/failover.json` does not exist.

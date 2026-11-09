@@ -1,4 +1,4 @@
-"""HELIX IR: Case Management Models.
+"""Velaris IR: Case Management Models.
 
 Pure typed dataclasses representing case types, stages, steps,
 SLA policies, assignments, work queues, and relationships.

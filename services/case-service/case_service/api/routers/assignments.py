@@ -22,6 +22,8 @@ from case_service.api.schemas.cases import (
 )
 from velaris_shared.db import repository as repo
 from velaris_shared.auth.dependencies import get_current_user
+from velaris_shared.auth.models import AuthenticatedUser
+from velaris_shared.hxguard.step_submit import acts_as, may_receive_work, require_step_submit
 from velaris_shared.db.session import get_session
 
 
@@ -66,6 +68,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/assignments", tags=["assignments"], dependencies=[Depends(get_current_user)])
 
 
+async def _guard(session: AsyncSession, user: AuthenticatedUser, assignment) -> None:
+    """Claim, release, reassign, delete and complete take one rule (2026-10-28):
+    whoever may complete the work. Otherwise reassigning it to yourself, or
+    deleting it, walks around `require_step_submit`."""
+    case_row = await repo.get_case_instance(session, assignment.case_id)
+    if case_row is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    await require_step_submit(session, user, case_row, assignment)
+
+
 async def _get_assignment_or_404(
     session: AsyncSession, assignment_id: uuid.UUID
 ):
@@ -82,9 +94,15 @@ async def claim_assignment(
     assignment_id: uuid.UUID,
     body: AssignmentClaim,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Self-service: user claims an item from a queue."""
     assignment = await _get_assignment_or_404(session, assignment_id)
+    # The caller claims for themselves: `user_id` in the body was trusted, so
+    # anyone could claim in someone else's name (2026-10-28).
+    if not acts_as(user, body.user_id):
+        raise HTTPException(status_code=403, detail="You can only claim work for yourself.")
+    await _guard(session, user, assignment)
     if assignment.status != "active":
         raise HTTPException(
             status_code=409, detail="Assignment is not claimable"
@@ -129,10 +147,12 @@ async def release_assignment(
     assignment_id: uuid.UUID,
     body: AssignmentClaim,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Return an item back to its queue (unclaim)."""
     assignment = await _get_assignment_or_404(session, assignment_id)
-    if assignment.assignee_id != body.user_id:
+    # Checked against the token, not the body, which named whoever it liked.
+    if not acts_as(user, body.user_id) or not acts_as(user, assignment.assignee_id):
         raise HTTPException(
             status_code=403,
             detail="Only the current assignee can release",
@@ -168,9 +188,18 @@ async def reassign_assignment(
     assignment_id: uuid.UUID,
     body: AssignmentReassign,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Supervisor or rule reassigns an item to a different user."""
     assignment = await _get_assignment_or_404(session, assignment_id)
+    await _guard(session, user, assignment)
+    # The new assignee must be someone who may hold this work — else any
+    # outsider could be handed it and complete it (2026-10-28).
+    from velaris_shared.tenancy.identity import is_superadmin
+    case_row = await repo.get_case_instance(session, assignment.case_id)
+    if not is_superadmin(user) and not await may_receive_work(session, body.new_assignee_id, case_row):
+        raise HTTPException(status_code=422, detail=(
+            "That person is not in an access group covering this case type, so the work cannot go to them."))
     prev_assignee = assignment.assignee_id
 
     await repo.update_assignment(
@@ -191,6 +220,7 @@ async def reassign_assignment(
         data={
             "case_id": assignment.case_id,
             "action": "assignment_reassigned",
+            "actor_id": user.user_id,
             "details": {
                 "assignment_id": str(assignment_id),
                 "from": prev_assignee,
@@ -211,6 +241,7 @@ async def complete_assignment(
     body: AssignmentComplete,
     request: Request,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Mark a work item as completed and signal the lifecycle workflow."""
     assignment = await _get_assignment_or_404(session, assignment_id)
@@ -218,6 +249,18 @@ async def complete_assignment(
         raise HTTPException(
             status_code=409, detail="Assignment is not active"
         )
+    case_row = await repo.get_case_instance(session, assignment.case_id)
+    if case_row is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    # Only the assignee, their access group or their N+1 (2026-10-28).
+    await require_step_submit(session, user, case_row, assignment)
+    if not acts_as(user, body.completed_by):
+        raise HTTPException(status_code=403, detail="You can only complete work in your own name.")
+    # A step with a form is completed by submitting the form (2026-10-28
+    # audit): this route took no values, so a required form was skippable.
+    from case_service.api.routers.form_submissions import _step_form_id
+    if await _step_form_id(session, case_row, assignment.step_id):
+        raise HTTPException(status_code=409, detail="This step has a form — submit the form to complete it.")
 
     now = datetime.now(timezone.utc)
     await repo.update_assignment(
@@ -233,7 +276,7 @@ async def complete_assignment(
         data={
             "case_id": assignment.case_id,
             "action": "step_completed",
-            "actor_id": body.completed_by,
+            "actor_id": user.user_id,
             "details": {
                 "assignment_id": str(assignment_id),
                 "step_id": assignment.step_id,
@@ -256,7 +299,7 @@ async def complete_assignment(
                     "step_completed",
                     {
                         "step_id": assignment.step_id,
-                        "completed_by": body.completed_by or "system",
+                        "completed_by": user.user_id,
                     },
                 )
                 logger.info(
@@ -278,9 +321,11 @@ async def complete_assignment(
 async def delete_assignment(
     assignment_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Delete an assignment (e.g. test assignments created via self-assign)."""
     assignment = await _get_assignment_or_404(session, assignment_id)
+    await _guard(session, user, assignment)
     case_id, assignee_type, assignee_id = (
         assignment.case_id, assignment.assignee_type, assignment.assignee_id,
     )

@@ -117,7 +117,13 @@ def _identity(raw: str) -> tuple[str, int | None, str | None]:
     mistake this exists to catch.
     """
     url = make_url(_async_url(raw))
-    return (str(url.host or "localhost"), url.port, url.database)
+    # A UNIX socket is named in the query (`?host=/dir&port=6432`): that folder
+    # and port ARE the address — read as one, or a twin given production's
+    # socket would pass as another database.
+    q = {k: (v[-1] if isinstance(v, tuple) else v) for k, v in url.query.items()}
+    host = url.host or q.get("host") or "localhost"
+    port = url.port or (int(q["port"]) if str(q.get("port") or "").isdigit() else None)
+    return (str(host), port, url.database)
 
 
 def fingerprint(raw: str) -> str:
@@ -146,13 +152,25 @@ def isolation(settings: Any = None) -> tuple[bool, dict[str, Any]]:
     if not twin_url:
         return False, {**detail, "reason": "no twin database configured"}
 
+    # Production is reachable at several addresses once the pooler is on (R5d 6a):
+    # direct, through PgBouncer, and through commerce's, portal's and user's own
+    # pools on it (R5e steps 7, 8, 10 — more database names for the same database). A twin at any of
+    # them is production all the same, and must be refused like one.
+    pooler_urls = [(getattr(s, k, "") or "").strip()
+                   for k in ("database_pooler_url", "commerce_database_pooler_url",
+                             "portal_database_pooler_url", "user_database_pooler_url")]
     try:
-        prod = _identity(s.database_url)
+        prod = {_identity(s.database_url)}
+        prod.update(_identity(u) for u in pooler_urls if u)
+        # …and through the pooler's UNIX socket (VELARIS_CASE_DATABASE_POOLER_SOCKET),
+        # whether or not this install uses it: the folder is in every release.
+        from velaris_shared.db.backends import pooler_socket_dir
+        prod.update((pooler_socket_dir(), 6432, _identity(u)[2]) for u in pooler_urls if u)
         twin = _identity(twin_url)
     except Exception as exc:                                     # noqa: BLE001
         return False, {**detail, "reason": f"a twin URL that cannot be parsed is not a twin: {exc}"}
 
-    same_db = prod == twin
+    same_db = twin in prod
     detail["database"] = {
         "production_fingerprint": fingerprint(s.database_url),
         "twin_fingerprint": fingerprint(twin_url),
@@ -163,7 +181,7 @@ def isolation(settings: Any = None) -> tuple[bool, dict[str, Any]]:
             **detail,
             "reason": (
                 "the twin database is production — same host, port and database "
-                "name. A rehearsal there would write synthetic cases into real "
+                "name (directly or through the connection pooler). A rehearsal there would write synthetic cases into real "
                 "data and clear the promotion it damaged."),
         }
 

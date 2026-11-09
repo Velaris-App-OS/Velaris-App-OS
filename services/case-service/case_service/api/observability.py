@@ -1,4 +1,4 @@
-"""HELIX P23 — /health and /api/v1/observability/* endpoints."""
+"""Velaris P23 — /health and /api/v1/observability/* endpoints."""
 from __future__ import annotations
 import time
 import uuid
@@ -7,21 +7,53 @@ from typing import Any
 
 from velaris_shared import hxguard
 from velaris_shared.auth.models import AuthenticatedUser
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from velaris_shared.observability import render_metrics, recent_spans, get_logger
 
 log = get_logger("helix.observability.api")
+
 router = APIRouter(tags=["observability"])
 
 
 from velaris_shared.db.session import get_session
 
 
+_LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+
+
+def _refuse_forwarded_from_outside(request: Request) -> None:
+    """/metrics and /health/deep are for a scraper on this host or in this
+    cluster — never the internet (2026-10-30). The Kubernetes ingress sends
+    every unmatched path, these included, to case-service, so anyone could read
+    the metrics and make /health/deep write a row per call. A request proxied
+    for an outside client carries its address in X-Forwarded-For (the ingress
+    appends it; the gateway writes it); any non-loopback address there is a
+    404. A scraper calling the pod directly, or through the loopback gateway
+    from this host, carries none or 127.0.0.1."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd and any(a.strip() not in _LOOPBACK for a in fwd.split(",")):
+        raise HTTPException(404, "Not Found")
+
+
 @router.get("/metrics", include_in_schema=False)
-async def prometheus_metrics() -> Response:
+async def prometheus_metrics(request: Request, session: AsyncSession = Depends(get_session)) -> Response:
+    _refuse_forwarded_from_outside(request)
+    # R7: the dependency gauge, from the same (20 s cached) check as Studio's
+    # Status screen. Keys and 0/1 only — reasons never leave the authenticated
+    # route. A failed check leaves the last values; it never fails the scrape.
+    try:
+        import asyncio
+        from case_service import readiness
+        from velaris_shared.observability.metrics import dependency_degraded
+        report = await asyncio.wait_for(readiness.check_all(session, None), 15)
+        for item in report["items"]:
+            dependency_degraded.labels(dependency=item["key"]).set(
+                1 if item["state"] == readiness.DEGRADED else 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("metrics_dependency_refresh_failed", error=type(exc).__name__)
     body, ct = render_metrics()
     return Response(content=body, media_type=ct)
 
@@ -36,7 +68,8 @@ async def health_shallow() -> dict[str, Any]:
 
 
 @router.get("/health/deep")
-async def health_deep(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def health_deep(request: Request, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    _refuse_forwarded_from_outside(request)
     components: list[dict[str, Any]] = []
 
     db_ok, db_latency, db_err = True, None, None
@@ -91,10 +124,19 @@ async def health_deep(session: AsyncSession = Depends(get_session)) -> dict[str,
 @router.get("/api/v1/observability/metrics")
 async def metrics_summary(
     _user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """Request counts and latencies. The platform operator sees the whole
+    install; a tenant's admin its own tenant's requests only — by the TRUSTED
+    tenant label sign-in sets (2026-11-04; before, every tenant's admin saw the
+    whole install's)."""
     from velaris_shared.observability.metrics import (
         http_requests_total, http_request_duration_seconds,
     )
+    mine = await _tenant_labels(session, _user)
+
+    def _keep(labels) -> bool:
+        return mine is None or labels.get("tenant_id") in mine
 
     total_requests = 0
     error_requests = 0
@@ -102,7 +144,7 @@ async def metrics_summary(
 
     for sample in http_requests_total.collect():
         for s in sample.samples:
-            if s.name.endswith("_total"):
+            if s.name.endswith("_total") and _keep(s.labels):
                 total_requests += int(s.value)
                 status = s.labels.get("status", "200")
                 path = s.labels.get("path", "?")
@@ -117,16 +159,23 @@ async def metrics_summary(
         path_buckets: dict[str, list[tuple[float, float]]] = {}
         path_sum: dict[str, float] = {}
         path_count: dict[str, float] = {}
+        bucket_acc: dict[str, dict[float, float]] = {}
         for s in sample.samples:
+            if not _keep(s.labels):
+                continue
             path = s.labels.get("path", "?")
+            # Summed over the tenant (and method) label: one row per path.
             if s.name.endswith("_bucket"):
                 le = s.labels.get("le", "+Inf")
                 le_val = float("inf") if le == "+Inf" else float(le)
-                path_buckets.setdefault(path, []).append((le_val, s.value))
+                acc = bucket_acc.setdefault(path, {})
+                acc[le_val] = acc.get(le_val, 0.0) + s.value
             elif s.name.endswith("_sum"):
-                path_sum[path] = s.value
+                path_sum[path] = path_sum.get(path, 0.0) + s.value
             elif s.name.endswith("_count"):
-                path_count[path] = s.value
+                path_count[path] = path_count.get(path, 0.0) + s.value
+        for path, acc in bucket_acc.items():
+            path_buckets[path] = list(acc.items())
         for path, buckets in path_buckets.items():
             buckets.sort(key=lambda x: x[0])
             count = path_count.get(path, 0)
@@ -180,13 +229,23 @@ async def recent_traces(
     limit: int = Query(50, ge=1, le=200), _user: AuthenticatedUser = Depends(hxguard.guard("platform.status.read")),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    # Spans are this PROCESS's traces — every tenant's requests. 8d (2026-09-29).
-    from case_service.tenancy.identity import is_platform_operator
-
-    if not await is_platform_operator(session, _user):
-        raise HTTPException(403, "Process traces span every tenant; platform operator only.")
-    spans = recent_spans(limit=limit)
+    # Spans are this PROCESS's traces — every tenant's requests. 8d (2026-09-29):
+    # operator only. 2026-11-04: a tenant's admin sees its own tenant's spans,
+    # by the trusted tenant sign-in stamps on each.
+    mine = await _tenant_labels(session, _user)
+    spans = recent_spans(limit=2000 if mine is not None else limit)
+    if mine is not None:
+        spans = [s_ for s_ in spans if s_.get("tenant_id") in mine][:limit]
     return {"count": len(spans), "spans": spans}
+
+
+async def _tenant_labels(session: AsyncSession, user) -> set[str] | None:
+    """The tenant label values that are the caller's — None for the platform
+    operator, who sees every tenant's. Every spelling (slug and id) counts."""
+    from case_service.tenancy.identity import caller_tenant_tokens, is_platform_operator
+    if await is_platform_operator(session, user):
+        return None
+    return {str(t) for t in (await caller_tenant_tokens(session, user) or [])}
 
 
 @router.get("/api/v1/observability/events")

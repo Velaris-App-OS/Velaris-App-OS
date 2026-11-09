@@ -259,6 +259,10 @@ async def resolve_agent_token(session: Any, raw_token: str) -> AgentCaller:
         # bearer of nothing, and saying so as 401 rather than letting it through
         # with an empty set means the agent stops instead of quietly no-opping.
         raise HTTPException(401, _REFUSED, headers={"WWW-Authenticate": "Bearer"})
+    # An archived (offboarded) tenant's agents stop with its people (R7).
+    from velaris_shared.tenancy.identity import tenant_closed
+    if await tenant_closed(session, agent.tenant_id):
+        raise HTTPException(401, _REFUSED, headers={"WWW-Authenticate": "Bearer"})
 
     return AgentCaller(
         agent_id=str(agent.id),
@@ -288,7 +292,9 @@ async def get_agent_caller(
     if credentials is None:
         raise HTTPException(401, "Authentication required",
                             headers={"WWW-Authenticate": "Bearer"})
-    session = getattr(request.state, "db_session", None)
+    from velaris_shared.db.commit_route import request_session
+
+    session = request_session(request)   # no second connection (request_session)
     if session is not None:
         return await resolve_agent_token(session, credentials.credentials)
 

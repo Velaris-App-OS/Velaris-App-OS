@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 DATABASE_URL = os.environ.get(
@@ -25,15 +25,28 @@ DATABASE_URL = os.environ.get(
 _QUERY = "SELECT COUNT(*) FROM velaris_users WHERE is_superadmin = TRUE AND is_active = TRUE"
 
 
+def _tls() -> dict:
+    """The platform's own database TLS (VELARIS_CASE_DATABASE_URL's sslmode /
+    sslrootcert / ssl_ca …), as driver arguments — so this check reaches a
+    database on another server the same way the platform does. {} when the URL
+    names none: the connection is exactly what it was."""
+    url = os.environ.get("VELARIS_CASE_DATABASE_URL", "")
+    if "?" not in url:
+        return {}
+    from velaris_shared.db.tls import split_tls
+    return split_tls(url)[1]
+
+
 async def _count_postgres(parsed) -> int:
     import asyncpg
     conn = await asyncpg.connect(
         host=parsed.hostname or "localhost",
         port=parsed.port or 5432,
         database=parsed.path.lstrip("/"),
-        user=parsed.username,
-        password=parsed.password,
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
         timeout=5,
+        **_tls(),
     )
     try:
         return await conn.fetchval(_QUERY) or 0
@@ -49,9 +62,10 @@ async def _count_mysql(parsed) -> int:
         host=parsed.hostname or "localhost",
         port=parsed.port or 3306,
         db=parsed.path.lstrip("/"),
-        user=parsed.username,
-        password=parsed.password or os.environ.get("VELARIS_DB_PASSWORD", ""),
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or "") or os.environ.get("VELARIS_DB_PASSWORD", ""),
         connect_timeout=5,
+        **_tls(),
     )
     try:
         async with conn.cursor() as cur:

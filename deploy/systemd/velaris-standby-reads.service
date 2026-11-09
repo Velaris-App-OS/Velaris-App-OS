@@ -1,0 +1,45 @@
+[Unit]
+Description=Velaris main — SSH tunnel to the standby's replica, for reads (R5d 11b)
+Documentation=file://__VELARIS_DIR__/docs/recovery-runbook.md
+# Written by `standby-velaris.sh serve-reads on` and removed by `off`, `unlink`,
+# a demote and `retire`. Without it this unit does nothing.
+# velaris-standby-reads.path starts it when it appears.
+ConditionPathExists=__VELARIS_DIR__/.standby/reads-tunnel.env
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=__VELARIS_USER__
+WorkingDirectory=__VELARIS_DIR__
+# Checked on EVERY start (an automatic restart does not re-test
+# ConditionPathExists): a missing file leaves the unit inactive, not failed.
+EnvironmentFile=-__VELARIS_DIR__/.standby/reads-tunnel.env
+ExecCondition=/usr/bin/test -f __VELARIS_DIR__/.standby/reads-tunnel.env
+# One forward from a UNIX socket in the 0700 .standby folder to the standby's
+# replica of velaris-db (on the standby's loopback). A socket, not a loopback
+# port: a port is free for seconds whenever the tunnel reconnects, and a local
+# user who took it could pose as PostgreSQL and be sent the database password. The key may forward
+# to that one port and do nothing else (the standby's authorized_keys: restrict,
+# port-forwarding, permitopen, command=/bin/false). The standby's host key was
+# copied over the operator's own SSH session — never trusted on first sight.
+ExecStart=/usr/bin/ssh -N -T \
+  -i __VELARIS_DIR__/.standby/reads_key \
+  -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=__VELARIS_DIR__/.standby/reads_known_hosts \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+  -p ${STANDBY_SSH_PORT} \
+  -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 \
+  -L __VELARIS_DIR__/.standby/reads-sock/.s.PGSQL.5432:127.0.0.1:${STANDBY_DB_PORT} \
+  ${STANDBY_USER}@${STANDBY_HOST}
+# A dropped link comes back by itself; meanwhile the platform reads from the
+# main (capped pool) and returns after the replica has been healthy a while.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velaris-standby-reads
+
+[Install]
+WantedBy=multi-user.target

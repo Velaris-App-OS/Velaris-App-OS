@@ -1,0 +1,12 @@
+[Unit]
+Description=Velaris automatic failover — apply the fence rule every 5 s
+
+[Timer]
+# After a reboot a main writes only once confirmed (its stamps from the last
+# boot count as "at boot"), so the first check comes early.
+OnBootSec=5
+OnUnitActiveSec=5
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

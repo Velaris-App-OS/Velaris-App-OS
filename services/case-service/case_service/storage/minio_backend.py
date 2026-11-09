@@ -1,8 +1,15 @@
-"""The S3 backend under the name it had before v3.1.2.
+"""Moved to `velaris_shared.storage.minio_backend` (2026-10-19, step 7 — the commerce split).
 
-Kept so anything that imports `MinIOBackend` keeps working. New code imports
-`S3Backend` from `.s3_backend`.
+Both case-service and commerce-service call this code in-process, so it lives in
+the shared layer. This module IS that module (`sys.modules` alias): every name,
+every cache and every test patch made through this path reaches the one real
+implementation.
+
+Copyright (c) 2024-2026 Velaris Contributors
+SPDX-License-Identifier: BSL-1.1
 """
-from .s3_backend import S3Backend as MinIOBackend
+import sys as _sys
 
-__all__ = ["MinIOBackend"]
+import velaris_shared.storage.minio_backend as _moved
+
+_sys.modules[__name__] = _moved

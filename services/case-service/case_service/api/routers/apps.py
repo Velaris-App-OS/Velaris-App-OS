@@ -403,6 +403,12 @@ async def import_bundle(
             )
         )).scalar_one_or_none()
 
+        # Embeds from approved sites only, as an ordinary save (2026-11-04).
+        from velaris_shared.forms.embed import form_embed_problem
+        problem = await form_embed_problem(session, owner, fd.get("definition_json") or {})
+        if problem:
+            results["forms"].append({"name": fd["name"], "action": "refused", "reason": problem})
+            continue
         if existing_form:
             existing_form.definition_json = fd.get("definition_json", existing_form.definition_json)
             results["forms"].append({"name": fd["name"], "action": "updated"})

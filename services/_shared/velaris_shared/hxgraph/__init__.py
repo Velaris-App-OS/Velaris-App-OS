@@ -1,4 +1,4 @@
-"""P41 HxGraph — Helix Native Knowledge Graph.
+"""P41 HxGraph — Velaris Native Knowledge Graph.
 
 Replaces graphify with a live, semantic, HxNexus-controlled knowledge graph
 that covers the entire platform: business concepts, code structure, and

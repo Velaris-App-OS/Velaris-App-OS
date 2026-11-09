@@ -112,6 +112,9 @@ EXTRACTED = {
     "analytics-service": "analytics_service",
     "hxgraph-service": "hxgraph_service",
     "hxmigrate-service": "hxmigrate_service",
+    "commerce-service": "commerce_service",   # R5e step 7
+    "portal-service": "portal_service",       # R5e step 8
+    "user-service": "user_service",           # R5e step 10
 }
 
 

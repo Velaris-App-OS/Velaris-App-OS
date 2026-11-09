@@ -1,6 +1,6 @@
 """Stage-level status and actions — the second half of the 198 model.
 
-Design: `docs/Future/CASE-ACTIONS-STATUS-DESIGN.md` (§7, stage-level control).
+Design: `docs/Future/Done/CASE-ACTIONS-STATUS-DESIGN.md` (§7, stage-level control).
 
 **Why a stage needs an opinion at all.** Migration 198 made a status data an
 operator authors and an action a closed vocabulary in code, and it put both on

@@ -17,7 +17,7 @@ from hxmigrate_service.scout.base import (
 BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
 CAMUNDA_NS = "http://camunda.org/schema/1.0/bpmn"
 
-# BPMN element → HELIX compatibility
+# BPMN element → Velaris compatibility
 BPMN_ELEMENT_MAP = {
     "process": (ArtifactType.PROCESS, CompatibilityLevel.FULL, "BPMN Process", 2.0),
     "subProcess": (ArtifactType.PROCESS, CompatibilityLevel.FULL, "BPMN Subprocess", 1.5),

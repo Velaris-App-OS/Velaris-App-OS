@@ -37,7 +37,7 @@ from case_service.main import app
 from case_service.rollouts import outcomes, service, sweep
 from case_service.tenancy import identity as tenancy
 from tests.conftest import LIFECYCLE_PROCESS_ID, TestSessionFactory  # type: ignore[attr-defined]
-from tests.test_payments_authz import _headers
+from tests.conftest import _headers  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.asyncio
 
@@ -368,3 +368,33 @@ def test_the_statistics_are_sane():
     assert big["p_value"] < 0.001
     assert outcomes.verdict(big, 200, 200) == "worse"
     assert outcomes.verdict(big, 200, 200, lower_is_better=False) == "better"
+
+
+# ══ who may (least-privileged first, then refused) ══════════════════════════
+# Studio's proxy reached /api/v1/rollouts only from 2026-11-01 (HxDeploy →
+# Rollouts tab was "Not Found"); these pin who the route now answers.
+
+async def test_least_privileged_reader_and_requester_succeed(api, world):
+    manager = _headers("mgr", ["manager"])            # read only
+    dev = _headers("dev1", ["developer"])             # read + request
+    assert (await api.get("/api/v1/rollouts?state=open", headers=manager)).status_code == 200
+    r = await api.post("/api/v1/rollouts", headers=dev, json={
+        "baseline_id": str(world["v1"].id), "candidate_id": str(world["v2"].id),
+        "strategy": "percentage", "percent": 0})
+    assert r.status_code in (200, 201), r.text
+
+
+async def test_refused_users(api, world):
+    viewer = _headers("vic", ["viewer"])
+    worker = _headers("cw", ["case_worker"])
+    manager = _headers("mgr", ["manager"])
+    dev = _headers("dev1", ["developer"])
+    assert (await api.get("/api/v1/rollouts?state=open")).status_code == 401
+    for who in (viewer, worker):
+        assert (await api.get("/api/v1/rollouts?state=open", headers=who)).status_code == 403
+    body = {"baseline_id": str(world["v1"].id), "candidate_id": str(world["v2"].id),
+            "strategy": "percentage", "percent": 0}
+    assert (await api.post("/api/v1/rollouts", headers=manager, json=body)).status_code == 403
+    rid = (await api.post("/api/v1/rollouts", headers=dev, json=body)).json()["rollout"]["id"]
+    # Only an admin approves — the developer who asked cannot.
+    assert (await api.post(f"/api/v1/rollouts/{rid}/approve", headers=dev, json={})).status_code == 403

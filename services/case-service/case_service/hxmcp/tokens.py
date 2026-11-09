@@ -121,35 +121,59 @@ async def get_mcp_caller(
         token=credentials.credentials, **extract_user_from_claims(claims),
     )
 
-    # grant row = server-side truth: exists, not revoked, not expired.
-    # Checked on EVERY call so revocation is instant.
+    # Checked on EVERY call so revocation is instant (_check_grant).
+    from velaris_shared.auth.dependencies import raise_if_db_unavailable
+    from velaris_shared.db.commit_route import request_session
     from velaris_shared.db.session import get_session_factory
-    async with get_session_factory()() as session:
-        grant = await session.get(MCPTokenGrantModel, grant_id)
-        if grant is None or grant.revoked:
-            raise HTTPException(401, "Scoped MCP token has been revoked",
-                                headers={"WWW-Authenticate": "Bearer"})
-        exp = grant.expires_at
-        if exp is not None and exp.tzinfo is None:      # SQLite: tz-naive
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp is not None and exp < _utcnow():
-            raise HTTPException(401, "Scoped MCP token has expired",
-                                headers={"WWW-Authenticate": "Bearer"})
-        scope = [t for t in (grant.tools or []) if isinstance(t, str)]
 
-        # same enrichment + security posture as a normal session: the grantor's
-        # live tenant/access groups apply, a suspended grantor kills the token
-        try:
-            user = await _enrich_with_access_group(user, session)
-            await _security_check(user, credentials.credentials, session)
-        except HTTPException:
-            raise
-        except Exception:
-            log.debug("mcp scoped-token enrichment skipped", exc_info=True)
+    try:
+        own = request_session(request)   # no second connection (request_session)
+        if own is not None:
+            user, scope, grant_id = await _check_grant(own, user, credentials, grant_id)
+        else:
+            async with get_session_factory()() as session:
+                user, scope, grant_id = await _check_grant(session, user, credentials, grant_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # The grant could not be read: refuse (503) rather than fall through.
+        raise_if_db_unavailable(exc)
+        raise
 
     user.attributes[SCOPE_ATTR] = scope     # registry/server intersect on this
     user.attributes[JTI_ATTR] = str(grant_id)
     return user
+
+
+async def _check_grant(session, user, credentials, grant_id):
+    """The grant row is server-side truth: exists, not revoked, not expired."""
+    grant = await session.get(MCPTokenGrantModel, grant_id)
+    if grant is None or grant.revoked:
+        raise HTTPException(401, "Scoped MCP token has been revoked",
+                            headers={"WWW-Authenticate": "Bearer"})
+    exp = grant.expires_at
+    if exp is not None and exp.tzinfo is None:      # SQLite: tz-naive
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp is not None and exp < _utcnow():
+        raise HTTPException(401, "Scoped MCP token has expired",
+                            headers={"WWW-Authenticate": "Bearer"})
+    scope = [t for t in (grant.tools or []) if isinstance(t, str)]
+
+    # same enrichment + security posture as a normal session: the grantor's
+    # live tenant/access groups apply, a suspended grantor kills the token
+    try:
+        user = await _enrich_with_access_group(user, session)
+        await _security_check(user, credentials.credentials, session)
+        from velaris_shared.auth.dependencies import _tenant_open_check
+        await _tenant_open_check(user, session)     # an archived tenant's grant is dead too
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from velaris_shared.auth.dependencies import raise_if_db_unavailable
+
+        raise_if_db_unavailable(exc)   # an outage refuses; anything else as before
+        log.warning("mcp scoped-token enrichment skipped", exc_info=True)
+    return user, scope, grant_id
 
 
 def caller_scope(user: AuthenticatedUser) -> set[str] | None:

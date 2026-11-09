@@ -30,13 +30,14 @@ docker ps --format '{{.Names}}' | grep -q velaris-openbao \
 if [ -f "$INIT_FILE" ]; then
   echo "✗ $INIT_FILE already exists — OpenBao is already initialized."
   echo "  To re-initialize from scratch: docker compose down openbao &&" \
-       "docker volume rm docker-compose_openbao-data && remove $INIT_FILE"
+       "docker volume rm docker-compose_openbao-file && remove $INIT_FILE"
   exit 1
 fi
 
-# Fresh named volumes are root-owned; the server runs as the openbao user.
+# The server runs as the openbao user and its raft data lives in /openbao/file
+# (the image's entrypoint already keeps that owned correctly; this makes sure).
 # One-time, idempotent.
-docker exec -u root velaris-openbao chown -R openbao:openbao /openbao/data
+docker exec -u root velaris-openbao chown -R openbao:openbao /openbao/file
 
 echo "▶ Initializing OpenBao (1 key share — Tier 1)..."
 "$BAO" operator init -key-shares=1 -key-threshold=1 -format=json > "$INIT_FILE"

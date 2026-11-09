@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   API Client — typed wrapper around the Helix Engine REST API
+   API Client — typed wrapper around the Velaris REST API
 
    All calls go through /api which Vite proxies to localhost:8100.
    ═══════════════════════════════════════════════════════════════════ */
@@ -865,6 +865,149 @@ export async function listForms(): Promise<any> {
 
 export async function getForm(formId: string): Promise<any> {
   return caseRequest(`/forms/${formId}`);
+}
+
+/** Connectors a form can use — names only matter to the builder's pickers. */
+export interface ConnectorSummary { id: string; name: string; connector_type: string; enabled: boolean;
+  /** Named operations (2026-11-04); empty = the connector's one request. */
+  operations?: { key: string; label: string; method: string }[] }
+export async function listFormConnectors(): Promise<ConnectorSummary[]> {
+  const r = await caseRequest<{ connectors?: ConnectorSummary[] }>("/hxbridge/connectors?enabled=true");
+  return r.connectors ?? [];
+}
+
+/* ── Reference tables (Form Builder v2 step 3) ─────────────────── */
+
+export type RefColumn = { key: string; label: string; type: "text" | "number" | "date" | "boolean" };
+export type RefTableSummary = { id: string; name: string; description: string; columns: RefColumn[];
+  row_count: number; platform: boolean; updated_at: string | null };
+export type RefRow = { data: Record<string, any>; is_active: boolean };
+
+export async function listReferenceTables(): Promise<RefTableSummary[]> {
+  return (await caseRequest<{ items: RefTableSummary[] }>("/reference-tables")).items ?? [];
+}
+export async function getReferenceTable(id: string, q = ""): Promise<RefTableSummary & { rows: RefRow[] }> {
+  return caseRequest(`/reference-tables/${id}${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+}
+export async function createReferenceTable(body: { name: string; description?: string; columns: RefColumn[] }): Promise<RefTableSummary> {
+  return caseRequest("/reference-tables", { method: "POST", body: JSON.stringify(body) });
+}
+export async function updateReferenceTable(id: string, body: { name?: string; description?: string; columns?: RefColumn[] }): Promise<RefTableSummary> {
+  return caseRequest(`/reference-tables/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+}
+export async function replaceReferenceRows(id: string, rows: RefRow[]): Promise<RefTableSummary> {
+  return caseRequest(`/reference-tables/${id}/rows`, { method: "PUT", body: JSON.stringify({ rows }) });
+}
+export async function deleteReferenceTable(id: string): Promise<void> {
+  await caseRequest(`/reference-tables/${id}`, { method: "DELETE" });
+}
+
+/** Run a form lookup. The server runs what the SAVED form says, unless the caller may run connectors by hand. */
+export async function runFormLookup(connectorId: string, body: {
+  input_data: Record<string, any>; form_id?: string; field_key?: string; case_id?: string;
+  /** Used only for an integration administrator's Test; others run the saved field's. */
+  operation?: string;
+}): Promise<{ ok: boolean; result?: any; error?: string }> {
+  return caseRequest(`/hxbridge/connectors/${connectorId}/form-lookup`, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The case variables a form's fields can be pre-filled from (designers only). */
+export interface FormVariable { full_key: string; namespace: string | null; label: string | null; var_type: string; case_types: string[] }
+/* ── Reusable form sections + form versions per case (Form Builder §5 step 6) ── */
+
+export type FormSectionBody = { title: string; description?: string; fields: any[] };
+export type ReusableSection = {
+  id: string; name: string; description: string; version: number; section: FormSectionBody;
+  platform: boolean; updated_at: string | null; used_by?: string[]; updated_forms?: string[];
+};
+
+export async function listFormSections(): Promise<{ items: ReusableSection[] }> {
+  return caseRequest("/form-sections");
+}
+export async function getFormSection(id: string): Promise<ReusableSection> {
+  return caseRequest(`/form-sections/${id}`);
+}
+export async function createFormSection(body: { name: string; description?: string; section: FormSectionBody }): Promise<ReusableSection> {
+  return caseRequest("/form-sections", { method: "POST", body: JSON.stringify(body) });
+}
+/** Changes the section and every form that links it — or nothing (409 / 422 name the form). */
+export async function updateFormSection(id: string, body: { name: string; description?: string; section: FormSectionBody }): Promise<ReusableSection> {
+  return caseRequest(`/form-sections/${id}`, { method: "PUT", body: JSON.stringify(body) });
+}
+export async function deleteFormSection(id: string): Promise<void> {
+  await caseRequest(`/form-sections/${id}`, { method: "DELETE" });
+}
+/** A form as this case uses it: its pinned version when the form is versioned per case. */
+export async function getCaseForm(caseId: string, formId: string): Promise<any> {
+  return caseRequest(`/form-submissions/cases/${caseId}/forms/${formId}`);
+}
+
+/** A person's unfinished answers to a case's form (§5 step 7) — theirs only, never checked. */
+export type FormDraft = { values: Record<string, any>; updated_at: string | null };
+export async function getFormDraft(caseId: string, formId: string): Promise<FormDraft | null> {
+  return (await caseRequest<any>(`/form-submissions/cases/${caseId}/forms/${formId}/draft`)).draft;
+}
+export async function saveFormDraft(caseId: string, formId: string, values: Record<string, any>): Promise<FormDraft> {
+  return (await caseRequest<any>(`/form-submissions/cases/${caseId}/forms/${formId}/draft`, {
+    method: "PUT", body: JSON.stringify({ values }) })).draft;
+}
+export async function discardFormDraft(caseId: string, formId: string): Promise<void> {
+  await caseRequest(`/form-submissions/cases/${caseId}/forms/${formId}/draft`, { method: "DELETE" });
+}
+
+/** The access roles a field can be limited to (field-level security, §5 step 7). */
+export async function getFormAccessRoles(): Promise<{ id: string; name: string }[]> {
+  return (await caseRequest<any>("/forms/access-roles")).roles;
+}
+
+export type FormTestResult = {
+  name: string; passed: boolean; problems: string[];
+  errors: { field_key: string; message: string }[]; values: Record<string, any>;
+};
+/** Run a form's test scenarios through the server's own check (§5 step 7). */
+export async function runFormTests(definition: Record<string, any>, tests: any[]): Promise<{
+  results: FormTestResult[]; passed: number; total: number;
+}> {
+  return caseRequest<any>("/forms/test-run", { method: "POST", body: JSON.stringify({ definition, tests }) });
+}
+
+/** A tenant's approved sites for the form Embed field (2026-10-29). */
+/** What a tenant's forms may embed (Admin > Security > Allowed sites, 2026-11-04).
+ *  `allowed_origins` is the effective list: the tenant's own (`own_origins`, when
+ *  `may_add`) and the platform's, minus the blocked. An older server sends only
+ *  the first two keys; the rest default to "as before". */
+export type EmbedSettings = {
+  allowed_origins: string[]; portal: boolean;
+  own_origins?: string[]; platform_origins?: string[]; blocked?: string[];
+  may_add?: boolean; allow_forms?: boolean;
+};
+
+export async function getEmbedSettings(): Promise<EmbedSettings> {
+  return caseRequest("/forms/embed-settings");
+}
+
+/** Admin only — the server refuses anyone else. Sends the tenant's OWN list. */
+export async function putEmbedSettings(body: { allowed_origins: string[]; portal: boolean }): Promise<EmbedSettings> {
+  return caseRequest("/forms/embed-settings", { method: "PUT", body: JSON.stringify(body) });
+}
+
+/** The platform operator's policy for embedded sites. */
+export type AllowedSitesPolicy = {
+  platform_origins: string[]; blocked: string[]; tenants_may_add: boolean; allow_forms: boolean;
+};
+
+export async function getAllowedSitesPolicy(): Promise<AllowedSitesPolicy> {
+  return caseRequest("/forms/allowed-sites/policy");
+}
+
+export async function putAllowedSitesPolicy(body: AllowedSitesPolicy): Promise<AllowedSitesPolicy> {
+  return caseRequest("/forms/allowed-sites/policy", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function getFormVariables(formId: string): Promise<{
+  case_types: { id: string; name: string }[]; variables: FormVariable[];
+}> {
+  return caseRequest(`/forms/${formId}/variables`);
 }
 
 export async function createForm(body: {
@@ -4052,6 +4195,23 @@ export interface LegalHold {
   matter_ref: string; reason: string; status: "active" | "released";
   placed_by: string; placed_at: string | null;
   released_by: string | null; released_at: string | null; release_reason: string | null;
+  // Release approval (mig 218). Absent on an older server = no approval.
+  approval_required?: boolean;
+  pending_release?: LegalHoldReleaseRequest | null;
+  can_approve?: boolean; can_withdraw?: boolean;
+}
+
+export interface LegalHoldReleaseRequest {
+  id: string; status: string; reason: string; requested_by: string; requested_at: string | null;
+}
+
+export interface LegalHoldSettings {
+  available: boolean;
+  approver_group_id: string | null;
+  approver_group: { id: string; name: string; is_active: boolean; members: number } | null;
+  approver_group_unusable: boolean;
+  can_configure: boolean; can_change: boolean;
+  groups: Array<{ id: string; name: string; is_active: boolean; members: number }>;
 }
 
 /** What anyone who can read the case is told. `holds` only with `legal.holds.read`. */
@@ -4085,14 +4245,38 @@ export async function placeLegalHold(caseIds: string[], matterRef: string, reaso
 }
 
 export async function releaseLegalHold(holdId: string, reason: string) {
-  return caseRequest<{ hold: LegalHold; case_still_held: boolean }>(
+  // `pending: true` (HTTP 202): the tenant names an approving group, so this
+  // asked for the release; the hold stands until a member approves.
+  return caseRequest<{ hold: LegalHold; case_still_held: boolean; pending?: boolean }>(
     `/legal-holds/${holdId}/release`, { method: "POST", body: JSON.stringify({ reason }) });
 }
 
 export async function releaseLegalMatter(matterRef: string, reason: string) {
-  return caseRequest<{ released: number; matter_ref: string; case_ids: string[] }>(
+  return caseRequest<{ released: number; pending_approval?: number; matter_ref: string; case_ids: string[] }>(
     "/legal-holds/matters/release",
     { method: "POST", body: JSON.stringify({ matter_ref: matterRef, reason }) });
+}
+
+export async function approveLegalRelease(holdId: string, note?: string) {
+  return caseRequest<{ hold: LegalHold; case_still_held: boolean }>(
+    `/legal-holds/${holdId}/release/approve`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) });
+}
+
+/** Refuse (a member of the approving group) or withdraw (the person who asked). */
+export async function rejectLegalRelease(holdId: string, note: string) {
+  return caseRequest<{ hold: LegalHold }>(
+    `/legal-holds/${holdId}/release/reject`, { method: "POST", body: JSON.stringify({ note }) });
+}
+
+export async function getLegalHoldSettings() {
+  return caseRequest<LegalHoldSettings>("/legal-holds/settings");
+}
+
+export async function setLegalHoldApprover(groupId: string | null) {
+  return caseRequest<LegalHoldSettings>("/legal-holds/settings", {
+    method: "PUT", body: JSON.stringify({ approver_group_id: groupId }),
+  });
 }
 
 // ── Oct item 18a — staged rollouts of case type versions ─────────────────────

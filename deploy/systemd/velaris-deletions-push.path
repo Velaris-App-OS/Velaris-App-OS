@@ -1,0 +1,12 @@
+[Unit]
+Description=Velaris — copy a purged account's signed record off the box the moment it is written
+
+[Path]
+# The platform writes each record to .deletions/ (velaris_shared.identity.ledger).
+# A restore after losing this box needs them most, so they leave at once —
+# not at the next daily backup. Nothing configured off-box = nothing to do.
+PathChanged=__VELARIS_DIR__/.deletions
+Unit=velaris-deletions-push.service
+
+[Install]
+WantedBy=multi-user.target

@@ -21,9 +21,25 @@ dependencies = [
     "webauthn>=2.0.0",
     "structlog>=24.1",
     "redis>=5.0",
+    "phonenumbers>=9,<10",  # Form Builder country-aware phone fields (Apache-2.0, 2026-11-04)
 ]
 
 [project.optional-dependencies]
+# The libraries moved here for the commerce split (2026-10-19, step 7):
+# app-container runtime (docker, faker, semver), the HxSandbox host (wasmtime),
+# the HxFusion parser (defusedxml), the Stripe connector (httpx), S3 storage
+# (minio) and the model-market maths (numpy). A service that imports them asks
+# for this extra; the others install nothing new. Versions match case-service's.
+commerce = [
+    "httpx>=0.28.0",
+    "minio>=7.2",
+    "defusedxml>=0.7.1",
+    "docker>=7.0.0",
+    "faker>=25.0.0",
+    "semver>=3.0.0",
+    "wasmtime>=45,<46",
+    "numpy>=2.4.4",    # velaris_shared.sentinel.maths (model market scoring)
+]
 mysql = [
     "aiomysql>=0.2.0",
     "pymysql>=1.1.0",

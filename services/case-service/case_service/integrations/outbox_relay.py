@@ -14,6 +14,10 @@ Design guarantees:
   This keeps pool connections free for the application during delivery.
 - SSRF-safe: validate_outbound_url() is called before every HTTP delivery.
 - Exponential back-off: 30s × 2^(attempts-1) between retries; max 5 attempts.
+- Keeps up under load (R6 soak 2026-11-06, L2): a full batch is followed by the
+  next one at once — the 5 s pause is only for an empty or part-filled queue —
+  and the subscriptions are read once per batch, not once per row. Before, one
+  relay delivered at most 50 rows per 5 s and the backlog grew ~10k rows/h.
 
 Copyright (c) 2024-2025 Velaris Contributors
 SPDX-License-Identifier: BSL-1.1
@@ -33,7 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from case_service.integrations.webhook_dispatcher import (
     compute_signature,
-    get_matching_subscriptions,
+    load_active_subscriptions,
+    match_subscriptions,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,13 +93,18 @@ class OutboxRelay:
 
     async def _run(self) -> None:
         while self._running:
+            claimed = 0
             try:
-                await self._deliver_batch()
+                claimed = await self._deliver_batch()
             except Exception as exc:
                 logger.warning("outbox relay cycle error: %s", exc)
-            await asyncio.sleep(_POLL_INTERVAL)
+            # A full batch means more rows are waiting: take the next batch at
+            # once (yielding to the event loop first). Pause only when the
+            # queue is drained, or after an error.
+            await asyncio.sleep(0 if claimed >= _BATCH_SIZE else _POLL_INTERVAL)
 
-    async def _deliver_batch(self) -> None:
+    async def _deliver_batch(self) -> int:
+        """Deliver one batch; returns how many rows it claimed."""
         from velaris_shared.db.models import OutboxEventModel
 
         now             = datetime.now(timezone.utc)
@@ -136,7 +146,7 @@ class OutboxRelay:
                 rows = (await session.execute(base_q)).scalars().all()
 
             if not rows:
-                return
+                return 0
 
             for row in rows:
                 row.claimed_at = now
@@ -145,18 +155,30 @@ class OutboxRelay:
             # Commit immediately — lock released, connection returned to pool
             await session.commit()
 
+        # The active subscriptions, read ONCE for the batch (short read-only
+        # session, closed before any HTTP call).
+        async with self._factory() as session:
+            subs = await load_active_subscriptions(session)
+
         # ── HTTP delivery — no DB connection held ─────────────────────────
         results: list[_RowResult] = []
         for row_id, event_type, payload, case_type_id, current_attempts in claimed:
             result = await self._deliver_one(
-                row_id, event_type, payload, case_type_id, now, current_attempts
+                row_id, event_type, payload, case_type_id, now, current_attempts,
+                subs,
             )
             results.append(result)
 
         # ── Transaction 2: persist delivery outcomes ──────────────────────
         async with self._factory() as session:
+            by_id = {
+                r.id: r for r in (await session.execute(
+                    select(OutboxEventModel).where(
+                        OutboxEventModel.id.in_([res.row_id for res in results]))
+                )).scalars().all()
+            }
             for res in results:
-                db_row = await session.get(OutboxEventModel, res.row_id)
+                db_row = by_id.get(res.row_id)
                 if db_row is None:
                     continue
                 db_row.attempts        = res.attempts
@@ -169,6 +191,7 @@ class OutboxRelay:
                         res.row_id, _MAX_ATTEMPTS,
                     )
             await session.commit()
+        return len(claimed)
 
     async def _deliver_one(
         self,
@@ -178,13 +201,12 @@ class OutboxRelay:
         case_type_id:     uuid.UUID | None,
         now:              datetime,
         current_attempts: int,
+        active_subs:      list,
     ) -> _RowResult:
         """Deliver one outbox row. Returns the outcome without touching the DB."""
         from case_service.hxbridge.security import validate_outbound_url
 
-        # Load subscriptions using a short read-only session
-        async with self._factory() as session:
-            subs = await get_matching_subscriptions(session, event_type, case_type_id)
+        subs = match_subscriptions(active_subs, event_type, case_type_id)
 
         # Increment the attempt counter — Transaction 2 will persist this
         result = _RowResult(row_id=row_id, attempts=current_attempts + 1)

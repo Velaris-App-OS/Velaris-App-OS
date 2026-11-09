@@ -60,6 +60,12 @@ ROUTER_DIRS = [
     _SERVICES / "analytics-service" / "analytics_service" / "api" / "routers",
     _SERVICES / "hxgraph-service" / "hxgraph_service" / "api" / "routers",
     _SERVICES / "hxmigrate-service" / "hxmigrate_service" / "api" / "routers",
+    # R5e step 7 moved six routers out of case-service into commerce-service.
+    _SERVICES / "commerce-service" / "commerce_service" / "api" / "routers",
+    # R5e step 8 moved the three portal routers into portal-service.
+    _SERVICES / "portal-service" / "portal_service" / "api" / "routers",
+    # R5e step 10 moved the six sign-in and identity routers into user-service.
+    _SERVICES / "user-service" / "user_service" / "api" / "routers",
 ]
 
 #: Kept for callers that only care about this service's own routers.

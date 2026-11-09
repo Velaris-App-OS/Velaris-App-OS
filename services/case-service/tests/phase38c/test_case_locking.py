@@ -1,4 +1,4 @@
-"""HELIX P38c — Case Locking / My Task tests (20 tests).
+"""Velaris P38c — Case Locking / My Task tests (20 tests).
 
 Covers: get my-task (none, active, acquires lock), lock re-acquisition,
         lock prevents other operator from submitting, lock expiry bypass,
@@ -20,6 +20,14 @@ from velaris_shared.auth.models import AuthenticatedUser
 from velaris_shared.db.models import (
     CaseTypeModel, CaseInstanceModel, CaseAssignmentModel
 )
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _in_an_access_group():
+    """Since 2026-10-28 completing a step needs the caller in an access group
+    covering the case type (velaris_shared/hxguard/step_submit.py)."""
+    from tests.conftest import grant_case_create
+    await grant_case_create("op-1", "op-2")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -84,7 +92,7 @@ async def assignment(session, case_inst) -> CaseAssignmentModel:
     a = CaseAssignmentModel(
         case_id=case_inst.id,
         step_id=STEP_ID,
-        assignee_type="operator",
+        assignee_type="user",
         assignee_id="op-1",
         status="active",
     )

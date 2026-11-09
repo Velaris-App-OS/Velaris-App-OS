@@ -1,6 +1,6 @@
 """Pass 4: Generate.
 
-Converts mapped rules into Helix-native object definitions.
+Converts mapped rules into Velaris-native object definitions.
 Raw SQL generation has been removed (SEC-9) — all creation now goes through
 the Creator module (hxmigrate/creator.py) which uses Velaris REST APIs.
 
@@ -13,7 +13,7 @@ import uuid
 
 
 def generate(mapped: dict) -> dict:
-    """Pass 4: produce Helix-native object definitions from mapped rules."""
+    """Pass 4: produce Velaris-native object definitions from mapped rules."""
     case_types = [_gen_case_type(ct) for ct in mapped.get("case_types", [])]
     forms      = [_gen_form(f)       for f  in mapped.get("forms", [])]
     sla_rules  = [_gen_sla(s)        for s  in mapped.get("sla_rules", [])]
