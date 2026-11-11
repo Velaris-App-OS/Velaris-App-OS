@@ -247,6 +247,9 @@ class Settings(BaseSettings):
         default="", validation_alias="VELARIS_DEMO_PROVISION_SECRET")
     demo_max_tenants: int = Field(default=200, ge=0, validation_alias="VELARIS_DEMO_MAX_TENANTS")
     demo_tenant_days: int = Field(default=7, ge=1, le=365, validation_alias="VELARIS_DEMO_TENANT_DAYS")
+    # The tenant whose cases are website leads (2026-11-10): the website may erase a
+    # lead there (consent withdrawn, account deleted) and nowhere else. Unset = off.
+    demo_leads_tenant: str = Field(default="", validation_alias="VELARIS_DEMO_LEADS_TENANT")
     demo_max_users: int = Field(default=5, ge=1, validation_alias="VELARIS_DEMO_MAX_USERS")
     demo_max_cases: int = Field(default=200, ge=1, validation_alias="VELARIS_DEMO_MAX_CASES")
     # Days an expired (archived) demo tenant is kept — time for a sales

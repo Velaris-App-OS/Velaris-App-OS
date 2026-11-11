@@ -161,6 +161,8 @@ scim.py::get_user
 scim.py::list_users
 scim.py::patch_user
 scim.py::replace_user
+user_directory.py::_live
+user_directory.py::_set_account_roles
 user_directory.py::_superadmin_usernames
 user_directory.py::_to_response
 user_directory.py::bulk_sync

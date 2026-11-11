@@ -9,6 +9,10 @@ create or delete tenants. Now each sign-up gets a tenant of its own and is
 A demo tenant is marked `settings.demo = {request_key, kind, email, created_at,
 expires_at}`. Only a tenant carrying that mark is ever expired or deleted here.
 
+Kind `trial` (2026-11-10) is a website build's trial: the app made for one
+prospect. It is deleted AT expiry (7 days, design §11), not archived first,
+and the website may delete it at once ("Delete everything now").
+
 Copyright (c) 2024-2026 Velaris Contributors
 SPDX-License-Identifier: BSL-1.1
 """
@@ -26,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = logging.getLogger(__name__)
 
 SLUG_PREFIX = "demo-"
+#: kind of a website build's trial tenant (2026-11-10): deleted at expiry.
+TRIAL = "trial"
 GROUP_NAME = "Demo Users"
 _STAFF_PORTAL = uuid.UUID("00000000-0000-0000-0000-000000000001")   # migration 033
 _ADMIN_ROLE = "00000000-0000-0001-0000-000000000001"                 # access role `admin`
@@ -270,7 +276,7 @@ async def extend(session: AsyncSession, tenant_ref: str, days: int) -> dict:
     return {"tenant_id": str(tenant.id), "expires_at": demo["expires_at"]}
 
 
-async def expire_due(session: AsyncSession, held_count) -> dict[str, int]:
+async def expire_due(session: AsyncSession, held_count, erase_data=None) -> dict[str, int]:
     """Archive demo tenants past `expires_at`; delete those archived
     `demo_delete_after_days` ago, accounts first. Only tenants carrying the
     demo mark. One commit per tenant. `held_count(session, tenant_uuid)` is the
@@ -294,6 +300,15 @@ async def expire_due(session: AsyncSession, held_count) -> dict[str, int]:
         exp = _parse(demo.get("expires_at"))
         if exp is None or exp > now:
             continue
+        if demo.get("kind") == TRIAL:
+            # A website build's trial (2026-11-10): deleted AT expiry, as its
+            # 7-day lifetime says (design §11) — no archived grace period.
+            if await held_count(session, t.id):
+                out["blocked"] += 1
+                continue
+            await _delete_tenant(session, t, erase_data)
+            out["deleted"] += 1
+            continue
         if t.status != "archived":
             demo["archived_at"] = now.isoformat()
             t.settings = {**t.settings, "demo": demo}
@@ -307,24 +322,85 @@ async def expire_due(session: AsyncSession, held_count) -> dict[str, int]:
         if await held_count(session, t.id):
             out["blocked"] += 1
             continue
-        refs = (t.slug, str(t.id))
-        ids = (await session.execute(select(UserDirectoryModel.user_id).where(
-            UserDirectoryModel.tenant_id.in_(refs)))).scalars().all()
-        for uid in ids:
-            try:
-                u = await session.get(HelixUserModel, uuid.UUID(str(uid)))
-            except ValueError:
-                u = None
-            if u is not None:
-                await purge_user(session, u, actor="demo-expiry")
-        for row in (await session.execute(select(UserDirectoryModel).where(
-                UserDirectoryModel.tenant_id.in_(refs)))).scalars().all():
-            await session.delete(row)
-        for g in (await session.execute(select(AccessGroupModel).where(
-                AccessGroupModel.tenant_id.in_(refs)))).scalars().all():
-            await session.delete(g)
-        await session.delete(t)
-        await session.commit()
+        await _delete_tenant(session, t, erase_data)
         out["deleted"] += 1
     return out
+
+
+async def _delete_tenant(session: AsyncSession, t: Any, erase_data=None) -> None:
+    """Accounts first, then the directory rows, the access groups, the tenant's
+    own data (`erase_data(session, tenant_uuid)` — case-service passes
+    compliance.erasure.erase_tenant_data: cases, case types, forms… whose
+    foreign keys to `tenants` do not cascade; without it a tenant that has
+    cases cannot be deleted, 2026-11-10) and the tenant. One commit."""
+    if erase_data is not None:
+        await erase_data(session, t.id)
+    from velaris_shared.db.models import AccessGroupModel, HelixUserModel, UserDirectoryModel
+    from velaris_shared.identity.lifecycle import purge_user
+    refs = (t.slug, str(t.id))
+    ids = (await session.execute(select(UserDirectoryModel.user_id).where(
+        UserDirectoryModel.tenant_id.in_(refs)))).scalars().all()
+    for uid in ids:
+        try:
+            u = await session.get(HelixUserModel, uuid.UUID(str(uid)))
+        except ValueError:
+            u = None
+        if u is not None:
+            await purge_user(session, u, actor="demo-expiry")
+    for row in (await session.execute(select(UserDirectoryModel).where(
+            UserDirectoryModel.tenant_id.in_(refs)))).scalars().all():
+        await session.delete(row)
+    for g in (await session.execute(select(AccessGroupModel).where(
+            AccessGroupModel.tenant_id.in_(refs)))).scalars().all():
+        await session.delete(g)
+    await session.delete(t)
+    await session.commit()
+
+
+async def _held_by_sql(session: AsyncSession, tenant_uuid: Any) -> int:
+    """Active legal holds on a tenant (for callers outside case-service): by
+    the hold's tenant or its cases'. No legal-hold table = none."""
+    from sqlalchemy import text
+    try:
+        async with session.begin_nested():
+            return int((await session.execute(text(
+                "SELECT COUNT(*) FROM legal_holds WHERE status = 'active' AND (tenant_id = :t "
+                "OR case_id IN (SELECT id FROM case_instances WHERE tenant_id = :t))"),
+                {"t": str(tenant_uuid)})).scalar_one() or 0)
+    except Exception:                                        # noqa: BLE001
+        return 0
+
+
+async def erase_demo(session: AsyncSession, tenant_ref: str, held_count=None, erase_data=None) -> dict:
+    """A website ACCOUNT erasure (2026-11-10): any tenant the website made — a
+    sign-up's demo tenant or a build's trial — deleted now, accounts first.
+    Never a tenant without the demo mark (404). Kept under a legal hold (409)."""
+    from velaris_shared.db.models import TenantModel
+    from velaris_shared.tenancy.identity import resolve_tenant
+
+    hit = await resolve_tenant(session, tenant_ref)
+    t = await session.get(TenantModel, hit[0]) if hit else None
+    if t is None or not is_demo(t):
+        raise DemoError(404, "Not a demo tenant.")
+    if await (held_count or _held_by_sql)(session, t.id):
+        raise DemoError(409, "A legal hold is active on this tenant; it is kept.")
+    await _delete_tenant(session, t, erase_data)
+    return {"deleted": True}
+
+
+async def delete_trial(session: AsyncSession, tenant_ref: str, held_count=None, erase_data=None) -> dict:
+    """"Delete everything now" for a website build's trial (2026-11-10): only a
+    demo-marked tenant of kind `trial` — never a sign-up's demo tenant, never
+    any other tenant. Refused (409) under a legal hold."""
+    from velaris_shared.db.models import TenantModel
+    from velaris_shared.tenancy.identity import resolve_tenant
+
+    hit = await resolve_tenant(session, tenant_ref)
+    t = await session.get(TenantModel, hit[0]) if hit else None
+    if t is None or not is_demo(t) or t.settings["demo"].get("kind") != TRIAL:
+        raise DemoError(404, "Not a trial tenant.")
+    if await (held_count or _held_by_sql)(session, t.id):
+        raise DemoError(409, "A legal hold is active on this trial; it is kept.")
+    await _delete_tenant(session, t, erase_data)
+    return {"deleted": True}
 

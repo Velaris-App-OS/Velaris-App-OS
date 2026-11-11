@@ -299,13 +299,15 @@ class RebacBackend:
         from velaris_shared.db.models import AccessGroupModel, OperatorAccessGroupModel
 
         try:
-            group_ids = (await session.execute(
+            from velaris_shared.tenancy.home import foreign_group_ids
+            foreign = await foreign_group_ids(session, str(user_id))
+            group_ids = [g for g in (await session.execute(
                 select(AccessGroupModel.id)
                 .join(OperatorAccessGroupModel,
                       OperatorAccessGroupModel.access_group_id == AccessGroupModel.id)
                 .where(OperatorAccessGroupModel.operator_id == user_id)
                 .where(AccessGroupModel.is_active == True)  # noqa: E712
-            )).scalars().all()
+            )).scalars().all() if g not in foreign]
             if not group_ids:
                 return None
             from .tuples import has_tuple
@@ -326,13 +328,15 @@ class RebacBackend:
     ) -> bool:
         from sqlalchemy import select
         from velaris_shared.db.models import AccessGroupModel, OperatorAccessGroupModel
-        rows = (await session.execute(
-            select(AccessGroupModel.allowed_case_type_ids)
+        from velaris_shared.tenancy.home import foreign_group_ids
+        foreign = await foreign_group_ids(session, str(user_id))
+        rows = [allowed for gid, allowed in (await session.execute(
+            select(AccessGroupModel.id, AccessGroupModel.allowed_case_type_ids)
             .join(OperatorAccessGroupModel,
                   OperatorAccessGroupModel.access_group_id == AccessGroupModel.id)
             .where(OperatorAccessGroupModel.operator_id == user_id)
             .where(AccessGroupModel.is_active == True)  # noqa: E712
-        )).scalars().all()
+        )).all() if gid not in foreign]
         for allowed in rows:
             if "*" in (allowed or []) or str(case_type_id) in (allowed or []):
                 return True

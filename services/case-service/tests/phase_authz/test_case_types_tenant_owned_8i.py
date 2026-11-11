@@ -58,7 +58,7 @@ DEFN = {"stages": [{"id": "s1", "name": "Intake", "steps": []}]}
 async def _case_creators(setup_db):
     """Creating a case needs an access group granting it (2026-10-18)."""
     from tests.conftest import grant_case_create
-    await grant_case_create('devadmin', 'defadmin', 'ghostadmin')
+    await grant_case_create('defadmin', 'ghostadmin')
 
 
 @pytest_asyncio.fixture
@@ -87,6 +87,8 @@ async def world():
                                   stage_id="s1", name="Intake", stage_type="primary", order=1,
                                   definition_json={}))
         await db.commit()
+    from tests.conftest import grant_case_create
+    await grant_case_create('devadmin', tenant=str(v.id))   # dev's own group (2026-11-09)
     yield {"default": d, "dev": v, "ct": default_ct, "own": own_ct}
     tenancy.clear_cache()
 

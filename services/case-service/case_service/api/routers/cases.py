@@ -693,13 +693,15 @@ async def list_cases(
                      or "superadmin" in (user.roles or [])
                      or "manager" in (user.roles or [])):
         from velaris_shared.db.models import AccessGroupModel, OperatorAccessGroupModel
-        allowed_lists = (await session.execute(
-            sa_select(AccessGroupModel.allowed_case_type_ids)
+        from velaris_shared.tenancy.home import foreign_group_ids
+        _foreign = await foreign_group_ids(session, str(user.user_id))
+        allowed_lists = [lst for gid, lst in (await session.execute(
+            sa_select(AccessGroupModel.id, AccessGroupModel.allowed_case_type_ids)
             .join(OperatorAccessGroupModel,
                   OperatorAccessGroupModel.access_group_id == AccessGroupModel.id)
             .where(OperatorAccessGroupModel.operator_id == user.user_id)
             .where(AccessGroupModel.is_active == True)  # noqa: E712
-        )).scalars().all()
+        )).all() if gid not in _foreign]
         allowed_ids: list = []
         unrestricted = False
         for lst in allowed_lists:

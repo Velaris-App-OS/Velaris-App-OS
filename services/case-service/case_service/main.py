@@ -910,6 +910,9 @@ def create_app() -> FastAPI:
     # without the install's internal service secret.
     from case_service.internal_api.router import router as _internal_router
     app.include_router(_internal_router)
+    # The website's demo door on case-service (2026-11-10): erase a lead for good.
+    from case_service.internal_api.demo_erase import router as _demo_erase_router
+    app.include_router(_demo_erase_router)
 
     return app
 

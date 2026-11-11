@@ -308,6 +308,9 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
         </div>
         <Button size="sm" variant="ghost" onClick={() => setAdding(true)}>+ Add Member</Button>
       </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: "var(--space-sm)" }}>
+        Membership lets this tenant's admins reach a user. The tenant a user signs in to is set in User Directory → Tenant.
+      </div>
 
       {adding && (
         <div style={{

@@ -405,7 +405,7 @@ async def register_user(
         select(HelixUserModel).where(
             (HelixUserModel.username == body.username) | (HelixUserModel.email == body.email)
         )
-    )).scalar_one_or_none()
+    )).scalars().first()      # username of one account + email of another: 2 rows
     if existing:
         raise HTTPException(409, "Username or email already in use.")
     _assert_role_grant(user, body.roles)
@@ -424,6 +424,34 @@ async def register_user(
     await session.commit()
     await session.refresh(new_user)
     return _user_dict(new_user)
+
+
+@router.get("/register/availability")
+async def register_availability(
+    username: str = "",
+    email: str = "",
+    session: AsyncSession = Depends(get_session),
+    user:    AuthenticatedUser = Depends(hxguard.guard("identity.users.write")),
+):
+    """Whether a username / email is free for a new account — asked by Studio's
+    New User form BEFORE it writes anything (2026-11-10). Until then a taken
+    name reached the directory step first and came back as the tenant guard's
+    bare 404 "Not found", or the login step's 409 was swallowed and left a
+    directory entry with no login. Tells the caller nothing `/register` itself
+    does not (its 409), and needs the same permission. Additive."""
+    from velaris_shared.db.models import UserDirectoryModel
+
+    u, e = username.strip(), email.strip()
+    username_taken = email_taken = False
+    if u:
+        username_taken = (await session.execute(select(HelixUserModel.id).where(
+            (HelixUserModel.username == u) | (HelixUserModel.email == u)))).first() is not None \
+            or (await session.execute(select(UserDirectoryModel.id).where(
+                UserDirectoryModel.user_id == u))).first() is not None
+    if e:
+        email_taken = (await session.execute(select(HelixUserModel.id).where(
+            func.lower(HelixUserModel.email) == e.lower()))).first() is not None
+    return {"username_taken": username_taken, "email_taken": email_taken}
 
 
 # ── Superadmin guard ──────────────────────────────────────────────

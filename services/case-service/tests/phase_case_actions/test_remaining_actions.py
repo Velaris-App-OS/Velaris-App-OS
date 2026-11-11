@@ -75,7 +75,7 @@ def _headers(username: str) -> dict[str, str]:
 async def _case_creators(setup_db):
     """Creating a case needs an access group granting it (2026-10-18)."""
     from tests.conftest import grant_case_create
-    await grant_case_create('ren')
+    await grant_case_create('ren', tenant='rem')   # ren is tenant rem's
 
 
 @pytest_asyncio.fixture
@@ -513,6 +513,9 @@ async def test_a_group_member_gains_access_through_the_tuple(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",
@@ -559,6 +562,9 @@ async def test_deactivating_the_group_withdraws_the_access(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",
@@ -606,6 +612,9 @@ async def test_a_group_tuple_does_not_leak_to_another_case(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",
@@ -645,6 +654,9 @@ async def test_a_group_member_also_SEES_the_case_in_the_list(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",
@@ -681,6 +693,9 @@ async def test_deactivating_the_group_removes_it_from_the_list_too(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",
@@ -828,6 +843,9 @@ async def test_group_access_never_confers_the_power_to_RE_SHARE(cased):
         await db.flush()
         db.add(OperatorAccessGroupModel(
             id=uuid.uuid4(), operator_id=member, access_group_id=group.id))
+        # The member is in the group's tenant (since 2026-11-09 another
+        # tenant's group is never applied).
+        db.add(UserDirectoryModel(id=uuid.uuid4(), user_id=member, tenant_id=group.tenant_id))
         await _tuples.write_tuple(
             db, object_type="case", object_id=cased["case"],
             relation="editor", subject_type="access_group",

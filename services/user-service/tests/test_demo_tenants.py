@@ -325,6 +325,48 @@ async def test_the_sales_extension_reopens_an_archived_demo(raw, secret):
     assert r.status_code == 404
 
 
+# ── a website build's trial tenant (2026-11-10) ──────────────────────────────
+# (deleting one now — trial "Delete everything now", account erasure — lives on
+# case-service with the tenant's cases: case-service tests/test_erase_lead.py)
+
+async def test_a_trial_is_deleted_at_expiry_without_a_grace_period(raw, secret):
+    trial = await _make(raw, "tri", kind="trial")
+    signup = await _make(raw, "sig")                      # an ordinary demo sign-up
+    await _age(trial["tenant_id"], expires_days_ago=0.01)
+    await _age(signup["tenant_id"], expires_days_ago=0.01)
+    async with TestSessionFactory() as db:
+        out = await demo.expire_due(db, _none)
+    assert out["deleted"] == 1 and out["archived"] == 1
+    async with TestSessionFactory() as db:
+        assert await db.get(TenantModel, uuid.UUID(trial["tenant_id"])) is None
+        assert await db.get(HelixUserModel, uuid.UUID(trial["user_id"])) is None
+        # the sign-up's tenant keeps its archived grace period, as before
+        assert (await db.get(TenantModel, uuid.UUID(signup["tenant_id"]))).status == "archived"
+
+
+async def test_a_trial_under_a_legal_hold_is_kept(raw, secret):
+    trial = await _make(raw, "tri", kind="trial")
+    await _age(trial["tenant_id"], expires_days_ago=1)
+
+    async def held(session, tid):
+        return 1
+    async with TestSessionFactory() as db:
+        assert (await demo.expire_due(db, held))["blocked"] == 1
+    async with TestSessionFactory() as db:
+        assert await db.get(TenantModel, uuid.UUID(trial["tenant_id"])) is not None
+
+
+async def test_the_trial_admin_is_admin_of_its_own_tenant_only(client, raw, secret):
+    """The builder signs in as the trial's admin: it must reach nothing else."""
+    trial = await _make(raw, "tri", kind="trial")
+    other = await _make(raw, "oth")
+    h = _token(trial["user_id"], "tri_demo")
+    r = await client.get("/api/v1/tenants", headers=h)
+    if r.status_code == 200:
+        slugs = {t.get("slug") for t in (r.json() if isinstance(r.json(), list) else r.json().get("items", []))}
+        assert other["tenant_slug"] not in slugs and "default" not in slugs
+
+
 # ── moving the accounts made before this fix ──────────────────────────────────
 
 async def _old_style(username: str, *, superadmin: bool = False) -> HelixUserModel:
@@ -816,7 +858,13 @@ async def test_http_custom_checks_the_target_unless_the_operator_owns_it():
     tenant_conn = HttpCustomConnector(runtime_config(cfg, False), {})                  # …is dropped
     with pytest.raises(ValueError):
         await tenant_conn.execute({"port": "1"})
-    op_conn = HttpCustomConnector(runtime_config(cfg, True), {})
-    with pytest.raises(httpx.HTTPError):        # tried the LAN (nothing listens on :1)
-        await op_conn.execute({"port": "1"})
+    # A placeholder in the authority (the port here) lets the form's input pick
+    # the target, so even the operator's connector is then held to public ones.
+    op_templated = HttpCustomConnector(runtime_config(cfg, True), {})
+    with pytest.raises(ValueError):
+        await op_templated.execute({"port": "1"})
+    # The operator's fixed LAN target is tried (nothing listens on :1).
+    op_conn = HttpCustomConnector(runtime_config({**cfg, "url": "http://127.0.0.1:1/"}, True), {})
+    with pytest.raises(httpx.HTTPError):
+        await op_conn.execute({})
     assert await tenant_conn.test() is False

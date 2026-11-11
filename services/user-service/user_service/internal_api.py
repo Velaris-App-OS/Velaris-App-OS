@@ -31,7 +31,8 @@ class DemoTenantIn(BaseModel):
     email: str = Field(min_length=3, max_length=255, pattern=r"^[^@\s]+@[^@\s]+$")
     password: str = Field(min_length=12, max_length=200)
     display_name: str | None = Field(default=None, max_length=200)
-    kind: str = Field(default="free", pattern="^(free|work)$")
+    # trial (2026-11-10): a website build's own app, deleted at expiry
+    kind: str = Field(default="free", pattern="^(free|work|trial)$")
 
 
 class MoveIn(BaseModel):

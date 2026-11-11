@@ -21,10 +21,13 @@ STARTUP_DELAY_SECONDS = 120
 
 
 async def run_once(session) -> dict[str, int]:
+    from case_service.compliance.erasure import erase_tenant_data
     from case_service.legal_hold.service import tenant_active_count
     from velaris_shared.tenancy.demo import expire_due
 
-    return await expire_due(session, tenant_active_count)
+    async def erase(s, tid):          # a demo tenant WITH cases could not be deleted before (2026-11-10)
+        await erase_tenant_data(s, tid, actor="system:demo-expiry")
+    return await expire_due(session, tenant_active_count, erase)
 
 
 async def cron() -> None:

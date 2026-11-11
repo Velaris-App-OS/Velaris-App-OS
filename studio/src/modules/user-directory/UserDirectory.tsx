@@ -2,6 +2,13 @@ import React, { useEffect, useState, useRef } from "react";
 import { codedFrom } from "@shared/api/client";
 import ErrorCodeLink from "@shared/errors/ErrorCodeLink";
 import { getAccessToken } from "@/auth/tokenManager";
+import { usePermissions } from "@/auth/PermissionsContext";
+
+// The platform roles a sign-in token carries (hxguard KNOWN_ROLES; superadmin is
+// never granted from this screen). Until 2026-11-09 this field offered ACCESS
+// role names and saved them to a directory column nothing reads.
+const PLATFORM_ROLES = ["admin", "manager", "designer", "case_worker", "devops",
+  "integration", "security", "viewer", "developer", "staff", "finance"];
 
 type Entry = {
   id?: string;
@@ -88,7 +95,9 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
 
   // ── Autocomplete data ─────────────────────────────────────────
   const [allRoles, setAllRoles]   = useState<{ id: string; name: string }[]>([]);
-  const [allGroups, setAllGroups] = useState<{ id: string; name: string }[]>([]);
+  const [allGroups, setAllGroups] = useState<{ id: string; name: string; tenant_id?: string | null }[]>([]);
+  const [tenants, setTenants] = useState<{ id: string; slug: string; name: string }[]>([]);
+  const { isOperator } = usePermissions();
 
   async function load() {
     setErr(null);
@@ -141,12 +150,13 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
 
   async function loadAutocompleteData() {
     try {
-      const [roles, groups] = await Promise.all([
-        apiJSON<any[]>("/api/v1/access-roles").catch(() => []),
+      const [groups, tns] = await Promise.all([
         apiJSON<any[]>("/api/v1/access-groups").catch(() => []),
+        apiJSON<any[]>("/api/v1/tenants").catch(() => []),
       ]);
-      setAllRoles(roles.map((r: any) => ({ id: r.id, name: r.name })));
-      setAllGroups(groups.map((g: any) => ({ id: g.id, name: g.name })));
+      setAllRoles(PLATFORM_ROLES.map(r => ({ id: r, name: r })));
+      setAllGroups(groups.map((g: any) => ({ id: g.id, name: g.name, tenant_id: g.tenant_id })));
+      setTenants(tns.map((t: any) => ({ id: t.id, slug: t.slug, name: t.name })));
     } catch {}
   }
 
@@ -186,10 +196,32 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
     }
 
     setValidationErr(null);
-    setBusy(true); setErr(null);
+    setBusy(true); setErr(null); setErrObj(null);
     try {
       if (isNew) {
-        // Step 1: create the login account (HelixUserModel) so the user can sign in
+        // Step 0: a taken username or email is refused HERE, before anything is
+        // written (2026-11-10). It used to reach step 1 and come back as the
+        // tenant guard's bare "Not found", or step 2's 409 was swallowed and
+        // left a directory entry with no login.
+        const av = await apiJSON<{ username_taken: boolean; email_taken: boolean }>(
+          `/api/v1/auth/real/register/availability?username=${encodeURIComponent(editing.user_id)}`
+          + `&email=${encodeURIComponent(editing.email || "")}`);
+        if (av.username_taken || av.email_taken) {
+          setValidationErr(av.username_taken && av.email_taken ? "Username and email are already in use."
+            : av.username_taken ? "Username is already in use." : "Email is already in use.");
+          return;
+        }
+        // Step 1: the directory entry, with its tenant — BEFORE the login
+        // exists (2026-11-09). Login first meant a failure in between left an
+        // account with no entry: the default tenant, i.e. the operator.
+        // Groups are never sent here; they are memberships (step 3).
+        await apiJSON("/api/v1/user-directory", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...editing, access_group_ids: [] }),
+        });
+
+        // Step 2: the login account.
         try {
           await apiJSON("/api/v1/auth/real/register", {
             method: "POST",
@@ -204,33 +236,62 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
             }),
           });
         } catch (e: any) {
-          // 409 = auth account already exists — that's fine, just create the directory entry
+          // 409 = auth account already exists — the entry above now gives it a tenant
           if (!e.message.includes("409") && !e.message.toLowerCase().includes("already in use")) {
             throw e;
           }
         }
-
-        // Step 2: create the directory entry (UserDirectoryModel)
-        await apiJSON("/api/v1/user-directory", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(editing),
-        });
+        // Step 3: access groups are memberships (operator_access_groups), the
+        // only thing sign-in reads — after the tenant, which they must match.
+        await syncGroups(editing.user_id, [], editing.access_group_ids);
       } else {
-        // Edit: update directory entry only (password managed via profile drawer)
+        // Edit: removals first (a tenant move is refused while the user is in
+        // another tenant's group), then the entry — tenant, roles — then adds.
+        const before = entries.find(e => e.user_id === editing.user_id)?.access_group_ids ?? [];
+        await syncGroups(editing.user_id, before, before.filter(g => editing.access_group_ids.includes(g)));
         await apiJSON(`/api/v1/user-directory/${editing.user_id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(editing),
+          body: JSON.stringify({ ...editing, access_group_ids: [] }),
         });
+        await syncGroups(editing.user_id, before, editing.access_group_ids);
       }
 
       setEditing(null);
       setNewPassword("");
       setRequirePwChange(true);
       await load();
-    } catch (e: any) { setErr(e.message); setErrObj(e); }
+    } catch (e: any) {
+      // Shown in the modal the user is working in, not behind it (2026-11-10).
+      // The tenant guard answers a name owned by another tenant with 404.
+      const msg = String(e?.message || e);
+      setValidationErr(isNew && /^not found$/i.test(msg.trim()) ? "Username or email already in use." : msg);
+      setErrObj(e);
+    }
     finally { setBusy(false); }
+  }
+
+  async function syncGroups(userId: string, before: string[], after: string[]) {
+    for (const g of before.filter(g => !after.includes(g))) {
+      await apiJSON(`/api/v1/access-groups/${g}/members/${encodeURIComponent(userId)}`, { method: "DELETE" });
+    }
+    for (const g of after.filter(g => !before.includes(g))) {
+      try {
+        await apiJSON(`/api/v1/access-groups/${g}/members`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ operator_id: userId, is_primary: false }),
+        });
+      } catch (e: any) {
+        const name = allGroups.find(x => x.id === g)?.name || g;
+        // 404: another tenant's group — only that tenant's admin, or a
+        // superadmin, changes its members. The user itself was saved.
+        if (String(e?.message || "").includes("404") || /not found/i.test(String(e?.message || ""))) {
+          throw new Error(`User saved, but not added to "${name}": that group belongs to another tenant — its own admin, or a superadmin, adds members.`);
+        }
+        throw new Error(`User saved, but not added to "${name}": ${e?.message || e}`);
+      }
+    }
   }
 
   async function deactivate(user_id: string) {
@@ -388,7 +449,7 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
             <div style={{ padding: "var(--space-lg) var(--space-xl)" }}>
               {validationErr && (
                 <div style={{ background: "color-mix(in srgb, var(--status-failed) 10%, transparent)", color: "var(--status-failed)", border: "1px solid color-mix(in srgb, var(--status-failed) 25%, transparent)", padding: "8px 12px", borderRadius: "var(--radius-sm)", marginBottom: "var(--space-md)", fontSize: 12 }}>
-                  ⚠ {validationErr}
+                  ⚠ {validationErr}<ErrorCodeLink error={errObj} componentKey="user-directory" />
                 </div>
               )}
 
@@ -417,14 +478,28 @@ export default function UserDirectory({ embedded }: { embedded?: boolean } = {})
               <label style={lbl}>Manager</label>
               <ManagerSelect value={editing.manager_user_id || ""} onChange={(v) => setEditing({ ...editing, manager_user_id: v })} users={entries.filter(e => e.user_id !== editing.user_id)} />
 
+              {isOperator ? (
+                <>
+                  <label style={lbl}>Tenant</label>
+                  <select style={inp} value={editing.tenant_id || ""}
+                          onChange={e => setEditing({ ...editing, tenant_id: e.target.value || null })}>
+                    <option value="">Default — the platform's own tenant</option>
+                    {tenants.map(t => <option key={t.id} value={t.id}>{t.name} ({t.slug})</option>)}
+                  </select>
+                  <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>
+                    The tenant this user signs in to. In the default tenant, an <code>admin</code> administers the whole platform.
+                  </div>
+                </>
+              ) : null}
+
               <label style={lbl}>Roles</label>
               <AutocompleteChipInput values={editing.roles} onChange={(v) => setEditing({ ...editing, roles: v })}
                 options={allRoles.map(r => ({ value: r.name, label: r.name }))} placeholder="Select or type a role…" storeValue="value" />
-              {allRoles.length === 0 && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>No roles found — create roles in the Access Roles tab.</div>}
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>Platform roles — the user's next sign-in carries them.</div>
 
               <label style={lbl}>Access Groups</label>
               <AutocompleteChipInput values={editing.access_group_ids} onChange={(v) => setEditing({ ...editing, access_group_ids: v })}
-                options={allGroups.map(g => ({ value: g.id, label: g.name }))} placeholder="Select or type a group…" storeValue="value"
+                options={allGroups.map(g => ({ value: g.id, label: g.tenant_id ? `${g.name} · ${tenants.find(t => t.id === g.tenant_id || t.slug === g.tenant_id)?.slug ?? g.tenant_id}` : g.name }))} placeholder="Select or type a group…" storeValue="value"
                 displayValue={(v) => allGroups.find(g => g.id === v)?.name || v} />
               {allGroups.length === 0 && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>No groups found — create groups in the Access Groups tab.</div>}
 

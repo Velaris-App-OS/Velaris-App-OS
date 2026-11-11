@@ -429,7 +429,7 @@ async def create_case(
     return resp.json()
 
 
-async def grant_case_create(*operator_ids: str) -> None:
+async def grant_case_create(*operator_ids: str, tenant: str = "default") -> None:
     """Put test operators in an access group whose role grants Cases > Create.
 
     Since 2026-10-18 creating a case is decided by the caller's access group
@@ -437,6 +437,8 @@ async def grant_case_create(*operator_ids: str) -> None:
     platform `admin` included. Tests that create cases as a non-superadmin, and
     are not about that rule, call this for the identities they use (the
     operator id is matched against the token's user id, username or email).
+    `tenant`: the group's tenant — since 2026-11-09 a group of another tenant
+    is never applied, so a non-default user needs a group of their own tenant.
     """
     from velaris_shared.db.models import (
         AccessGroupModel, AccessRoleModel, OperatorAccessGroupModel, PortalModel,
@@ -447,7 +449,7 @@ async def grant_case_create(*operator_ids: str) -> None:
             {"resource": "case", "actions": ["create", "read", "update"], "case_type_id": "*"}])
         db.add_all([portal, role])
         await db.flush()
-        group = AccessGroupModel(name="Test case creators", tenant_id="default",
+        group = AccessGroupModel(name=f"Test case creators {tenant}", tenant_id=tenant,
                                  portal_id=portal.id, role_ids=[str(role.id)])
         db.add(group)
         await db.flush()

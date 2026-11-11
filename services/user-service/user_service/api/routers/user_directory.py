@@ -38,16 +38,71 @@ class UserDirectoryResponse(UserDirectoryEntry):
     updated_at: str
 
 
-def _to_response(u: UserDirectoryModel) -> UserDirectoryResponse:
+def _to_response(u: UserDirectoryModel, live: dict | None = None) -> UserDirectoryResponse:
+    """`live` (from `_live`) replaces the row's `roles` and `access_group_ids`
+    with what sign-in actually uses — see `_live`."""
+    roles, groups = (live or {}).get(u.user_id, (u.roles or [], u.access_group_ids or []))
     return UserDirectoryResponse(
         id=u.id, user_id=u.user_id, email=u.email, display_name=u.display_name,
         manager_user_id=u.manager_user_id,
-        access_group_ids=u.access_group_ids or [], roles=u.roles or [],
+        access_group_ids=groups, roles=roles,
         timezone=u.timezone or "UTC", tenant_id=u.tenant_id, is_active=u.is_active,
         metadata_json=u.metadata_json or {},
         created_at=u.created_at.isoformat() if u.created_at else "",
         updated_at=u.updated_at.isoformat() if u.updated_at else "",
     )
+
+
+async def _live(session: AsyncSession, rows: list[UserDirectoryModel]) -> dict:
+    """{user_id: (roles, access_group_ids)} as sign-in reads them (2026-11-09).
+
+    The row's own `roles` and `access_group_ids` are deprecated columns that
+    nothing reads: the token's roles are the ACCOUNT's (`velaris_users.roles`),
+    and access groups are `operator_access_groups`. The User Directory screen
+    showed and edited the dead columns, so a role or group set there did
+    nothing. A row with no account keeps its own columns, as before.
+    """
+    from sqlalchemy import or_
+    from velaris_shared.db.models import OperatorAccessGroupModel as O
+
+    ids = [r.user_id for r in rows]
+    if not ids:
+        return {}
+    uuids = []
+    for i in ids:
+        try:
+            uuids.append(uuid.UUID(str(i)))
+        except ValueError:
+            pass
+    conds = [HelixUserModel.username.in_(ids), HelixUserModel.email.in_(ids)]
+    if uuids:
+        # A row made by a tenant's admin is keyed by the account's id.
+        conds.append(HelixUserModel.id.in_(uuids))
+    accts = (await session.execute(select(HelixUserModel).where(or_(*conds)))).scalars().all()
+    by_id: dict[str, HelixUserModel] = {}
+    for a in accts:
+        by_id.setdefault(str(a.id), a)
+        by_id.setdefault(a.username, a)
+        if a.email:
+            by_id.setdefault(a.email, a)
+    idents: dict[str, list[str]] = {}
+    for r in rows:
+        a = by_id.get(r.user_id)
+        idents[r.user_id] = ([str(a.id), a.username] + ([a.email] if a.email else [])) if a else [r.user_id]
+    flat = {i for v in idents.values() for i in v}
+    member = {}
+    for o in (await session.execute(select(O).where(O.operator_id.in_(flat)))).scalars().all():
+        member.setdefault(o.operator_id, []).append(str(o.access_group_id))
+    out = {}
+    for r in rows:
+        a = by_id.get(r.user_id)
+        if a is None:
+            continue
+        groups: list[str] = []
+        for i in idents[r.user_id]:
+            groups += [g for g in member.get(i, []) if g not in groups]
+        out[r.user_id] = (list(a.roles or []), groups)
+    return out
 
 
 @router.post("", response_model=UserDirectoryResponse, status_code=201)
@@ -60,11 +115,53 @@ async def create_entry(
     existing = (await session.execute(q)).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(409, f"User {body.user_id} already exists")
+    # A tenant admin's register already made this account's row, keyed by the
+    # account id (tenancy/placement.py); Studio's second step names the
+    # username. Fill that row in rather than make a second one — two rows for
+    # one person showed twice, and sign-in reads only one (2026-11-09).
+    from velaris_shared.tenancy import home as _home
+    idents = await _home.account_identifiers(session, body.user_id)
+    prior = await _home.directory_rows(session, idents) if len(idents) > 1 else []
+    if prior:
+        row = prior[0]
+        try:
+            wanted = await tenant_for_write(session, user, body.tenant_id)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        from velaris_shared.tenancy.identity import DEFAULT_TENANT, same_tenant
+        if wanted and not await same_tenant(session, row.tenant_id or DEFAULT_TENANT, wanted):
+            raise HTTPException(409, "This user already has a directory entry in another "
+                                     "tenant; change its tenant with Edit.")
+        row.email = body.email or row.email
+        row.display_name = body.display_name or row.display_name
+        row.manager_user_id = body.manager_user_id
+        row.timezone = body.timezone
+        row.is_active = body.is_active
+        row.metadata_json = {**(row.metadata_json or {}), **(body.metadata_json or {})}
+        await session.flush()
+        return _to_response(row, await _live(session, [row]))
     # A directory row IS tenant membership. Stored as sent until 2026-09-30.
     try:
         tenant_id = await tenant_for_write(session, user, body.tenant_id)
     except PermissionError as exc:
         raise HTTPException(403, str(exc))
+    if tenant_id:
+        # An operator's write is stored as sent; a tenant that does not exist
+        # left the user in no tenant anyone could manage (2026-11-09).
+        from velaris_shared.tenancy.identity import resolve_tenant
+        resolved = await resolve_tenant(session, tenant_id)
+        if resolved is None:
+            raise HTTPException(422, f"No tenant '{tenant_id}'.")
+    # Memberships recorded before the person existed must match the tenant
+    # they are now given (2026-11-09).
+    from velaris_shared.tenancy import home
+    from velaris_shared.tenancy.identity import DEFAULT_TENANT
+    clash = await home.groups_outside(
+        session, await home.account_identifiers(session, body.user_id), tenant_id or DEFAULT_TENANT)
+    if clash:
+        raise HTTPException(409, "This user is already in access groups of another tenant: "
+                                 + ", ".join(sorted(g.name for g in clash))
+                                 + ". Choose that tenant, or remove them from those groups first.")
     u = UserDirectoryModel(
         user_id=body.user_id, email=body.email, display_name=body.display_name,
         manager_user_id=body.manager_user_id,
@@ -74,7 +171,7 @@ async def create_entry(
     )
     session.add(u)
     await session.flush()
-    return _to_response(u)
+    return _to_response(u, await _live(session, [u]))
 
 
 async def _superadmin_usernames(session: AsyncSession) -> set[str]:
@@ -117,7 +214,13 @@ async def list_entries(
     if active_only:
         stmt = stmt.where(UserDirectoryModel.is_active.is_(True))
     if tenant_id:
-        stmt = stmt.where(UserDirectoryModel.tenant_id == tenant_id)
+        # The column holds a tenant's id OR its slug, depending on who wrote the
+        # row (a tenant admin's write stores their claim's spelling); match
+        # both, or a tenant's own users go missing from its list (2026-11-09).
+        from velaris_shared.tenancy.identity import resolve_tenant
+        resolved = await resolve_tenant(session, tenant_id)
+        spellings = {str(tenant_id)} | ({str(resolved[0]), str(resolved[1])} if resolved else set())
+        stmt = stmt.where(UserDirectoryModel.tenant_id.in_(sorted(spellings)))
     elif no_claim_scope is not None:
         from sqlalchemy import or_ as _or
         stmt = stmt.where(_or(UserDirectoryModel.tenant_id.is_(None),
@@ -142,7 +245,8 @@ async def list_entries(
     rows = res.scalars().all()
     if access_group_id:
         rows = [u for u in rows if access_group_id in (u.access_group_ids or [])][:limit]
-    return [_to_response(u) for u in rows]
+    live = await _live(session, list(rows))
+    return [_to_response(u, live) for u in rows]
 
 
 @router.get("/{user_id}", response_model=UserDirectoryResponse)
@@ -155,7 +259,7 @@ async def get_entry(
     u = (await session.execute(q)).scalar_one_or_none()
     if u is None:
         raise HTTPException(404, "User not found")
-    return _to_response(u)
+    return _to_response(u, await _live(session, [u]))
 
 
 async def _sync_auth_active(session: AsyncSession, user_id: str, is_active: bool) -> None:
@@ -179,6 +283,12 @@ async def update_entry(
     if u is None:
         raise HTTPException(404, "User not found")
     prev_active = u.is_active
+    live = (await _live(session, [u])).get(u.user_id)
+    sent = body.model_fields_set
+    if "tenant_id" in sent:
+        await _move_tenant(session, user, u, body.tenant_id)
+    if live is not None and "roles" in sent and sorted(body.roles) != sorted(live[0]):
+        await _set_account_roles(session, user, u, body.roles)
     u.email = body.email
     u.display_name = body.display_name
     u.manager_user_id = body.manager_user_id
@@ -191,7 +301,92 @@ async def update_entry(
     if prev_active != body.is_active:
         await _sync_auth_active(session, user_id, body.is_active)
     await session.flush()
-    return _to_response(u)
+    return _to_response(u, await _live(session, [u]))
+
+
+async def _move_tenant(session: AsyncSession, actor: AuthenticatedUser,
+                       row: UserDirectoryModel, requested: Optional[str]) -> None:
+    """Put a user in another tenant — the tenant sign-in gives them (2026-11-09).
+
+    Until now nothing could: PATCH ignored `tenant_id`, and the screens that
+    looked as if they set it (an access group's tenant, Tenants → Members) are
+    not what sign-in reads. Only the platform operator moves people between
+    tenants; a tenant's admin sending their own row's tenant back is a no-op.
+    Every directory row of the account moves, so sign-in's precedence cannot
+    pick a stale one. Refused while the user is in another tenant's access
+    group — that membership would otherwise follow them across.
+    """
+    from velaris_shared.tenancy import home
+    from velaris_shared.tenancy.identity import (
+        DEFAULT_TENANT, is_platform_operator, resolve_tenant, same_tenant,
+    )
+
+    target = (requested or "").strip() or None
+    if await same_tenant(session, row.tenant_id or DEFAULT_TENANT, target or DEFAULT_TENANT) \
+            and await same_tenant(session, target or DEFAULT_TENANT, row.tenant_id or DEFAULT_TENANT):
+        return
+    if not await is_platform_operator(session, actor):
+        raise HTTPException(403, "Only the platform operator may move a user to another tenant.")
+    idents_self = {i for i in (actor.user_id, actor.username, getattr(actor, "email", None)) if i}
+    if row.user_id in idents_self:
+        # Moving yourself out of the default tenant ends your operator powers
+        # mid-session; another operator (or superadmin) must do it.
+        raise HTTPException(409, "You cannot move your own account to another tenant.")
+    if target is not None:
+        resolved = await resolve_tenant(session, target)
+        if resolved is None:
+            raise HTTPException(422, f"No tenant '{target}'.")
+        from velaris_shared.tenancy.limits import TenantLimitError, require_user_room
+        try:
+            await require_user_room(session, target)
+        except TenantLimitError as exc:
+            raise HTTPException(403, str(exc)) from exc
+    idents = await home.account_identifiers(session, row.user_id)
+    clash = await home.groups_outside(session, idents, target or DEFAULT_TENANT)
+    if clash:
+        raise HTTPException(409, "Remove the user from these access groups of another tenant "
+                                 "first: " + ", ".join(sorted(g.name for g in clash)))
+    for r in await home.directory_rows(session, idents):
+        r.tenant_id = target
+    await _bump_authz(session, actor, f"user.tenant:{row.user_id}")
+
+
+async def _bump_authz(session: AsyncSession, actor: AuthenticatedUser, reason: str) -> None:
+    """Answers are cached 30 s in every service; a move or a role change must
+    not keep working for that long (the same rule as access-group edits)."""
+    from velaris_shared.hxguard import generation as _gen
+    hxguard.invalidate_cache()
+    await _gen.bump(session, reason=reason, actor=actor.user_id)
+
+
+async def _set_account_roles(session: AsyncSession, actor: AuthenticatedUser,
+                             row: UserDirectoryModel, roles: list[str]) -> None:
+    """A role edit on this screen changes the account's roles — what the token
+    carries (2026-11-09; before, it wrote a column nothing reads). The same
+    rules as `PATCH /auth/real/users/{id}`, which it stands in for."""
+    from user_service.api.routers.auth_real import (
+        _assert_can_modify, _assert_role_grant, _target_in_reach,
+    )
+
+    conds = [HelixUserModel.username == row.user_id, HelixUserModel.email == row.user_id]
+    try:
+        conds.append(HelixUserModel.id == uuid.UUID(str(row.user_id)))
+    except ValueError:
+        pass
+    from sqlalchemy import or_
+    acct = (await session.execute(select(HelixUserModel).where(or_(*conds)))).scalars().first()
+    if acct is None:
+        return
+    if not hxguard.user_allows(actor, "identity.users.write"):
+        raise HTTPException(403, "Changing a user's roles needs identity.users.write.")
+    await _target_in_reach(session, actor, acct)
+    _assert_can_modify(actor, acct)
+    _assert_role_grant(actor, roles, acct.roles)
+    if "superadmin" in (acct.roles or []) and "superadmin" not in roles:
+        raise HTTPException(403, "Cannot remove superadmin role via API.")
+    acct.roles = list(roles)
+    acct.updated_at = datetime.now(timezone.utc)
+    await _bump_authz(session, actor, f"user.roles:{row.user_id}")
 
 
 @router.delete("/{user_id}", status_code=204)

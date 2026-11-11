@@ -668,6 +668,29 @@ async def add_member(
         existing.is_primary = body.is_primary
         m = existing
     else:
+        # A group of tenant A takes only tenant A's people (2026-11-09). Joining
+        # a group never moved anyone: sign-in takes the tenant from the user's
+        # directory row, so a default-tenant `admin` put in a tenant's group
+        # stayed the install's operator and saw every tenant. The operator too
+        # is refused — the mismatch is the defect, whoever makes it. Existing
+        # memberships are left as they are.
+        if g.tenant_id:
+            from velaris_shared.tenancy.home import home_tenant
+            from velaris_shared.tenancy.identity import same_tenant
+            home = await home_tenant(session, body.operator_id)
+            if home is None:
+                # Nobody by this id yet. Only the operator may record a
+                # membership ahead of the person (checked when their account is
+                # made); a tenant's admin could otherwise pre-seed an id that is
+                # later created in ANOTHER tenant.
+                from velaris_shared.tenancy.identity import is_platform_operator
+                if not await is_platform_operator(session, current_user):
+                    raise HTTPException(422, f"No user '{body.operator_id}' in your tenant.")
+            elif not await same_tenant(session, g.tenant_id, home):
+                raise HTTPException(422, (
+                    f"{body.operator_id} is in tenant '{home}', and this access group "
+                    "belongs to another tenant. Set the user's tenant in User "
+                    "Directory first."))
         m = OperatorAccessGroupModel(
             operator_id=body.operator_id,
             access_group_id=uuid.UUID(group_id),
@@ -702,6 +725,19 @@ async def remove_member(
             OperatorAccessGroupModel.access_group_id == uuid.UUID(group_id),
         )
     )).scalar_one_or_none()
+    if m is None:
+        # The membership may name the same person by account id or email (SSO
+        # provisioning does); User Directory removes by username (2026-11-09).
+        from velaris_shared.tenancy.home import account_identifiers
+        m = (await session.execute(
+            select(OperatorAccessGroupModel).where(
+                OperatorAccessGroupModel.operator_id.in_(
+                    await account_identifiers(session, operator_id)),
+                OperatorAccessGroupModel.access_group_id == uuid.UUID(group_id),
+            )
+        )).scalars().first()
+        if m is not None:
+            operator_id = m.operator_id
     if m:
         # Checked BEFORE the delete: afterwards there may be nobody left to
         # authorise putting it back (§6.1 of the privilege-authz design).

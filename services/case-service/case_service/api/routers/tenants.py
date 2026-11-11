@@ -205,6 +205,10 @@ async def permanently_delete_tenant(
     # Its cases go with it — not while one is under a legal hold (Oct item 13).
     from case_service.legal_hold import service as _legal_hold
     await _legal_hold.require_tenant_free(session, tenant.id, "permanently deleted")
+    # its cases, case types, forms… first: their foreign keys to `tenants` do not
+    # cascade, so a tenant with cases could not be deleted at all (2026-11-10)
+    from case_service.compliance.erasure import erase_tenant_data
+    await erase_tenant_data(session, tenant.id, actor=f"user:{getattr(user, 'user_id', '')}")
     await session.delete(tenant)
     await session.commit()
 

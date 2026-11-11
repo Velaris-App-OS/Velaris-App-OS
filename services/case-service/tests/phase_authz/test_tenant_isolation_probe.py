@@ -329,7 +329,13 @@ async def test_probe(api):
     from user_service.main import app as user_app
     routes = [r for r in [*app.routes, *user_app.routes] if isinstance(r, APIRoute)
               and re.search(r"\{", r.path)
-              and not r.path.startswith(("/api/v1/portal/", "/api/v1/broker/"))]
+              and not r.path.startswith(("/api/v1/portal/", "/api/v1/broker/"))
+              # /internal/* is never a tenant-facing route: the gateway refuses it
+              # (live-checked 2026-11-10: 404 for GET/POST/DELETE) and each router
+              # demands its own secret (internal service / demo). The test gateway
+              # already refused user-service's; case-service's demo door is
+              # called here directly, so it is left out explicitly.
+              and not r.path.startswith("/internal/")]
     order = {"GET": 0, "POST": 1, "PUT": 1, "PATCH": 1, "DELETE": 2}
     jobs = []
     for r in routes:

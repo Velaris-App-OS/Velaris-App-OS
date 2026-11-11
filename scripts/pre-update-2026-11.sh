@@ -47,7 +47,8 @@ esac
 VELARIS_DIR="${VELARIS_DIR:-$(pwd)}"
 ENV_FILE="$VELARIS_DIR/.env"
 [ -f "$ENV_FILE" ] || { echo "✗ No .env in $VELARIS_DIR — run this from the install directory." >&2; exit 1; }
-get_env() { grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^"//; s/"$//'; }
+# A missing key is empty, never a failure (pipefail + grep no-match ended the script; 2026-11-09).
+get_env() { { grep -E "^${1}=" "$ENV_FILE" 2>/dev/null || true; } | tail -1 | cut -d= -f2- | sed 's/^"//; s/"$//'; }
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="$VELARIS_DIR/.backups"

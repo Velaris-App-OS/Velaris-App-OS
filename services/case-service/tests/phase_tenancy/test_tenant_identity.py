@@ -211,3 +211,23 @@ class TestActorIdentity:
             row = await self._user(db)
             identity.clear_actor_cache()
             assert await identity.actor_uuid(db, caller) == row.id
+
+
+async def test_a_tenant_created_after_a_miss_is_found_at_once():
+    """Live run 2026-11-10: case-service looked a trial up just before
+    user-service created it; the cached "no such tenant" made the new trial's
+    case list answer 403 for up to a minute. Only found tenants are cached."""
+    import uuid as _uuid
+    from velaris_shared.db.models import TenantModel
+    from velaris_shared.tenancy import identity
+    from tests.conftest import TestSessionFactory
+    slug = f"late-{_uuid.uuid4().hex[:6]}"
+    identity.clear_cache()
+    async with TestSessionFactory() as db:
+        assert await identity.resolve_tenant(db, slug) is None
+    async with TestSessionFactory() as db:      # another service creates it
+        db.add(TenantModel(id=_uuid.uuid4(), slug=slug, name="Late"))
+        await db.commit()
+    async with TestSessionFactory() as db:
+        hit = await identity.resolve_tenant(db, slug)
+    assert hit is not None and hit[1] == slug

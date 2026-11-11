@@ -271,20 +271,28 @@ async def _owner(session: AsyncSession, spec: Owned, raw: Any, depth: int = 0):
 async def _user_tenants(session: AsyncSession, user_id: str) -> list:
     """Every tenant this user belongs to: their directory row's, and each
     membership's. A user in two tenants is reachable from either."""
-    out = []
-    row = (await session.execute(
-        select(M.UserDirectoryModel).where(M.UserDirectoryModel.user_id == str(user_id))
-    )).scalars().first()
-    if row is not None:
-        # A NULL tenant on a user is the platform's default tenant — the rule
-        # everywhere else ("no tenant claim = default"). Treating it as "no
-        # owner" let another tenant's admin edit, or adopt, platform users.
-        from velaris_shared.tenancy.identity import DEFAULT_TENANT
+    from velaris_shared.tenancy import home
+    from velaris_shared.tenancy.identity import DEFAULT_TENANT
 
-        out.append(row.tenant_id or DEFAULT_TENANT)
+    out = []
+    # Every name the person goes by (account id, username, email): a row made
+    # by a tenant admin's register is keyed by the account id, and a lookup by
+    # username alone found nothing and let anyone through (2026-11-09).
+    idents = await home.account_identifiers(session, str(user_id))
+    rows = await home.directory_rows(session, idents)
+    # A NULL tenant on a user is the platform's default tenant — the rule
+    # everywhere else ("no tenant claim = default"). Treating it as "no
+    # owner" let another tenant's admin edit, or adopt, platform users.
+    out += [r.tenant_id or DEFAULT_TENANT for r in rows]
+    if not rows and len(idents) > 1:
+        # An ACCOUNT with no directory row is the default tenant's too. Before
+        # 2026-11-09 it was nobody's, so any tenant's admin could create its
+        # row in their own tenant — adopting, say, an operator account made
+        # through the API — and then manage it.
+        out.append(DEFAULT_TENANT)
     out += list((await session.execute(
         select(M.TenantMembershipModel.tenant_id).where(
-            M.TenantMembershipModel.user_id == str(user_id)))).scalars().all())
+            M.TenantMembershipModel.user_id.in_(idents)))).scalars().all())
     return out
 
 

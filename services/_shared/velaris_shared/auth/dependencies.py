@@ -135,6 +135,20 @@ async def _enrich_with_access_group(
     if dir_row and dir_row.tenant_id:
         user.tenant_id = dir_row.tenant_id
 
+    # A group owned by another tenant is never applied (2026-11-09): a person
+    # carries their OWN tenant's groups only. Written memberships are checked
+    # at every write path; this catches any made before those checks.
+    if oag_rows and "superadmin" not in (user.roles or []):
+        from velaris_shared.tenancy.identity import DEFAULT_TENANT, same_tenant
+        owners = dict((await session.execute(
+            select(AccessGroupModel.id, AccessGroupModel.tenant_id).where(
+                AccessGroupModel.id.in_([r.access_group_id for r in oag_rows]))
+        )).all())
+        home = getattr(user, "tenant_id", None) or DEFAULT_TENANT
+        oag_rows = [r for r in oag_rows
+                    if owners.get(r.access_group_id) is None
+                    or await same_tenant(session, owners[r.access_group_id], home)]
+
     if not oag_rows:
         return user  # no P37 groups assigned yet — legacy flat roles still work
 

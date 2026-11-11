@@ -133,7 +133,16 @@ async def resolve_tenant(
     )
     row = (await session.execute(stmt.limit(1))).scalars().first()
     resolved = (row.id, row.slug) if row is not None else None
-    _cache[key] = (time.monotonic() + _CACHE_TTL_SECONDS, resolved)
+    # Only a FOUND tenant is cached (2026-11-10). Tenants are created by
+    # user-service while every other service keeps its own cache, so a cached
+    # "no such tenant" outlived the tenant's creation by up to a minute: the
+    # live run's trial answered "'demo-…' is not a tenant on this platform" on
+    # the case list right after it was made. An unknown name is looked up again
+    # each time (one indexed query).
+    if resolved is not None:
+        _cache[key] = (time.monotonic() + _CACHE_TTL_SECONDS, resolved)
+    else:
+        _cache.pop(key, None)
     return resolved
 
 
